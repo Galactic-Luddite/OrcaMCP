@@ -332,7 +332,7 @@ FacetAssignment assign_connected(const TriangleMesh& mesh,
     // seed_fill_select_triangles is keyed on the start facet's flag, and asking for a recompute
     // is what a one-shot call means.
     selector.seed_fill_select_triangles(seed_point_local, seed_facet, no_translate,
-                                        TriangleSelector::ClippingPlane(), float(angle_deg), 0.f, true);
+                                        TriangleSelector::ClippingPlane(), float(angle_deg), 0.f, Vec3f::UnitZ(), true);
 
     for (int facet : selector.selected_original_facets()) {
         out.states[facet] = state;

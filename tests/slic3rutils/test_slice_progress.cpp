@@ -47,8 +47,8 @@ TEST_CASE("the stage is the last status text that came with a percentage", "[orc
 TEST_CASE("the stage is kept without the spaces the status text arrives with", "[orcamcp][SliceProgress]")
 {
     begin_slicing_run();
-    note_slicing_status(slicing_run_generation(), 35, " plate 1:Generating infill toolpath ");
-    CHECK(slicing_stage_text() == "plate 1:Generating infill toolpath");
+    note_slicing_status(slicing_run_generation(), 35, " Slicing plate 1: Generating infill toolpath ");
+    CHECK(slicing_stage_text() == "Slicing plate 1: Generating infill toolpath");
     begin_slicing_run();
 }
 

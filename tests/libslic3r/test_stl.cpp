@@ -1,7 +1,16 @@
 #include <catch2/catch_all.hpp>
+#include <algorithm>
+#include "libslic3r/TriangleMesh.hpp"
+#include <cstdint>
+#include <ios>
+#include <string>
+#include "libslic3r/Point.hpp"
 
+#include <catch2/catch_test_macros.hpp>
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Format/STL.hpp"
+#include "test_utils.hpp"
+#include <boost/nowide/fstream.hpp>
 
 #include <boost/filesystem.hpp>
 
@@ -104,11 +113,6 @@ std::string binary_cube_stl(float size, const std::string& header = "binary cube
     return bytes;
 }
 
-bool all_below_128(const std::string& bytes)
-{
-    return std::all_of(bytes.begin() + 80, bytes.end(), [](char c) { return static_cast<unsigned char>(c) < 128; });
-}
-
 size_t facets_loaded(const std::string& bytes, const char* name)
 {
     const boost::filesystem::path path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path(std::string("%%%%-") + name);
@@ -124,18 +128,6 @@ size_t facets_loaded(const std::string& bytes, const char* name)
 
 } // namespace
 
-// admesh took a file for ASCII when the first 128 bytes after its header were all below 128, and a small binary STL
-// at whole millimetres with zero normals has no byte above: it was read as text and loaded no geometry. A binary STL
-// is exactly its 80-byte label, its facet count and 50 bytes per facet, which decides first.
-TEST_CASE("A binary STL whose bytes are all below 128 loads as binary", "[stl]")
-{
-    for (const float size : {10.f, 15.f}) {
-        const std::string bytes = binary_cube_stl(size);
-        REQUIRE(all_below_128(bytes));
-        CHECK(facets_loaded(bytes, "cube.stl") == 12);
-    }
-}
-
 // A binary STL whose label starts with "solid", as some exporters write it, still loads as binary, and ASCII STLs as ASCII.
 TEST_CASE("A binary STL labelled solid, and ASCII STLs, load as what they are", "[stl]")
 {
@@ -149,5 +141,26 @@ TEST_CASE("A binary STL labelled solid, and ASCII STLs, load as what they are", 
     CHECK(facets_loaded(ascii, "ascii.stl") == 4);
     Slic3r::Model model;
     REQUIRE(Slic3r::load_stl(stl_path("ASCII/20mmbox-LF.stl").c_str(), &model));
-    CHECK(model.objects.front()->volumes.front()->mesh().facets_count() == 12);
+    CHECK(model.objects.front()->volumes.front()->mesh().facets_count() == 12);}
+
+TEST_CASE("A binary STL whose facet bytes never exceed 127 is read as binary", "[stl]")
+{
+    const indexed_triangle_set cube = its_make_cube(10., 10., 10.);
+    std::string stl(80, '\0');
+    const auto append = [&stl](const auto &value) { stl.append(reinterpret_cast<const char *>(&value), sizeof(value)); };
+    append(uint32_t(cube.indices.size()));
+    const stl_normal zero_normal = stl_normal::Zero();
+    for (const stl_triangle_vertex_indices &facet : cube.indices) {
+        append(zero_normal);
+        for (int i = 0; i < 3; ++i)
+            append(cube.vertices[facet[i]]);
+        append(uint16_t(0));
+    }
+    REQUIRE(std::none_of(stl.begin() + 84, stl.begin() + 84 + 128, [](unsigned char c) { return c > 127; }));
+
+    ScopedTemporaryFile file(".stl");
+    boost::nowide::ofstream(file.string(), std::ios::binary) << stl;
+    Model model;
+    REQUIRE(load_stl(file.string().c_str(), &model));
+    REQUIRE(is_approx(model.objects.front()->volumes.front()->mesh().size(), Vec3d(10, 10, 10)));
 }

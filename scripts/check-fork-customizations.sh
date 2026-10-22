@@ -191,10 +191,14 @@ check "release passes the Windows compiler" \
     "Without it the released binary is built differently from the one CI tested."
 
 # --- MCP surface ----------------------------------------------------------------------------
-check "Connect AI strings are present" \
-    resources/web/data/text.js \
-    't12[78]' \
-    "The home page's Connect AI / Setup MCP agents entry points."
+check "Connect AI entry is on the home page" \
+    resources/web/homepage/index.html \
+    'data-i18n="connect_ai"' \
+    "The home page's Connect AI / Setup MCP agents entry point."
+check "Connect AI strings are in the home page's string table" \
+    src/slic3r/GUI/WebViewDialog.cpp \
+    '"setup_mcp_agents"' \
+    "Upstream translates the home page from WebViewDialog.cpp's table (resources/web/data/text.js is gone)."
 
 check "unit tests check out the tools reference" \
     .github/workflows/unit_tests.yml \

@@ -132,8 +132,8 @@ std::vector<NextStep> mesh_repair_next_steps(const ModelObject& object, int obje
         return {};
     const int   edges = health.open_edges();
     std::string why   = object_label(object, object_id) + " has " + std::to_string(edges) + (edges == 1 ? " open edge" : " open edges") +
-                      ": repair_mesh closes its holes, after splitting each volume into its shells and dropping those with no "
-                      "volume; painting is cleared unless keep_painting keeps it";
+                      ": repair_mesh fills its holes and welds its cracks, each volume in place; painting is cleared unless "
+                      "keep_painting keeps it";
     return {{"repair_mesh", std::move(why), {{"object_id", object_id}}}};
 }
 

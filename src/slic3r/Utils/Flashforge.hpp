@@ -14,6 +14,8 @@
 #include "FlashforgeLocalApi.hpp"
 #include "../../libslic3r/PrintConfig.hpp"
 
+namespace Slic3r { enum GCodeFlavor : unsigned char; }
+
 namespace Slic3r {
 class DynamicPrintConfig;
 class Http;
@@ -54,6 +56,9 @@ public:
     const std::string&         local_api_host() const { return m_local_api_host; }
     // `product_id`, when given, receives the machine's `pid` from the same answer (0 when it gives none).
     bool                       fetch_material_slots(std::vector<FlashforgeMaterialSlot>& slots, bool* supports_material_station, wxString& msg, int* product_id = nullptr) const;
+    // Parses a local API "detail" reply. Returns false when the body is not valid JSON.
+    static bool                parse_material_slots(const std::string& body, std::vector<FlashforgeMaterialSlot>& slots, bool* supports_material_station,
+                                                    int* product_id = nullptr);
     static bool                discover_printers(std::vector<FlashforgeDiscoveredPrinter>& printers, wxString& msg, int timeout_ms = 10000, int idle_timeout_ms = 1500, int max_retries = 3);
 
     // Local API status and control. All are safe to call off the main thread; all return false and fill `msg` on failure.
@@ -134,7 +139,6 @@ private:
     // get_printer_status. Nothing without an Obico. Bounded to a few seconds per step.
     void hand_slice_table_to_obico_agent(const std::string& file_name, const FlashforgeJobProgress::SliceTable& table) const;
     std::string make_http_url(const std::string& path) const;
-    int  get_err_code_from_body(const std::string &body) const;
     bool connect(wxString& msg) const;
     bool start_print(wxString& msg, const std::string& filename) const;
 };

@@ -1,17 +1,22 @@
 #ifndef slic3r_PyPluginTrampoline_hpp_
 #define slic3r_PyPluginTrampoline_hpp_
 
+#include "libslic3r/LifecycleEvents.hpp"
 #include <pybind11/embed.h>
 
 #include <boost/log/trivial.hpp>
 
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 #include "PythonPluginInterface.hpp"
 #include "PythonInterpreter.hpp"
 #include "PluginFsUtils.hpp"
 #include "PluginAuditManager.hpp"
+#include <pybind11/pybind11.h>
+#include <pybind11/gil.h>
+#include <pybind11/pytypes.h>
 
 // Trampoline variants of pybind11's override macros. Every C++->Python plugin call crosses a
 // trampoline method, so this single boundary is where we (1) log the full Python traceback and
@@ -97,9 +102,9 @@ public:
     // mistake), both fall back to the base's empty object rather than writing `"cap_config": null`.
     nlohmann::json get_default_config() const override
     {
+        pybind11::gil_scoped_acquire gil;
         ORCA_PY_AUDIT_SCOPE();
         try {
-            pybind11::gil_scoped_acquire gil;
             pybind11::function override = pybind11::get_override(static_cast<const Base*>(this), "get_default_config");
             if (!override)
                 return Base::get_default_config();

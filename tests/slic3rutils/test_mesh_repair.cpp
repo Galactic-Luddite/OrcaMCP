@@ -17,9 +17,10 @@
 #include <vector>
 
 // The object list's Repair, split in two so no thread but the main one changes the model: a plan
-// worked out on the meshes alone, and upstream's loop applying it. The object list's Repair, the cut
-// gizmo and MCP's repair_mesh all run it, so what is checked here is what each of them does. The
-// meshes are built with known defects: a hole, a flat stray sheet, a closed stray shell.
+// worked out on the meshes alone (upstream's repair_mesh on copies), and the end of upstream's
+// ModelVolume::repair applying it. The object list's Repair, the cut gizmo and MCP's repair_mesh all run
+// it, so what is checked here is what each of them does. The meshes are built with known defects: a
+// hole, a flat stray sheet, a closed stray shell.
 
 using namespace Slic3r;
 using namespace Slic3r::GUI::OrcaMCP;
@@ -98,75 +99,66 @@ TEST_CASE("A hole is closed, and the object keeps its one volume", "[MeshRepair]
     REQUIRE(open_edges(*f.object) == 3);
 
     CgalRepairPlan plan = planned(*f.object);
-    CHECK(plan.parts_repaired == 1);
-    CHECK(plan.parts_split == 0);
-    CHECK(plan.parts_dropped == 0);
+    CHECK(plan.volumes_changed() == 1);
+    CHECK(plan.totals().filled_holes >= 1);
+    CHECK(plan.error.empty());
     CHECK_FALSE(plan.changes_nothing());
 
     const CgalRepairResult result = apply_cgal_repair(*f.object, false, plan);
     CHECK(result.error.empty());
-    CHECK(result.parts_repaired_here == 0);
+    CHECK(result.volumes_changed == 1);
     CHECK(f.object->volumes.size() == 1);
     CHECK(open_edges(*f.object) == 0);
     // The repaired mesh records no repairs, so the object list shows no warning for it.
     CHECK_FALSE(f.object->get_object_stl_stats().repaired());
 }
 
-TEST_CASE("A flat stray sheet is dropped, and the rest stays where it was", "[MeshRepair]")
+TEST_CASE("A flat stray sheet is removed from its volume, and the rest stays where it was", "[MeshRepair]")
 {
     OnePartObject f{TriangleMesh(cube_with(flat_square()))};
     REQUIRE(open_edges(*f.object) == 4);
     REQUIRE(f.object->volumes.front()->mesh().stats().number_of_parts == 2);
+    const Vec3d cube_min = f.object->instance_bounding_box(0).min;
 
     CgalRepairPlan plan = planned(*f.object);
-    CHECK(plan.parts_split == 2);
-    CHECK(plan.parts_dropped == 1);
-    CHECK(plan.parts_repaired == 0);
+    CHECK(plan.totals().removed_shells == 1);
 
-    const CgalRepairResult result = apply_cgal_repair(*f.object, false, plan);
-    CHECK(result.error.empty());
+    REQUIRE(apply_cgal_repair(*f.object, false, plan).error.empty());
     REQUIRE(f.object->volumes.size() == 1);
     CHECK(open_edges(*f.object) == 0);
     CHECK(f.object->volumes.front()->mesh().stats().number_of_parts == 1);
-    // The cube's volume transform moved into the instance; on the plate the cube did not move.
-    check_same_box(f.object->bounding_box_exact(), BoundingBoxf3(Vec3d::Zero(), Vec3d(10., 10., 10.)));
+    CHECK_THAT(f.object->instance_bounding_box(0).min.z(), WithinAbs(cube_min.z(), 1e-4));
 }
 
-TEST_CASE("A closed stray shell becomes a volume of its own and is not deleted", "[MeshRepair]")
+TEST_CASE("A closed stray shell stays in its volume, and is not split off", "[MeshRepair]")
 {
-    OnePartObject     f{TriangleMesh(cube_with(its_make_cube(1.0, 1.0, 1.0)))};
-    const BoundingBoxf3 before = f.object->bounding_box_exact();
+    OnePartObject f{TriangleMesh(cube_with(its_make_cube(1.0, 1.0, 1.0)))};
+    const auto    mesh_before = f.object->volumes.front()->mesh_ptr();
 
     CgalRepairPlan plan = planned(*f.object);
-    CHECK(plan.parts_split == 2);
-    CHECK(plan.parts_dropped == 0);
-    CHECK(plan.parts_repaired == 0);
+    CHECK(plan.changes_nothing());
+    CHECK(plan.error.empty());
 
-    const CgalRepairResult result = apply_cgal_repair(*f.object, false, plan);
-    CHECK(result.error.empty());
-    REQUIRE(f.object->volumes.size() == 2);
-    const std::string name = f.object->volumes[0]->name.substr(0, f.object->volumes[0]->name.size() - 2);
-    CHECK(f.object->volumes[0]->name == name + "_1");
-    CHECK(f.object->volumes[1]->name == name + "_2");
-    for (const ModelVolume* volume : f.object->volumes) {
-        CHECK(volume->mesh().stats().open_edges == 0);
-        CHECK(volume->config.has("extruder")); // each part keeps the filament the whole had
-    }
-    check_same_box(f.object->bounding_box_exact(), before);
+    CHECK(apply_cgal_repair(*f.object, false, plan).error.empty());
+    REQUIRE(f.object->volumes.size() == 1);
+    CHECK(f.object->volumes.front()->mesh_ptr() == mesh_before);
 }
 
 TEST_CASE("A closed one-shell mesh has nothing to repair, and its recorded repairs stay", "[MeshRepair]")
 {
     OnePartObject f{TriangleMesh(its_make_cube(10.0, 10.0, 10.0), reversed_facets(1))};
     const auto    mesh_before = f.object->volumes.front()->mesh_ptr();
+    const ObjectID id_before  = f.object->volumes.front()->id();
 
     CgalRepairPlan plan = planned(*f.object);
     CHECK(plan.changes_nothing());
-    CHECK_FALSE(plan.leaves_no_model_part());
 
-    // The object list's Repair still applies it: the mesh is left as it was.
-    CHECK(apply_cgal_repair(*f.object, false, plan).error.empty());
+    // The object list's Repair still applies it: the volume is left as it was.
+    const CgalRepairResult result = apply_cgal_repair(*f.object, false, plan);
+    CHECK(result.error.empty());
+    CHECK(result.volumes_changed == 0);
     CHECK(f.object->volumes.front()->mesh_ptr() == mesh_before);
+    CHECK(f.object->volumes.front()->id() == id_before);
     CHECK(f.object->get_object_stl_stats().repaired());
 }
 
@@ -177,19 +169,19 @@ TEST_CASE("Repairing one volume leaves the object's other volumes as they were",
     const auto     untouched_mesh = f.object->volumes[0]->mesh_ptr();
     const ObjectID untouched_id   = f.object->volumes[0]->id();
 
-    const CgalRepairResult result = repaired(*f.object, 1);
+    CgalRepairPlan plan = planned(*f.object, 1);
+    CHECK(plan.volume_index_in(*f.object) == 1);
+    const CgalRepairResult result = apply_cgal_repair(*f.object, false, plan);
     CHECK(result.error.empty());
     REQUIRE(f.object->volumes.size() == 2);
     CHECK(f.object->volumes[0]->mesh_ptr() == untouched_mesh);
     CHECK(f.object->volumes[0]->id() == untouched_id);
     CHECK(f.object->volumes[1]->mesh().stats().open_edges == 0);
-    CHECK(result.first_volume == 1);
-    CHECK(result.last_volume == 1);
 }
 
 // The object list's Repair used to repair in place on its worker thread; MCP never did. Both now plan
-// first and apply after, and this is what holds them to upstream's result: the planned repair and the
-// repair done in place, part by part as upstream did it, build the same object.
+// first and apply after, and this is what holds them to upstream's result: the planned repair and
+// upstream's ModelVolume::repair, volume by volume, build the same object.
 TEST_CASE("The planned repair builds the same object as the repair done in place", "[MeshRepair]")
 {
     const std::string fixture       = GENERATE(as<std::string>{}, "hole", "flat sheet", "closed stray shell", "holed stray shell", "clean");
@@ -197,20 +189,15 @@ TEST_CASE("The planned repair builds the same object as the repair done in place
     INFO("fixture: " << fixture << ", keep_painting: " << keep_painting);
     OnePartObject planned_object{TriangleMesh(fixture_mesh(fixture))};
     OnePartObject in_place_object{TriangleMesh(fixture_mesh(fixture))};
-    // Colour on the facets of the first shell only (the first 12 or 11), so parts split apart carry
-    // different painting; support everywhere.
+    // Colour on the facets of the first shell only (the first 12 or 11); support everywhere.
     for (ModelObject* object : {planned_object.object, in_place_object.object})
         paint_first_volume(*object, [](size_t facet) { return facet < 11; });
 
-    CgalRepairPlan         plan = planned(*planned_object.object, -1, keep_painting);
+    CgalRepairPlan         plan           = planned(*planned_object.object, -1, keep_painting);
     const CgalRepairResult planned_result = apply_cgal_repair(*planned_object.object, keep_painting, plan);
-    CgalRepairPlan         nothing_planned{capture_cgal_repair(*in_place_object.object, -1, keep_painting)};
-    const CgalRepairResult in_place_result = apply_cgal_repair(*in_place_object.object, keep_painting, nothing_planned);
-
     CHECK(planned_result.error.empty());
-    CHECK(in_place_result.error.empty());
-    CHECK(planned_result.parts_repaired_here == 0); // the plan foresaw every part the loop repaired
-    CHECK(in_place_result.parts_repaired_here == plan.parts_repaired);
+    for (ModelVolume* volume : in_place_object.object->volumes)
+        volume->repair(keep_painting);
 
     const ModelObject& a = *planned_object.object;
     const ModelObject& b = *in_place_object.object;
@@ -223,38 +210,32 @@ TEST_CASE("The planned repair builds the same object as the repair done in place
         CHECK(a.volumes[i]->get_matrix().isApprox(b.volumes[i]->get_matrix()));
         CHECK(a.volumes[i]->get_convex_hull().its.vertices == b.volumes[i]->get_convex_hull().its.vertices);
         CHECK(a.volumes[i]->get_convex_hull().its.indices == b.volumes[i]->get_convex_hull().its.indices);
-        // The painting the plan remapped off the main thread is the painting upstream's loop remaps.
+        // The painting the plan remapped off the main thread is the painting upstream's repair remaps.
         CHECK(a.volumes[i]->is_mm_painted() == b.volumes[i]->is_mm_painted());
         CHECK(a.volumes[i]->is_fdm_support_painted() == b.volumes[i]->is_fdm_support_painted());
         CHECK((a.volumes[i]->mmu_segmentation_facets.get_data() == b.volumes[i]->mmu_segmentation_facets.get_data()));
         CHECK((a.volumes[i]->supported_facets.get_data() == b.volumes[i]->supported_facets.get_data()));
     }
-    CHECK(a.instances.front()->get_matrix().isApprox(b.instances.front()->get_matrix()));
 }
 
-// The object list captures every selected volume before its first dialog, and repairs them one after
-// the other: the first one's split moves the volumes after it, so each is found again by its id.
-TEST_CASE("Volumes captured before any repair are each repaired by id, after an earlier split moved them", "[MeshRepair]")
+// The object list captures every selected volume before its first dialog, and applies them one after
+// the other: the first one's repair gives its volume a new id, so each is found again by its own.
+TEST_CASE("Volumes captured before any repair are each repaired by their own id", "[MeshRepair]")
 {
-    OnePartObject f{TriangleMesh(cube_with(its_make_cube(1.0, 1.0, 1.0)))};
+    OnePartObject f{TriangleMesh(cube_missing_facet())};
     f.object->add_volume(TriangleMesh(translated(cube_missing_facet(), Vec3f(40.f, 0.f, 0.f))));
-    const ObjectID holed_id = f.object->volumes[1]->id();
 
     CgalRepairPlan first  = planned(*f.object, 0);
     CgalRepairPlan second = planned(*f.object, 1);
 
     REQUIRE(apply_cgal_repair(*f.object, false, first).error.empty());
-    REQUIRE(f.object->volumes.size() == 3); // the first volume became two
-    REQUIRE(f.object->volumes[2]->id() == holed_id);
-
-    const auto               split_meshes = std::vector<std::shared_ptr<const TriangleMesh>>{f.object->volumes[0]->mesh_ptr(),
-                                                                                              f.object->volumes[1]->mesh_ptr()};
-    const CgalRepairResult   result       = apply_cgal_repair(*f.object, false, second);
+    const auto first_mesh = f.object->volumes[0]->mesh_ptr();
+    REQUIRE(second.applies_to(*f.object));
+    const CgalRepairResult result = apply_cgal_repair(*f.object, false, second);
     CHECK(result.error.empty());
-    CHECK(result.first_volume == 2);
-    CHECK(f.object->volumes[2]->mesh().stats().open_edges == 0);
-    CHECK(f.object->volumes[0]->mesh_ptr() == split_meshes[0]);
-    CHECK(f.object->volumes[1]->mesh_ptr() == split_meshes[1]);
+    CHECK(result.volumes_changed == 1);
+    CHECK(f.object->volumes[1]->mesh().stats().open_edges == 0);
+    CHECK(f.object->volumes[0]->mesh_ptr() == first_mesh);
 }
 
 TEST_CASE("A one-volume repair captured for a volume the object does not have repairs nothing", "[MeshRepair]")
@@ -290,7 +271,7 @@ void check_same_painting(const ModelObject& a, const ModelObject& b)
 }
 
 // The painting the plan remapped is the painting captured. Paint written before the repair is applied
-// -- a paint tool, a stroke in the gizmo -- is remapped in place instead, as upstream's loop would, so
+// -- a paint tool, a stroke in the gizmo -- is remapped in place instead, as upstream's repair would, so
 // the repair keeps the painting as it is when applied.
 TEST_CASE("Painting changed between capture and apply is remapped as it is when applied", "[MeshRepair]")
 {
@@ -307,27 +288,17 @@ TEST_CASE("Painting changed between capture and apply is remapped as it is when 
     REQUIRE(apply_cgal_repair(*planned_object.object, true, plan).error.empty());
 
     paint_first_volume_with(*reference.object, EnforcerBlockerType::Extruder3);
-    CgalRepairPlan nothing_planned{capture_cgal_repair(*reference.object, -1, true)};
-    REQUIRE(apply_cgal_repair(*reference.object, true, nothing_planned).error.empty());
+    reference.object->volumes.front()->repair(true);
 
     check_same_painting(*planned_object.object, *reference.object);
-    for (const ModelVolume* volume : planned_object.object->volumes)
-        CHECK(volume->is_mm_painted());
+    CHECK(planned_object.object->volumes.front()->is_mm_painted());
 }
 
-// Two volumes can hold the same mesh -- here the first volume is bit for bit the first part the second
-// one splits into -- with different painting; each part takes its own volume's.
-TEST_CASE("Parts with the same mesh in different volumes keep their own volume's painting", "[MeshRepair]")
+// Two volumes can hold the same mesh with different painting; each keeps its own.
+TEST_CASE("Volumes with the same mesh keep their own painting", "[MeshRepair]")
 {
     auto build = [](OnePartObject& f) {
-        // The second volume: a cube and a holed stray shell. The first: that cube, as the split makes it.
-        const TriangleMesh whole(cube_with(cube_missing_facet()));
-        f.object->add_volume(TriangleMesh(whole));
-        std::vector<TriangleMesh> parts = whole.split();
-        REQUIRE(parts.size() == 2);
-        f.object->volumes.front()->set_mesh(TriangleMesh(parts.front().its));
-        f.object->volumes.front()->center_geometry_after_creation();
-        // Colour: filament 2 on the first volume, 3 on the second.
+        f.object->add_volume(TriangleMesh(cube_missing_facet()));
         for (size_t v = 0; v < 2; ++v) {
             ModelVolume&     volume = *f.object->volumes[v];
             TriangleSelector colour(volume.mesh());
@@ -336,52 +307,51 @@ TEST_CASE("Parts with the same mesh in different volumes keep their own volume's
             volume.mmu_segmentation_facets.set(colour);
         }
     };
-    OnePartObject planned_object{TriangleMesh(its_make_cube(1.0, 1.0, 1.0))};
-    OnePartObject reference{TriangleMesh(its_make_cube(1.0, 1.0, 1.0))};
+    OnePartObject planned_object{TriangleMesh(cube_missing_facet())};
+    OnePartObject reference{TriangleMesh(cube_missing_facet())};
     build(planned_object);
     build(reference);
 
-    CgalRepairPlan         plan = planned(*planned_object.object, -1, true);
-    const CgalRepairResult result = apply_cgal_repair(*planned_object.object, true, plan);
-    CHECK(result.error.empty());
-    CHECK(result.parts_repaired_here == 0);
-    CgalRepairPlan nothing_planned{capture_cgal_repair(*reference.object, -1, true)};
-    REQUIRE(apply_cgal_repair(*reference.object, true, nothing_planned).error.empty());
+    CgalRepairPlan plan = planned(*planned_object.object, -1, true);
+    REQUIRE(apply_cgal_repair(*planned_object.object, true, plan).error.empty());
+    for (ModelVolume* volume : reference.object->volumes)
+        volume->repair(true);
 
-    REQUIRE(planned_object.object->volumes.size() == 3);
     check_same_painting(*planned_object.object, *reference.object);
     CHECK_FALSE((planned_object.object->volumes[0]->mmu_segmentation_facets.get_data() ==
                  planned_object.object->volumes[1]->mmu_segmentation_facets.get_data()));
 }
 
-TEST_CASE("A volume the repair drops first does not make it skip the next one", "[MeshRepair]")
+TEST_CASE("A volume no solid can be built from is left as it is, and the others are still repaired", "[MeshRepair]")
 {
     OnePartObject f{TriangleMesh(flat_square())};
     f.object->add_volume(TriangleMesh(translated(cube_missing_facet(), Vec3f(20.f, 0.f, 0.f))));
-    REQUIRE(open_edges(*f.object) == 4 + 3);
+    const auto flat_mesh = f.object->volumes[0]->mesh_ptr();
 
-    const CgalRepairResult result = repaired(*f.object);
+    CgalRepairPlan plan = planned(*f.object);
+    CHECK(plan.volumes_changed() == 1);
+    CHECK_FALSE(plan.error.empty());
+    CHECK(plan.error_volume == 0);
+
+    const CgalRepairResult result = apply_cgal_repair(*f.object, false, plan);
     CHECK(result.error.empty());
-    CHECK(result.parts_repaired_here == 0); // found in the plan although the drop gave it a new id
-    REQUIRE(f.object->volumes.size() == 1);
-    CHECK(open_edges(*f.object) == 0);
+    CHECK(result.volumes_changed == 1);
+    REQUIRE(f.object->volumes.size() == 2);
+    CHECK(f.object->volumes[0]->mesh_ptr() == flat_mesh);
+    CHECK(f.object->volumes[1]->mesh().stats().open_edges == 0);
 }
 
-TEST_CASE("A repair that would leave no part to print is refused before anything changes", "[MeshRepair]")
+TEST_CASE("An object no solid can be built from changes nothing", "[MeshRepair]")
 {
     OnePartObject f{TriangleMesh(flat_square())};
     const auto    mesh_before = f.object->volumes.front()->mesh_ptr();
 
     CgalRepairPlan plan = planned(*f.object);
-    CHECK(plan.leaves_no_model_part());
-    CHECK_FALSE(apply_cgal_repair(*f.object, false, plan).error.empty());
+    CHECK(plan.changes_nothing());
+    CHECK_FALSE(plan.error.empty());
+    CHECK(apply_cgal_repair(*f.object, false, plan).volumes_changed == 0);
     REQUIRE(f.object->volumes.size() == 1);
     CHECK(f.object->volumes.front()->mesh_ptr() == mesh_before);
-
-    // Repaired in place, part by part, the loop stops before it deletes the last part.
-    CgalRepairPlan nothing_planned{capture_cgal_repair(*f.object, -1)};
-    CHECK_FALSE(apply_cgal_repair(*f.object, false, nothing_planned).error.empty());
-    CHECK(f.object->volumes.size() == 1);
 }
 
 TEST_CASE("Painting is cleared by a repair unless it is kept", "[MeshRepair]")
@@ -396,7 +366,7 @@ TEST_CASE("Painting is cleared by a repair unless it is kept", "[MeshRepair]")
     CHECK(f.object->volumes.front()->is_mm_painted() == keep_painting);
 }
 
-TEST_CASE("A canceled plan stops between parts and applies nothing", "[MeshRepair]")
+TEST_CASE("A canceled plan applies nothing", "[MeshRepair]")
 {
     OnePartObject f{TriangleMesh(cube_with(cube_missing_facet()))};
     const auto    mesh_before = f.object->volumes.front()->mesh_ptr();
@@ -404,7 +374,7 @@ TEST_CASE("A canceled plan stops between parts and applies nothing", "[MeshRepai
     int            asked = 0;
     CgalRepairPlan plan  = plan_cgal_repair(capture_cgal_repair(*f.object, -1), {}, [&asked] { return ++asked > 1; });
     CHECK(plan.canceled);
-    CHECK(asked == 2);
+    CHECK(asked >= 2);
 
     CHECK_FALSE(apply_cgal_repair(*f.object, false, plan).error.empty());
     REQUIRE(f.object->volumes.size() == 1);
@@ -441,7 +411,9 @@ TEST_CASE("The captured object is found by its place in the model's list, and no
 
 TEST_CASE("The plan reports the progress the Repair dialog shows", "[MeshRepair]")
 {
-    OnePartObject            f{TriangleMesh(cube_with(cube_missing_facet()))};
+    OnePartObject f{TriangleMesh(cube_missing_facet())};
+    f.object->add_volume(TriangleMesh(translated(cube_missing_facet(), Vec3f(20.f, 0.f, 0.f))));
+    f.object->volumes[1]->name = "second";
     std::vector<std::string> messages;
     std::vector<unsigned>    percents;
     plan_cgal_repair(capture_cgal_repair(*f.object, -1),
@@ -452,10 +424,11 @@ TEST_CASE("The plan reports the progress the Repair dialog shows", "[MeshRepair]
                      never);
 
     REQUIRE_FALSE(messages.empty());
-    CHECK(messages.front() == "Repairing model object");
-    CHECK(std::find(messages.begin(), messages.end(), "Split into 2 parts") != messages.end());
+    // With several volumes, the one being repaired, as upstream's dialog names it.
+    CHECK(std::find(messages.begin(), messages.end(), "second") != messages.end());
     CHECK(messages.back() == "Repair finished");
     CHECK(percents.back() == 100);
+    CHECK(std::is_sorted(percents.begin(), percents.end()));
 }
 
 // ---- repair_mesh's decisions and answer ---------------------------------------------------------
@@ -507,15 +480,16 @@ TEST_CASE("repair_mesh applies only a finished plan that changes something, in t
     // The one step that changes the object is the only one with an undo snapshot.
     CHECK(repair_step(planned(*clean.object), false) == RepairStep::nothing_to_repair);
     CHECK(repair_step(planned(*hole.object), true) == RepairStep::timed_out);
-    CHECK(repair_step(planned(*sheet.object), false) == RepairStep::leaves_nothing);
+    CHECK(repair_step(planned(*sheet.object), false) == RepairStep::failed);
 
     CgalRepairPlan canceled = planned(*hole.object);
     canceled.canceled       = true;
     CHECK(repair_step(canceled, false) == RepairStep::timed_out);
-    CgalRepairPlan failed = planned(*hole.object);
-    failed.error          = "Repair failed: mesh still open after hole filling.";
-    failed.error_volume   = 0;
-    CHECK(repair_step(failed, false) == RepairStep::failed);
+    // A volume that could not be repaired beside one that was: the repaired one is applied.
+    CgalRepairPlan partly = planned(*hole.object);
+    partly.error          = "No solid can be built from the mesh.";
+    partly.error_volume   = 1;
+    CHECK(repair_step(partly, false) == RepairStep::apply);
 }
 
 TEST_CASE("repair_mesh says why nothing was changed, and what to call instead", "[MeshRepair][orcamcp]")
@@ -535,28 +509,21 @@ TEST_CASE("repair_mesh says why nothing was changed, and what to call instead", 
     CHECK(timed_out.find("ORCAMCP_TIMEOUT") != std::string::npos);
     CHECK(timed_out.find("nothing was changed") != std::string::npos);
 
-    CgalRepairPlan failed = planned(*hole.object);
-    failed.error          = "Repair failed: mesh still open after hole filling.";
-    failed.error_volume   = 0;
-    const std::string failure = repair_step_message(RepairStep::failed, failed, 0, -1, 105.0, json::object());
+    const CgalRepairPlan flat    = planned(*sheet.object);
+    const std::string    failure = repair_step_message(RepairStep::failed, flat, 0, -1, 105.0, repair_facts_json(*sheet.object));
     CHECK(mentions(failure, "failed on volume 0"));
-    CHECK(mentions(failure, "mesh still open after hole filling"));
     CHECK(mentions(failure, "Nothing was changed"));
-
-    const std::string leaves = repair_step_message(RepairStep::leaves_nothing, planned(*sheet.object), 0, -1, 105.0,
-                                                   repair_facts_json(*sheet.object));
-    CHECK(leaves.find("flat or empty") != std::string::npos);
-    CHECK(leaves.find("delete_object") != std::string::npos);
+    CHECK(mentions(failure, "delete_object"));
 
     // Never a GUI button: what an agent is told to do, it can do itself.
-    for (const std::string& message : {nothing, timed_out, leaves})
+    for (const std::string& message : {nothing, timed_out, failure})
         for (const char* gui : {"click", "Click", "the user", "GUI", "button"}) {
             INFO(message << " names " << gui);
             CHECK(message.find(gui) == std::string::npos);
         }
 }
 
-TEST_CASE("repair_mesh's answer carries the numbers before and after, the parts, painting and volumes", "[MeshRepair][orcamcp]")
+TEST_CASE("repair_mesh's answer carries the numbers before and after, the repair, painting and volumes", "[MeshRepair][orcamcp]")
 {
     OnePartObject  f{TriangleMesh(cube_with(flat_square()))};
     const json     before = repair_facts_json(*f.object);
@@ -581,9 +548,12 @@ TEST_CASE("repair_mesh's answer carries the numbers before and after, the parts,
     CHECK_FALSE(answer.contains("volume_id"));
     CHECK(answer["keep_painting"] == false);
     CHECK(answer["keep_painting_from"] == "app_setting");
-    CHECK(answer["volumes_before"] == 1);
-    CHECK(answer["volumes_after"] == 1);
-    CHECK(answer["parts"] == json{{"split", 2}, {"dropped", 1}, {"repaired", 0}});
+    REQUIRE(answer.contains("repair"));
+    CHECK(answer["repair"]["volumes_repaired"] == 1);
+    CHECK(answer["repair"]["removed_shells"] == 1);
+    for (const char* key : {"welded_vertices", "removed_triangles", "reversed_shells", "filled_holes", "self_intersections"})
+        CHECK(answer["repair"].contains(key));
+    CHECK_FALSE(answer.contains("message"));
     CHECK(answer["before"] == before);
     CHECK(answer["after"] == after);
 
@@ -591,6 +561,12 @@ TEST_CASE("repair_mesh's answer carries the numbers before and after, the parts,
     CHECK(one_volume["volume_id"] == 0);
     CHECK(one_volume["keep_painting"] == true);
     CHECK(one_volume["keep_painting_from"] == "argument");
+
+    CgalRepairPlan partly = plan;
+    partly.error          = "flat: No solid can be built from the mesh.";
+    const json partial    = repair_answer_json(0, "Test object", -1, false, false, before, after, partly);
+    CHECK(mentions(partial["message"].get<std::string>(), "Not every volume could be repaired"));
+    CHECK(mentions(partial["message"].get<std::string>(), "left as they were"));
 }
 
 // Hidden ([.]): where the time goes on large meshes -- how long the main thread's two steps (capture,
@@ -632,7 +608,7 @@ TEST_CASE("The repair's steps are timed on large meshes", "[.][MeshRepairTiming]
             const auto       t3     = Clock::now();
             WARN(name << ", " << mesh.indices.size() << " facets, keep_painting " << keep_painting << ": capture "
                       << seconds(t0, t1) << " s, plan " << seconds(t1, t2) << " s, apply " << seconds(t2, t3)
-                      << " s; parts split " << plan.parts_split << ", repaired " << plan.parts_repaired
-                      << ", repaired in apply " << result.parts_repaired_here << (result.error.empty() ? "" : ", error " + result.error));
+                      << " s; volumes repaired " << result.volumes_changed << ", holes filled " << plan.totals().filled_holes
+                      << (plan.error.empty() ? "" : ", error " + plan.error));
         }
 }

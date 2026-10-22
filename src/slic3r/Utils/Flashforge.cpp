@@ -1,8 +1,22 @@
 #include "Flashforge.hpp"
 #include <algorithm>
 #include <array>
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ip/host_name.hpp>
+#include <boost/asio/ip/udp.hpp>
+#include <boost/asio/socket_base.hpp>
+#include <boost/asio/buffer.hpp>
+#include <boost/asio/ip/address_v4.hpp>
+#include <boost/asio/error.hpp>
+#include <boost/filesystem/operations.hpp>
 #include <ctime>
 #include <chrono>
+#include <string>
+#include "libslic3r/Config.hpp"
+#include <exception>
+#include <ios>
 #include <thread>
 #include <sstream>
 #include <fstream>
@@ -12,16 +26,17 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
-#include <boost/property_tree/ptree.hpp>
-#include <boost/property_tree/json_parser.hpp>
 #include <boost/asio.hpp>
 #include <boost/algorithm/string.hpp>
 
+#include <vector>
+#include <utility>
 #include <wx/frame.h>
 #include <wx/event.h>
 #include <wx/progdlg.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
+#include <wx/string.h>
 #include <wx/textctrl.h>
 #include <wx/checkbox.h>
 #include <wx/thread.h>
@@ -30,10 +45,10 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+#include "PrintHost.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/I18N.hpp"
-#include "slic3r/GUI/MsgDialog.hpp"
 #include "Http.hpp"
 #include "ThreadCancel.hpp"
 #include "TCPConsole.hpp"
@@ -45,7 +60,6 @@
 #include "ObicoLink.hpp"
 
 namespace fs = boost::filesystem;
-namespace pt = boost::property_tree;
 using json = nlohmann::json;
 
 namespace Slic3r {
@@ -155,9 +169,10 @@ bool validate_local_api_response(const std::string& response_body, wxString& err
             message = parsed["msg"].get<std::string>();
 
         if (message.empty())
-            message = "Request failed";
+            message = _u8L("Request failed");
 
-        error_msg = GUI::from_u8((boost::format("Flashforge local API error %1%: %2%") % result_code % message).str());
+        // TRN %1% is the error code returned by the printer, %2% its error message.
+        error_msg = GUI::from_u8((boost::format(_u8L("Flashforge local API error %1%: %2%")) % result_code % message).str());
         return false;
     }
 
@@ -513,11 +528,24 @@ bool Flashforge::fetch_material_slots(std::vector<FlashforgeMaterialSlot>& slots
     if (!request_local_api_json("detail", json{{"serialNumber", m_serial_number}, {"checkCode", m_check_code}}.dump(), body, msg))
         return false;
 
-    const auto parsed = json::parse(body, nullptr, false, true);
-    if (parsed.is_discarded()) {
+    if (!parse_material_slots(body, slots, supports_material_station, product_id)) {
         msg = _(L("Flashforge returned an invalid JSON response."));
         return false;
     }
+
+    return true;
+}
+
+bool Flashforge::parse_material_slots(const std::string& body, std::vector<FlashforgeMaterialSlot>& slots, bool* supports_material_station,
+                                      int* product_id)
+{
+    slots.clear();
+    if (product_id != nullptr)
+        *product_id = 0;
+
+    const auto parsed = json::parse(body, nullptr, false, true);
+    if (parsed.is_discarded())
+        return false;
 
     const auto& detail = parsed.contains("detail") ? parsed["detail"] : parsed;
     const auto& station = detail.contains("matlStationInfo") ? detail["matlStationInfo"] :
@@ -890,15 +918,6 @@ void Flashforge::log_local_api_outcome(const std::string& url, bool ok, const Fl
 std::string Flashforge::make_http_url(const std::string& path) const
 {
     return FlashforgeLocalApi::url_of(m_local_api_host, path);
-}
-
-int Flashforge::get_err_code_from_body(const std::string& body) const
-{
-    pt::ptree          root;
-    std::istringstream iss(body); // wrap returned json to istringstream
-    pt::read_json(iss, root);
-
-    return root.get<int>("err", 0);
 }
 
 } // namespace Slic3r

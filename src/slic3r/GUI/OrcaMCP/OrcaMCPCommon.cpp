@@ -586,7 +586,7 @@ void transform_instances_on_bed(ModelObject& object, const Transform3d& world_tr
             continue;
         const BoundingBoxf3 before = instance_box(object, i);
         transform_instance_about_box(*instance, world_transform, before);
-        if (!instance->auto_drop || !before.defined)
+        if (!object.auto_drop || !before.defined)
             continue;
         const double min_z_after = instance_min_z(object, i);
         if (should_drop_to_bed(before.min.z(), min_z_after))

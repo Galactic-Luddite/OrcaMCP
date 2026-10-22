@@ -61,25 +61,6 @@ static FILE *stl_open_count_facets(stl_file *stl, const char *file, unsigned int
 
   	// Check for binary or ASCII file.
     int header_size = custom_header_length + NUM_FACET_SIZE;
-    // Orca: a binary STL is exactly its label, its facet count and SIZEOF_STL_FACET bytes per facet, which decides
-    // first. The byte test below took a file for ASCII when the 128 bytes after its label were all below 128, as a
-    // small binary STL at whole millimetres with zero normals is: it loaded no geometry. Text never matches: the
-    // count's four bytes read as text are at least 0x09090909 facets (tabs, the lowest byte text holds), a file of more
-    // than 7.5 GB.
-    bool binary_by_size = false;
-    if (file_size >= header_size) {
-        uint32_t header_num_facets = 0;
-        fseek(fp, custom_header_length, SEEK_SET);
-        if (fread(&header_num_facets, sizeof(uint32_t), 1, fp) == 1) {
-#if BOOST_ENDIAN_BIG_BYTE
-            stl_internal_reverse_quads((char*)&header_num_facets, 4);
-#endif /* BOOST_ENDIAN_BIG_BYTE */
-            binary_by_size = uint64_t(header_size) + uint64_t(SIZEOF_STL_FACET) * header_num_facets == uint64_t(file_size);
-        }
-    }
-    if (binary_by_size) {
-        stl->stats.type = binary;
-    } else {
     fseek(fp, header_size, SEEK_SET);
 	unsigned char chtest[128];
   	if (! fread(chtest, sizeof(chtest), 1, fp)) {
@@ -94,7 +75,19 @@ static FILE *stl_open_count_facets(stl_file *stl, const char *file, unsigned int
       		break;
     	}
   	}
-    }
+  	// Zero normals and coordinates like 10 or 15 have no byte above 127, so the test above can miss a binary file.
+  	// Its size still matches its facet count; text read as that count would need a file of gigabytes.
+  	if (stl->stats.type == ascii) {
+    	uint32_t header_num_facets;
+    	fseek(fp, custom_header_length, SEEK_SET);
+    	if (fread(&header_num_facets, sizeof(uint32_t), 1, fp) == 1) {
+#if BOOST_ENDIAN_BIG_BYTE
+      		stl_internal_reverse_quads((char*)&header_num_facets, 4);
+#endif /* BOOST_ENDIAN_BIG_BYTE */
+      		if (header_size + uint64_t(header_num_facets) * SIZEOF_STL_FACET == file_size)
+        		stl->stats.type = binary;
+    	}
+  	}
   	rewind(fp);
 
   	uint32_t num_facets = 0;

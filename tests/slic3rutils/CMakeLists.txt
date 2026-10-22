@@ -2,15 +2,26 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     test_bambu_filament_ids.cpp
+    test_config_value_formatter.cpp
     test_creality_cfs_match.cpp
     test_agent_storage_state.cpp
     test_dev_mapping.cpp
+    test_device_access.cpp
+    test_moonraker_printer_agent.cpp
+    test_network_discovery.cpp
     test_filament_bitmap_utils.cpp
+    test_colour_picker_field.cpp
+    test_filament_color_picker.cpp
+    test_device_progress.cpp
+    test_device_manager_integration.cpp
+    test_web_media_controller.cpp
     test_scene_raycaster.cpp
+    test_scene_benchmark.cpp
     test_lazy.cpp
     test_prebuild_queue.cpp
     test_staged_build.cpp
     test_network_versions.cpp
+    test_orca_cloud_agent.cpp
     test_action_source.cpp
     test_plugin_host_api.cpp
     # Exercise seam enums and predicates through the embedded Python host API.
@@ -18,8 +29,11 @@ add_executable(${_TEST_NAME}_tests
     test_plugin_capability_config.cpp
     test_plugin_config.cpp
     test_plugin_capabilities_in_use.cpp
+    test_plugin_status.cpp
+    test_printer_agent.cpp
     test_plugin_install.cpp
     test_plugin_lifecycle.cpp
+    test_plugin_resource_texture.cpp
     test_plugin_printer_agent.cpp
     test_printhost.cpp
     test_slicing_pipeline_bindings.cpp
@@ -101,9 +115,21 @@ add_executable(${_TEST_NAME}_tests
     test_arrange_options.cpp
     test_instance_edits.cpp
     test_plate_settings.cpp
+    test_plugin_json_depth.cpp
     test_shortcuts.cpp
+    test_texture_color_palette.cpp
+    test_texture_island_view.cpp
+    test_timelapse_codecs.cpp
+    test_file_url.cpp
+    test_imgui_wrapper.cpp
+    test_user_manager.cpp
+    test_sequential_clearance.cpp
     ../fff_print/test_helpers.cpp
     )
+
+if (SLIC3R_CAD)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_design_sketch_tool.cpp)
+endif ()
 
 if (MSVC)
     target_link_libraries(${_TEST_NAME}_tests Setupapi.lib)
@@ -128,7 +154,7 @@ file(TO_NATIVE_PATH "${ORCAMCP_REFERENCE_DOC}" ORCAMCP_REFERENCE_DOC)
 target_compile_definitions(${_TEST_NAME}_tests PRIVATE ORCAMCP_REFERENCE_DOC=R"\(${ORCAMCP_REFERENCE_DOC}\)")
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
-orcaslicer_copy_test_dlls()
+orcaslicer_copy_test_dlls(${_TEST_NAME}_tests)
 
 if (WIN32)
     add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD

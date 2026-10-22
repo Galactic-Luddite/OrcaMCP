@@ -572,6 +572,11 @@ void add_slice_cancelled(nlohmann::json& response, const PlateListChangeDuringSl
 nlohmann::json step_through_history(bool undo, bool include_preview)
 {
     Plater*                    plater = wxGetApp().plater();
+    // The app's undo and redo do nothing while a job (an arrange, an orient, a bake) works on the model,
+    // which it was queued against (Plater::priv::undo_redo_blocked_by_job): say so, rather than answer a
+    // success for a step never taken.
+    if (!plater->get_ui_job_worker().is_idle())
+        return error_response(ui_job_busy_message(undo ? "undo" : "redo"));
     PlateListChangeDuringSlice slice_change;
     try {
         if (undo)

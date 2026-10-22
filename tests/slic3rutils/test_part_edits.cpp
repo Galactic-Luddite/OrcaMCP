@@ -333,7 +333,7 @@ TEST_CASE("A sinking object stays sinking when a part moves, and auto_drop off k
     CHECK_THAT(instances_lowest_z(sinking)[0], WithinAbs(-3., 1e-6));
 
     ModelObject& held = two_part_object(model);
-    held.instances[0]->auto_drop = false;
+    held.auto_drop = false;
     before = instances_lowest_z(held);
     translate_volume_in_plate_frame(held, 0, Vec3d(0., 0., 4.));
     translate_volume_in_plate_frame(held, 1, Vec3d(0., 0., 4.));

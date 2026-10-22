@@ -181,8 +181,8 @@ bool should_drop_to_bed(double min_z_before, double min_z_after);
 
 // transform_instances_in_plate_frame, followed by the drop to the bed the GUI does after a scale,
 // rotate or mirror: each instance's lowest point is recorded first, and should_drop_to_bed decides
-// per instance afterwards. Instances with auto_drop off are left where the transform put them, as
-// the GUI leaves them. A pivot at the bounding-box centre is what moves the lowest point at all: a
+// per instance afterwards. An object with auto_drop off (an object's setting, shared by its instances)
+// is left where the transform put it, as the GUI leaves it. A pivot at the bounding-box centre is what moves the lowest point at all: a
 // uniform 1.49x scale about the centre of a 99 mm figurine put its feet 24 mm under the bed.
 void transform_instances_on_bed(ModelObject& object, const Transform3d& world_transform);
 

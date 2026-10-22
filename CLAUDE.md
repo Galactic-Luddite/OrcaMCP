@@ -47,7 +47,7 @@ cmake --build build/arm64 --config RelWithDebInfo --target all --
 ```
 
 ### Build System
-- Uses CMake with minimum version 3.13 (maximum 3.31.x on Windows)
+- Uses CMake with minimum version 3.13 (the deps 3.10); upstream's CI builds with CMake 4.3 on every platform
 - Primary build directory: `build/`
 - Dependencies are built in `deps/build/`
 - Windows builds use Visual Studio generators
@@ -115,7 +115,7 @@ grep -hA1 -E '^\s*register_(bridge_)?tool\(\{' src/slic3r/GUI/OrcaMCP/*.cpp | gr
 | Category | Tools |
 |----------|-------|
 | **Scene** | `get_scene_info` (plates, each with `plate_index` and `is_current` (the plate per-plate tools act on; `index` kept), objects, each with `object_id` (the index every tool takes; `object_index` the same, kept; `internal_id` the app's ObjectID, stable while the app runs, taken by no tool -- it was `id`, which an agent passed as the object_id), `filaments_used` — read that, not `extruder_id` — and `mesh_warning` (the object list's warning icon, with its reason; `with_model_object_features` adds the mesh-health numbers), and each plate's full occupancy: object footprints with brim, the prime tower, excluded bed areas; `unplaced_objects`: every object with an instance on no plate, and which (`unplaced_instances`); each plate's own `settings` in `set_plate_settings`' argument shape and the `effective` bed type, print sequence and spiral vase; each plate's `layer_gcodes` (the layer slider's pauses, filament changes, custom and template G-code: `layer`, null while its layers are not known -- on a plate other than the current one too --, `z_mm`, `type`; a filament change's `active`, false with `inactive_reason` where the G-code has nothing for it -- vase mode, by object, objects on several filaments, one filament in the project, an older mode, the filament already printing there, above the last layer --, null while not known (another plate; before a slice, above where the slicer's layers must reach: the objects' top scaled by Z shrinkage less half their largest layer, `layers_reach_mm`; a variable layer height's largest stored or per nozzle, `Slicing::max_layer_height_from_nozzle`); probes BI, BJ); an object with several instances on a plate is listed once; `open_dialogs` / `system_dialog_open` / `untracked_modal_loop`: a dialog waiting for the user), `new_project`, `load_project` (both cancel a running slice; refused while the startup restore prompt waits), `save_project`, `export_3mf` (both save through the GUI's own Save steps, `Plater::save_project_as`: named after the file only once it is written, then marked saved; probe BK), `export_stl` (the app's Export all objects as one STL / as STLs, or with `object_ids` the object menu's Export as one STL / as STLs, whose file and folder dialogs `output_path` answers: STL or DRC, negative parts cut away, `one_file_per_object` into a folder, never overwriting there; `files` lists what was written; the user's selection put back, no undo step; a file not written is an error, probe BA) |
-| **Models** | `load_model` (a 3MF is always geometry only: never its presets, never a rename; `.gcode` / `.gcode.3mf` only onto an empty scene, as a preview; returns `loaded_objects` in `get_scene_info`'s object shape, `filaments_added`; `multipart: merge\|separate`), `auto_orient` / `arrange_objects` (the current plate's objects -- `arrange_objects` also `plate_index`, made current first as the plate's own Arrange icon does, or `all_plates` as the A key does; a locked plate refused; the arrange menu's options `spacing_mm`, `auto_rotate`, `allow_multiple_materials`, `align_to_y_axis`, `avoid_calibration_region`, `reset_options` saved as the menu saves them (align to Y in memory only), reported as `arrange_options`; answered once the job has been applied, with `objects`, each one's placement and `previous_object_id` when the arrange re-sorted the objects, and `object_id_changes`: every object in the scene the arrange renumbered, those on other plates too, or `finished: false` past the wait's cap, `status: cancelled` when the app cancelled it; see "Waiting for a UI job"), `get_object_info` (incl. every volume with its type, filament, and `bounding_box` / `position` in plate mm on instance 0), `get_mesh_health` (mesh errors behind the object list's warning icon: the icon state, its tooltip less the GUI's "click the icon" line, open edges, recorded repairs, shells, per object and per volume; an object with open edges gets `next_steps` to `repair_mesh`), `repair_mesh` (the object list's own Repair, CGAL, on every platform: each volume of several shells split into one volume per shell, shells with no volume deleted, the holes of every shell with open edges closed, the object dropped onto the bed; `volume_id` for one volume, `keep_painting` (default: the app's setting, stated as `keep_painting_from`); an open gizmo is closed only when there is a repair to apply (`closed_toolbar_tool`; closing a painting gizmo records its own undo step, as for the user); one undo step, none for nothing to repair; a negative or out-of-range `volume_id` is refused; answers `before` / `after` (`get_mesh_health`'s numbers, `volumes`, `painted`, `position`), `parts` {split, dropped, repaired} and the placement; refused while the pipeline is busy, a job runs or the app's own Repair runs; nothing applied past the call's wait cap, or when a part fails; see "Mesh repair"), `get_object_components` (loose parts, stray shells: every shell of each model part), `rename_object` (the object list's rename: `volume_id` for a volume; a one-part object's part follows the object's name; a name empty or with a character the list refuses is refused), `set_object_printable`, `split_object` (the object list's Split: `to: objects` -- one object per solid part, or per shell of a one-part object; modifiers and other non-part volumes not carried (`dropped_volumes`); `keep_height` answers the app's floating-pieces prompt (`MCP_PROMPT_SPLIT_FLOATING`); the pieces are the last objects -- or `to: parts`, one part per shell of `volume_id`; `keep_painting` as `repair_mesh`), `add_volume` (the list's Add Part / Negative Part / Modifier / Support Blocker / Enforcer: a primitive `shape`, beside the object, which moves the instance's rotation and scale into the volumes (`instance_transform_moved_to_volumes`; probe AK), or a `file_path`, which answers the list's file chooser), `set_volume_type` (the list's Change Type; volumes re-sort, so the answer gives the new `volume_id`; the last solid part stays a part), `assemble_objects` (the list's Assemble: two or more objects into one multi-part "Assembly", each object's first instance; a cut piece refused), `merge_parts` (the list's Mesh boolean: parts unioned, negative volumes subtracted, modifiers / part settings / layer ranges / brim ears not carried, every instance merged into one mesh; `boolean` says when the union failed), `invalidate_cut_info` (the list's Invalidate cut info, for every piece of the cut), `reload_from_disk` (the list's Reload from disk of an object or `volume_id`, or without `object_id` the plate menu's Reload All: each part takes its file's mesh as it is now; a file found neither where it was loaded from nor beside the object's file is refused, naming it, unless `file_path` answers the app's locate dialog -- once: a file still missing after it cancels the reload before any change; a cut piece refused, as the object list's menu item is off for one, and Reload All, as the app's, takes a cut piece's parts loaded from a file (those the cut went through name none); `reloaded` lists the parts loaded anew; a file that fails to load is named and the rest still reload; one undo step, taken only before the first change -- probe BC), `replace_volume_with_file` (the list's Replace 3D file for one part, `file_path`, or with `folder` Replace all with 3D files, parts whose file of their source's name the folder holds; one undo step per part replaced, as the menu takes them, each once its file loaded; the file must hold one part; a cut piece refused; `replaced`). Every part tool: one undo step, none for a change of nothing; an open toolbar tool closed right before the change (`closed_toolbar_tool`); refused while an arrange or orient runs; see `docs/tools/reference.md` |
+| **Models** | `load_model` (a 3MF is always geometry only: never its presets, never a rename; `.gcode` / `.gcode.3mf` only onto an empty scene, as a preview; returns `loaded_objects` in `get_scene_info`'s object shape, `filaments_added`; `multipart: merge\|separate`), `auto_orient` / `arrange_objects` (the current plate's objects -- `arrange_objects` also `plate_index`, made current first as the plate's own Arrange icon does, or `all_plates` as the A key does; a locked plate refused; the arrange menu's options `spacing_mm`, `auto_rotate`, `allow_multiple_materials`, `align_to_y_axis`, `avoid_calibration_region`, `reset_options` saved as the menu saves them (align to Y in memory only), reported as `arrange_options`; answered once the job has been applied, with `objects`, each one's placement and `previous_object_id` when the arrange re-sorted the objects, and `object_id_changes`: every object in the scene the arrange renumbered, those on other plates too, or `finished: false` past the wait's cap, `status: cancelled` when the app cancelled it; see "Waiting for a UI job"), `get_object_info` (incl. every volume with its type, filament, and `bounding_box` / `position` in plate mm on instance 0), `get_mesh_health` (mesh errors behind the object list's warning icon: the icon state, its tooltip less the GUI's "click the icon" line, open edges, recorded repairs, shells, per object and per volume; an object with open edges gets `next_steps` to `repair_mesh`), `repair_mesh` (the object list's own Repair, upstream's `repair_mesh` (CGAL 6.2), on every platform: each volume repaired in place -- cracks welded, shells oriented, holes filled, self-intersections and shells of fewer than 4 facets removed -- never split or deleted, one no solid can be built from left as it is and named; the object dropped onto the bed; `volume_id` for one volume, `keep_painting` (default: the app's setting, stated as `keep_painting_from`); an open gizmo is closed only when there is a repair to apply (`closed_toolbar_tool`; closing a painting gizmo records its own undo step, as for the user); one undo step, none for nothing to repair; a negative or out-of-range `volume_id` is refused; answers `before` / `after` (`get_mesh_health`'s numbers, `volumes`, `painted`, `position`), `repair` (upstream's `MeshRepairStats`, summed, with `volumes_repaired`) and the placement; refused while the pipeline is busy, a job runs or the app's own Repair runs; nothing applied past the call's wait cap; see "Mesh repair"), `get_object_components` (loose parts, stray shells: every shell of each model part), `rename_object` (the object list's rename: `volume_id` for a volume; a one-part object's part follows the object's name; a name empty or with a character the list refuses is refused), `set_object_printable`, `split_object` (the object list's Split: `to: objects` -- one object per solid part, or per shell of a one-part object; modifiers and other non-part volumes not carried (`dropped_volumes`); `keep_height` answers the app's floating-pieces prompt (`MCP_PROMPT_SPLIT_FLOATING`); the pieces are the last objects -- or `to: parts`, one part per shell of `volume_id`; `keep_painting` as `repair_mesh`), `add_volume` (the list's Add Part / Negative Part / Modifier / Support Blocker / Enforcer: a primitive `shape`, beside the object, which moves the instance's rotation and scale into the volumes (`instance_transform_moved_to_volumes`; probe AK), or a `file_path`, which answers the list's file chooser), `set_volume_type` (the list's Change Type; volumes re-sort, so the answer gives the new `volume_id`; the last solid part stays a part), `assemble_objects` (the list's Assemble: two or more objects into one multi-part "Assembly", each object's first instance; a cut piece refused), `merge_parts` (the list's Mesh boolean: parts unioned, negative volumes subtracted, modifiers / part settings / layer ranges / brim ears not carried, every instance merged into one mesh; `boolean` says when the union failed), `invalidate_cut_info` (the list's Invalidate cut info, for every piece of the cut), `reload_from_disk` (the list's Reload from disk of an object or `volume_id`, or without `object_id` the plate menu's Reload All: each part takes its file's mesh as it is now; a file found neither where it was loaded from nor beside the object's file is refused, naming it, unless `file_path` answers the app's locate dialog -- once: a file still missing after it cancels the reload before any change; a cut piece refused, as the object list's menu item is off for one, and Reload All, as the app's, takes a cut piece's parts loaded from a file (those the cut went through name none); `reloaded` lists the parts loaded anew; a file that fails to load is named and the rest still reload; one undo step, taken only before the first change -- probe BC), `replace_volume_with_file` (the list's Replace 3D file for one part, `file_path`, or with `folder` Replace all with 3D files, parts whose file of their source's name the folder holds; one undo step per part replaced, as the menu takes them, each once its file loaded; the file must hold one part; a cut piece refused; `replaced`). Every part tool: one undo step, none for a change of nothing; an open toolbar tool closed right before the change (`closed_toolbar_tool`); refused while an arrange or orient runs; see `docs/tools/reference.md` |
 | **Transforms** | Every transform, and `get_object_info`, reports each instance's placement (`instance_placement`: its plate and whether it is inside it), `plate_index` (instance 0's plate), `plate_indices` and `on_bed` (every instance inside the plate it is on). `move_object`, `rotate_object` (a change in degrees; `relative: false` is refused), `scale_object`, `mirror_object`, `flatten_object` (the named object only, which replaces the selection, as the GUI's Orient does for a selection; an object with an instance on a locked plate is refused; answered once its orient has been applied), `clone_object` (answered once its arrange has been applied, with `objects`, its ids as they are after it and `object_id_changes`; one undo step with the copies), `set_instance_count` (the GUI's Set number of instances without its number dialog: new instances a small step from the last one, as Add instance puts them -- `next_steps` names `arrange_objects` of every plate when one stands on no plate, of their plate when they overlap -- a lower count removes the last ones; 1 to 1000; one undo step, none for the same count; refused for an object with an unprintable instance or a cut piece, as the menu is), `fill_bed_with_instances` (the GUI's Fill bed with instances on the plate of `instance_id`, made current first, then that plate's arrange, which its finalize starts: answered once both are applied, `instances_added`, `instances_on_no_plate` (what the arrange could not fit, with `next_steps` to place or remove them), `object_id_changes`; one undo step, where the GUI takes two; takes the arrange menu's options), `cut_object` (the app's horizontal cut, put in as the cut tool's: the pieces on the plate and in the object list, `new_object_ids`, one undo step), `delete_object` (the object list's Delete, one undo step; `volume_id` for one volume -- not the last solid part, nor a cut object's solid part; a cut piece's siblings lose their link, `cut_info_invalidated_for`; `instance_id` for one instance -- not the only one, not with `volume_id` -- whose later instances move down one, on their plates too (probe AM)), `transform_objects` (rotate, scale, mirror and transform drop a resting object back onto the bed like the GUI; an explicit Z is kept). `move_object`, `rotate_object`, `scale_object` and `mirror_object` take `volume_id`: that volume changes within the object in plate axes on instance 0, about its own centre, then the object drops as the GUI drops it after a part changed (`dropped_to_bed_mm`) |
 | **Plates** | `add_plate`, `select_plate`, `delete_plate` (these three refused while an arrange, orient or bed fill runs), `set_prime_tower_position`, `set_plate_settings` (a plate's `name`, `locked`, `bed_type`, `print_sequence`, `first_layer_filament_order`, `other_layers_filament_order`, `spiral_vase`, as its settings dialog, name editor and lock icon change them; only what is given, one undo step, none for no change; a plate whose slicing settings change is made current first; `spiral_vase: on` is the dialog's Enable answered Yes: every object on the plate gets the vase's object settings, object-wide (`vase_settings_applied`, with `also_on_plates`; probe AN); a plate's own bed type only on Bambu Lab printers; custom filament orders refused with mixed filaments; a value the plate already has never refused, so `settings` round-trips; refused while an arrange, orient or bed fill runs) |
 | **Config** | `get_presets` (`installed: false`: what the Setup Wizard offers -- printers of the installed vendors not enabled, of a vendor not installed when `vendor` names it (`vendors_not_installed`), filaments not enabled that suit the printer), `install_presets` (the wizard's install without its window: `PresetBundle::apply_vendor_config` in the cloud sync's merge mode, then what its Finish runs; a vendor's profiles laid into the data folder, models, nozzles and filaments enabled, the selection kept and no printer selected (`next_steps` names `select_preset`); answers `vendors_added`, `filaments_enabled`, `selection_kept` (printer, print preset, slots; `selection_changed` names each preset the reload replaced, one the printer no longer shows), `filament_maps_restored` (the reload resets each slot's extruder map; the install puts it back), `project_settings_changed`; refused while slicing, a UI job, unsaved preset changes, or presets the project carries of its own (a 3MF's), which its reload would drop -- save_project, new_project, install, load_project), `get_edited_presets` (25-48 KB), `get_config_values` (no arguments: the selected printer, print and per-slot filament presets with dirty flags, ~400 B; `keys`: just those settings, grouped by `apply_config` type, with `dirty` saved values; `dirty_only`), `select_preset` (`type: printer` returns the resulting `filaments`, each with its observed `color_source`: `unchanged`/`remembered`/`default`/`other`; `type: filament` without `slot` refused with more than one physical slot, since it changed no slot), `apply_config` (`filament_slot`: the slot whose preset the filament settings change, pointed at as its Edit does -- required with more than one physical slot; a preset other slots share refused unless `include_sharing_slots`, and a switch that would discard the Filament settings' unsaved changes refused; `filament` in the answer: the preset and the slots it reached; project `curr_bed_type` through the sidebar's bed-type list, as the user picks it: the plates that follow it lose their slice, the printer remembers it; a type the printer does not offer, and any change on a printer with one bed type, rejected; a value the settings' own rules change right after it is written is reported in `rejected_values` with what it is now, not as applied), `clone_preset`, `save_preset` (the settings tab's own Save with the name given: a filament preset saved under a new name takes over the slots on the old one, `slots` in the answer), `delete_preset`, `reset_preset`, `get_valid_config_keys` |
@@ -710,7 +710,7 @@ once it has been applied, with the placement it left (`OrcaMCPUiJob.hpp`, the ap
   plater records its end right after routing its error, before its scene update (seconds for a large preview on the
   -O0 build), and only a quit ends the call's wait for it (`wait_for_handed_end`).
 
-### Mesh repair: CGAL off the main thread, the model on it
+### Mesh repair: the repair off the main thread, the model on it
 
 `repair_mesh` runs the object list's own Repair (`FixModelByCgal.hpp`) in three steps
 (`OrcaMCPMeshTools.cpp`, its decisions in `OrcaMCPMeshRepair.cpp`):
@@ -720,34 +720,30 @@ once it has been applied, with the placement it left (`OrcaMCPUiJob.hpp`, the ap
   refused), and the meshes, ids and, with `keep_painting`, painting the repair reads are captured
   (`capture_cgal_repair`).
 - **Plan, HTTP thread.** `plan_cgal_repair` is pure mesh work on those meshes, never a `Model`, a
-  `ModelVolume` or wx: the parts `ModelVolume::split` will make, which it drops, which have open edges,
-  CGAL's repair of those, and the kept painting remapped as `ModelVolume::split` and `restore_painting`
-  remap it (`TriangleSelector::remap_painting`: minutes per 10,000 painted facets on the -O0 build). The
-  main thread stays free. It stops between parts once `this_thread_cancelled()` (a quit) or the call's
-  wait cap (`tool_wait_cap`, the bridge's) says so; a part CGAL is repairing runs to its end (see
-  "Shutdown").
+  `ModelVolume` or wx: upstream's `Slic3r::repair_mesh` (`MeshRepair.hpp`, CGAL 6.2, TBB-parallel) on a
+  copy of each, and for each it changed, the repaired mesh's convex hull and the kept painting remapped
+  as `restore_painting` remaps it (`TriangleSelector::remap_painting`: minutes per 10,000 painted facets
+  on the -O0 build). The main thread stays free. It stops, within a volume too (repair_mesh's progress
+  callback throws), once `this_thread_cancelled()` (a quit) or the call's wait cap (`tool_wait_cap`, the
+  bridge's) says so. A volume from which no solid can be built is planned as left alone, with
+  repair_mesh's words.
 - **Apply, main thread.** The object is found again by pointer and id and checked unchanged
-  (`CgalRepairPlan::applies_to`); only a plan that changes something, has no failure, leaves the object
-  a part to print and finished within the cap is applied. Only then is an open gizmo closed, as the
-  user would close it (the Repair needs it closed: its undo snapshot would land in the gizmo's own
-  stack; closing a painting gizmo records its own undo step, as when the user closes it). Then one
-  "Repairing model object" snapshot, upstream's loop taking each part's verdicts, repaired mesh and
-  painting from the plan, and what the object list's Repair does after (`ensure_on_bed`, `changed_mesh`,
-  the list), with every instance re-homed as MCP's transforms do. Anything else changes nothing and
-  says why. A volume whose painting was written since the capture (a paint tool, a gizmo stroke; its
-  facet timestamps say so) has it remapped in place, as upstream's loop does, rather than given the
-  plan's stale remap; the paint tools refuse while the app's own Repair dialog runs, as `repair_mesh`
-  does. Planned parts are looked up by the captured volume they came from, so two volumes holding the
-  same mesh keep their own painting. The plan also works out each repaired part's convex hull, which apply sets
-  (`ModelVolume::set_convex_hull`, a setter ours adds to upstream's `Model.hpp`). What stays on the main
-  thread is `ModelVolume::split`, with a convex hull per new part. On the -O0 build, apply took 0.2 s
-  for a 500,000-facet sphere with a hole (2.7 s before the plan took the verdicts and the hull) and
-  1.1 s for 200 small shells, each with a hole, most of it the split.
+  (`CgalRepairPlan::applies_to`); only a plan that changes some volume and finished within the cap is
+  applied. Only then is an open gizmo closed, as the user would close it (the Repair needs it closed:
+  its undo snapshot would land in the gizmo's own stack; closing a painting gizmo records its own undo
+  step, as when the user closes it). Then one "Repairing model object" snapshot, the end of upstream's
+  `ModelVolume::repair` for each changed volume with the plan's mesh, hull (`ModelVolume::set_convex_hull`,
+  a setter ours adds to upstream's `Model.hpp`) and painting, and what the object list's Repair does after
+  (`ensure_on_bed`, `changed_mesh`, the list), with every instance re-homed as MCP's transforms do. Anything
+  else changes nothing and says why. A volume whose painting was written since the capture (a paint tool,
+  a gizmo stroke; its facet timestamps say so) has it remapped in place, as `ModelVolume::repair` does,
+  rather than given the plan's stale remap; the paint tools refuse while the app's own Repair dialog
+  runs, as `repair_mesh` does.
 
-The object list's Repair runs the same steps: every selected object or volume captured before its
-first dialog, each planned under the dialog, then, the dialog still shown but no longer updated (so it
-lets nothing through), one snapshot and the apply. A test holds the plan to upstream's in-place loop,
-painting included (probe AI).
+The object list's Repair, and its Fix All (the current plate, or every plate), run the same steps:
+every object or volume captured before its first dialog, each planned under the dialog, then, the
+dialog still shown but no longer updated (so it lets nothing through), one snapshot and the apply. A
+test holds the plan to upstream's `ModelVolume::repair`, painting included (probe AI).
 
 ### Shutdown: never wait on something that waits on the main thread
 
@@ -771,9 +767,9 @@ that call in flight waited forever: on 2026-09-26 `quit_app`, with a script poll
   `GUI_App`'s route) aborts synchronous `Http` transfers within about a second, stops
   `discover_printers`, and ends a `TCPConsole` exchange (legacy Flashforge, MKS) within 100 ms. A new
   blocking call on that thread must honour `this_thread_cancelled()` or go through `Http`/`TCPConsole`.
-  What cannot be cancelled -- the Bambu network plugin's calls inside a login callback, and the one
-  mesh part CGAL is repairing inside a `repair_mesh` call (its plan stops between parts, and uses only
-  its own copies of the meshes) -- is bounded:
+  What cannot be cancelled -- the Bambu network plugin's calls inside a login callback, and a step of
+  `repair_mesh`'s repair between two of its progress reports (its plan uses only its own copies of the
+  meshes) -- is bounded:
   `GUI_App::stop_http_server` gives `HttpServer::stop` 5 s, and when a request still holds the thread
   then, the server is left alone and the process ends at once (`end_process_under_running_server_thread`:
   config saved, logs flushed, `std::_Exit(0)`), without the teardown the stuck call could be using.
@@ -946,7 +942,8 @@ once, and an agent sees them and chooses:
   build lists other tools sends `notifications/tools/list_changed`; the same build keeps the list.
 - **The data folder is shared, as upstream shares it**: two instances on one data folder each save
   `OrcaMCP.conf` (on idle, whenever it changed) and presets, and the last writer wins; there is one
-  `last_backup_path`. The registry writes nothing there. The second instance shows a notification naming
+  `last_backup_path`. Since upstream's `InstanceLock` (2026-10, #15861) no write is torn and no reader sees a
+  half-written preset, but a whole save still replaces the other instance's. The registry writes nothing there. The second instance shows a notification naming
   the other, and `list_instances` marks them `shares_data_dir_with`.
 
 ---
@@ -976,7 +973,7 @@ once, and an agent sees them and chooses:
    `BackgroundSlicingProcess::stop`): usually well under a second, but organic tree supports check
    for a cancel only between phases, and on the -O0 dev build one wait took 47 s
 5. **Local only**: the MCP server listens on 127.0.0.1; it cannot be reached from another machine
-6. **Mesh repair time**: `repair_mesh` applies nothing when its CGAL work takes longer than the call may
+6. **Mesh repair time**: `repair_mesh` applies nothing when its repair takes longer than the call may
    wait (a little under the bridge's `ORCAMCP_TIMEOUT`); a larger mesh needs a larger timeout, or
    `volume_id` one volume at a time. CGAL is header-only, so the -O0 dev build runs it unoptimised
 7. **Several instances**: at most ten run with MCP (ports 13618-13627); an eleventh runs without it, and
@@ -1287,7 +1284,6 @@ echo "A worker thread calls show_error_info directly (4d76a06287):     $(U src/s
 echo "B ~GLCanvas3D calls reset_volumes (f599bda795):                  $(U src/slic3r/GUI/GLCanvas3D.cpp | awk '/^GLCanvas3D::~GLCanvas3D/{f=1} f&&/reset_volumes/{print "yes"; exit} f&&/^}/{print "no"; exit}')"
 echo "C unguarded result_polygon[0] (f599bda795):                      $(U src/libslic3r/PrintConfig.cpp | grep -c 'result = result_polygon\[0\]')"
 echo "D Moonraker payload lacks sdcard key (91efc63d30; 0 = bug):      $(U src/slic3r/Utils/MoonrakerPrinterAgent.cpp | grep -c '\"sdcard\"')"
-echo "E display name falls through to Unknown (041db47482):           $(U src/slic3r/GUI/DeviceManager.cpp | awk '/get_printer_type_display_str/{f=1} f&&/_L\("Unknown"\)/{print "yes"; exit}')"
 echo "F error panel: Wrap( without Layout() (f5ff97bfa1):             $(U src/slic3r/GUI/SelectMachine.cpp | grep -c 'Wrap(') Wrap / $(U src/slic3r/GUI/SelectMachine.cpp | grep -A3 'Wrap(' | grep -c 'Layout()') Layout"
 echo "G dead [this] capture CameraPopup (merge 476df4364e):            $(U src/slic3r/GUI/CameraPopup.cpp | grep -c 'Bind(wxEVT_TOGGLEBUTTON, \[this\](wxCommandEvent &e)')"
 echo "H dead [this] capture StatusPanel (merge 476df4364e):            $(U src/slic3r/GUI/StatusPanel.cpp | grep -c 'm_bmToggleBtn_timelapse->Bind(wxEVT_TOGGLEBUTTON, \[this\]')"
@@ -1304,7 +1300,7 @@ echo "Q restore prompt closed by a quit deletes the backup (rel2506/04c):  $(U s
 echo "S the logout handler ends dialogs with wxID_ABORT (rel2506/04c):    $(U src/slic3r/GUI/GUI_App.cpp | grep -c 'EndModal(wxID_ABORT)')"
 echo "V the object list's mesh-error text lives inside ObjectList / its first icon reads mesh().stats() / ObjectList::get_repaired_errors_count exists (rel2506/05): $(U src/slic3r/GUI/GUI_ObjectList.cpp | awk '/^MeshErrorsInfo ObjectList::get_mesh_errors_info\(const int obj_idx/{f=1} f&&/_L_PLURAL/{print "yes"; exit} f&&/^}/{print "no"; exit}') / $(U src/slic3r/GUI/GUI_ObjectList.cpp | grep -c 'get_warning_icon_name(model_object->mesh().stats())') / $(U src/slic3r/GUI/GUI_ObjectList.cpp | grep -c '^int ObjectList::get_repaired_errors_count')"
 echo "X upstream's slic3rutils tests get no Windows-first force-include (rel2506/ci-fixes; 0 = bug): $(U tests/slic3rutils/CMakeLists.txt | grep -c 'win_platform.hpp')"
-echo "Y the processor reads print_z only from Bambu's Z tag / the G-code check and / the filament grouping take an unset extruder height for 0 mm / the height message indexes a 2-name list / the G-code check takes a printable_height of 0 for 0 mm / the Type 1 tower takes an unset extruder height for 0 mm (rel2506/07b): $(U src/libslic3r/GCode/GCodeProcessor.cpp | grep -c 'if (boost::starts_with(comment, " Z_HEIGHT:")) {') / $(U src/libslic3r/GCode/GCodeProcessor.cpp | grep -c '(extruder_id < printable_heights.size()) && (iter->second.max_print_z > printable_heights\[extruder_id\])') / $(U src/libslic3r/PrintObject.cpp | awk '/double printable_height = printable_height_per_extruder\[extruder_id\];/{getline; print ($0 ~ /for \(/ ? "yes" : "no"); exit}') / $(U src/slic3r/GUI/GLCanvas3D.cpp | grep -c 'std::string extruder_name = extruder_name_list\[extruder_id-1\]') / $(U src/libslic3r/GCode/GCodeProcessor.cpp | grep -c 'if ( iter->second.max_print_z > plate_printable_height ) {') / $(U src/libslic3r/GCode/WipeTower.cpp | grep -c 'layer_id && layer_z > m_printable_height\[extruder_id\]')"
+echo "Y the processor reads print_z only from Bambu's Z tag / the G-code check and / the filament grouping take an unset extruder height for 0 mm / the height message indexes a 2-name list / the G-code check takes a printable_height of 0 for 0 mm / the Type 1 tower takes an unset extruder height for 0 mm (rel2506/07b): $(U src/libslic3r/GCode/GCodeProcessor.cpp | grep -c 'if (boost::starts_with(comment, " Z_HEIGHT:")) {') / $(U src/libslic3r/GCode/GCodeProcessor.cpp | grep -c '(extruder_id < printable_heights.size()) && (iter->second.max_print_z > printable_heights\[extruder_id\])') / $(U src/libslic3r/PrintObject.cpp | awk '/double printable_height = printable_height_per_extruder\[extruder_id\];/{getline; print ($0 ~ /for \(/ ? "yes" : "no"); exit}') / $(U src/slic3r/GUI/GLCanvas3D.cpp | grep -c 'std::string extruder_name = extruder_name_list\[extruder_id-1\]') / $(U src/libslic3r/GCode/GCodeProcessor.cpp | grep 'max_print_z > plate_printable_height' | grep -vc 'is_height_limit') / $(U src/libslic3r/GCode/WipeTower.cpp | grep -c 'layer_id && layer_z > m_printable_height\[extruder_id\]')"
 echo "Z reslice refuses on a validation failure a settings fix removed until the 0.5 s timer runs / show_error defers its dialog (rel2506/06b): $(U src/slic3r/GUI/Plater.cpp | grep -c 'process_completed_with_error, return directly') / $(U src/slic3r/GUI/GUI.cpp | awk '/^void show_error\(wxWindow\* parent, const wxString/{f=1} f&&/CallAfter/{print "yes"; exit} f&&/^}/{print "no"; exit}')"
 echo "AA upstream's slicer reads a layer range's layer_height unchecked, and a file can carry a range without one (rel2506/06b): $(U src/libslic3r/Slicing.cpp | grep -c 'it_range->second.option("layer_height")->getFloat()')"
 echo "AB Print::apply copies a new object name without invalidating the G-code (rel2506/06b): $(U src/libslic3r/PrintApply.cpp | awk '/model_object.name       = model_object_new.name;/{print (prev ~ /invalidate_step\(psGCodeExport\)/ ? "no" : "yes"); exit} {prev=$0}')"
@@ -1314,12 +1310,12 @@ echo "AE cancel_all leaves a job whose process has returned to finalize as not c
 echo "AF a cancelled or failed arrange keeps prepare_all's plates locked, its running flag and its notification (rel2506/07e): $(U src/slic3r/GUI/Jobs/ArrangeJob.cpp | awk '/^void ArrangeJob::finalize/{f=1} f&&/lock\(false\)|end_arrange_run/{print "no"; exit} f&&/if \(canceled \|\| eptr\)/{print "yes"; exit}')"
 echo "AG an object added to the scene has only its first instance on a plate (rel2506/07f): $(U src/slic3r/GUI/GUI_ObjectList.cpp | awk '/^void ObjectList::add_object_to_list\(/{f=1} f&&/notify_instance_update\(obj_idx, 0, true\)/{print "yes"; exit} f&&/^}/{print "no"; exit}')"
 echo "AH the first slice waits for every TBB worker at once to name them (upstream issue #15988; rel2506/07g): $(U src/libslic3r/Thread.cpp | awk '/^void name_tbb_thread_pool_threads_set_locale/{f=1} f&&/cv\.wait\(/{print "yes"; exit} f&&/^}/{print "no"; exit}')"
-echo "AI the Repair's worker changes the object itself, off the main thread / a first volume dropped whole skips the next / a repair can delete an object's last part / the Repair's snapshot is taken before its dialog / ModelVolume has a hull setter (0 = no, keep ours) (rel2506/08b): $(U src/slic3r/Utils/FixModelByCgal.cpp | grep -c 'std::thread(\[&model_object') / $(U src/slic3r/Utils/FixModelByCgal.cpp | awk '/removed_parts >= parts_count/{f=1} f&&/ivolume = part_end;/{print "yes"; exit} f&&/continue;/{print "no"; exit}') / $(U src/slic3r/Utils/FixModelByCgal.cpp | awk '/is_not_3dimensional_part\(part_volume->mesh\(\)\)/{f=1} f&&/parts_count\(\)|is_model_part/{print "no"; exit} f&&/delete_volume\(part_idx\)/{print "yes"; exit}') / $(U src/slic3r/GUI/GUI_ObjectList.cpp | awk '/^void ObjectList::fix_through_cgal/{f=1} f&&/TakeSnapshot/{print "yes"; exit} f&&/ProgressDialog progress_dlg/{print "no"; exit}') / $(U src/libslic3r/Model.hpp | grep -c 'set_convex_hull')"
+echo "AI the Repair's worker changes the live object off the main thread / its snapshot is taken before its dialog / a cancel skips the refresh of the volumes already changed / ModelVolume has a hull setter (0 = no, keep ours) (rel2506/08b, ported to upstream's repair_mesh 2026-10-22): $(U src/slic3r/Utils/FixModelByCgal.cpp | awk '/std::thread\(/{f=1} f&&/->repair\(|->split\(|delete_volume|set_mesh\(/{print "yes"; d=1; exit} END{if(!d) print "no"}') / $(U src/slic3r/GUI/GUI_ObjectList.cpp | awk '/^void ObjectList::fix_through_cgal\(const/{f=1} f&&/TakeSnapshot/{print "yes"; exit} f&&/ProgressDialog progress_dlg/{print "no"; exit}') / $(U src/slic3r/GUI/GUI_ObjectList.cpp | awk '/^void ObjectList::fix_through_cgal\(const/{f=1} f&&/fix_model_with_cgal_gui\(/{getline; print ($0 ~ /return false/ ? "yes" : "no"); d=1; exit} END{if(!d) print "no"}') / $(U src/libslic3r/Model.hpp | grep -c 'set_convex_hull')"
 echo "AJ upstream's acceptor takes asio's SO_REUSEADDR on Windows, which lets a second process bind a port the first listens on (rel2506/09; 0 = bug): $( { U src/slic3r/GUI/HttpServer.hpp; U src/slic3r/GUI/HttpServer.cpp; } | grep -c 'EXCLUSIVEADDRUSE')"
 echo "AK adding a primitive part or modifier resets only instance 0 and moves every instance by its offset (rel2506/11): $(U src/slic3r/GUI/GUI_ObjectList.cpp | awk '/^void ObjectList::apply_object_instance_transfrom_to_all_volumes/{f=1} f&&/translate_instances\(original_instance_center\)/{print "yes"; exit} f&&/^}/{print "no"; exit}')"
 echo "AL the object list's re-listing clears a copy of an object's row map / the maps stay under an object's index when it is deleted or moved (rel2506/11; 0 = bug for the second): $(U src/slic3r/GUI/GUI_ObjectList.cpp | grep -c 'for (auto item : ui_and_3d_volume_map)') / $(U src/slic3r/GUI/ObjectDataViewModel.cpp | grep -c 'ui_and_3d_volume_map')"
 echo "AM deleting an object removes only its first instance from the plates / the object list's instance delete / its delete of every instance but the first tell the plates nothing (rel2506/12; 0 = bug for the second): $(U src/slic3r/GUI/PartPlate.cpp | awk '/^int PartPlateList::notify_instance_removed/{f=1} f&&/remove_object_instances|for \(.*instance.*<.*instances/{print "no"; exit} f&&/update_object_index/{print "yes"; exit}') / $(U src/slic3r/GUI/GUI_ObjectList.cpp | grep -A10 'else if (type == itInstance) {' | grep -c 'partplate_list') / $(U src/slic3r/GUI/GUI_ObjectList.cpp | awk '/^void ObjectList::del_instances_from_object/{f=1} f&&/partplate_list/{print "no"; exit} f&&/^}/{print "yes"; exit}')"
-echo "AN a plate's spiral vase gives the print preset's differing settings to its first object only (upstream issue #15995; rel2506/12): $(U src/slic3r/GUI/PartPlate.cpp | grep -c 'applying_keys = config.get().diff(new_conf);')"
+echo "AN a plate's spiral vase settings are worked out inside set_vase_mode_related_object_config, which MCP's set_plate_settings needs to report (upstream fixed the bug, issue #15995; a move: 0 = keep ours): $(U src/slic3r/GUI/PartPlate.cpp | grep -c 'vase_mode_object_config')"
 echo "AO deleting a filament writes a volume's renumbered support filament into its object's config (rel2506/13): $(U src/slic3r/GUI/GUI_ObjectList.cpp | awk '/volumes\[id\]->config.opt_int\(key\) > filament_id/{f=1} f&&/object->config.set_key_value\(key, new ConfigOptionInt\(new_value\)\)/{print "yes"; d=1; exit} END{if(!d) print "no"}')"
 echo "AP the physical filament's Merge with checks the menu's unresolved -2 for a mixed filament that lists it, so it never warns (rel2506/13): $(U src/slic3r/GUI/Plater.cpp | awk '/^void Sidebar::change_filament/{f=1} f&&/m_menu_filament_id/{print "no"; d=1; exit} f&&/is_mixed_filament\(from_id\)/{print "yes"; d=1; exit} END{if(!d) print "unknown"}')"
 echo "AQ deleting a filament renumbers the support filaments in the plater's copy of the config only, not in the print preset the slicer reads (rel2506/13): $(U src/slic3r/GUI/Plater.cpp | awk '/^void Plater::on_filaments_delete/{f=1} f&&/prints\.get_edited_preset\(\)/{print "no"; d=1; exit} f&&/^}/{print "yes"; d=1; exit} END{if(!d) print "unknown"}')"
@@ -1331,7 +1327,7 @@ echo "AV deleting or merging a filament slot renumbers tool changes only, moves 
 echo "AW a plate's own filament maps append a new slot, after the mixed ones the project's maps put it before (rel2506/13): $(U src/slic3r/GUI/PartPlate.cpp | awk '/^void PartPlate::on_filament_added/{f=1} f&&/insert_filament_into_plate_maps/{print "no"; d=1; exit} f&&/push_back/{print "yes"; d=1; exit} f&&/^}/{print "no"; d=1; exit} END{if(!d) print "unknown"}')"
 echo "AX a new project after one with its own presets puts a slot on the first visible filament, which the printer may not list (rel2506/13): $(U src/libslic3r/PresetBundle.cpp | awk '/^void PresetBundle::reset_project_embedded_presets/{f=1} f&&/first_visible\(\)\.name/{print "yes"; d=1; exit} f&&/^}/{print "no"; d=1; exit} END{if(!d) print "unknown"}')"
 echo "AY the slicing notification's Cancel only stops a running process, so between two Slice All plates it does nothing and the run goes on, and nothing records the cancel (rel2506/14): $(U src/slic3r/GUI/Plater.cpp | awk '/auto cancel_callback = \[this\]\(\) \{/{f=1} f&&/cancel_slicing/{print "no"; d=1; exit} f&&/background_process.idle\(\)/{print "yes"; d=1; exit} END{if(!d) print "unknown"}')"
-echo "AZ Export plate sliced file reports a failed write as exported, and leaves the export status set for the next slice to report again / adds .3mf to a name ending in .3MF (rel2506/14): $(U src/slic3r/GUI/Plater.cpp | awk '/^(void|bool) Plater::export_gcode_3mf\(/{f=1} f&&/export_3mf\(output_path/{print ($0 ~ /= *export_3mf|if *\(/ ? "no" : "yes"); d=1; exit} END{if(!d) print "unknown"}') / $(U src/slic3r/GUI/Plater.cpp | awk '/^(void|bool) Plater::export_gcode_3mf\(/{f=1} f&&/if \(ext != ".3mf"\)/{print "yes"; d=1; exit} f&&/^}/{print "no"; d=1; exit} END{if(!d) print "unknown"}')"
+echo "AZ Export plate sliced file says nothing of a failed write / clears the export status only on a failure, so the next slice reports the old export again / adds .3mf to a name ending in .3MF (rel2506/14): $(U src/slic3r/GUI/Plater.cpp | awk '/^(void|bool) Plater::export_gcode_3mf\(/{f=1} f&&/Export failed/{print "no"; d=1; exit} f&&/push_exporting_finished_notification/{print "yes"; d=1; exit} END{if(!d) print "unknown"}') / $(U src/slic3r/GUI/Plater.cpp | awk '/^(void|bool) Plater::export_gcode_3mf\(/{f=1} f&&/NOT_EXPORTING/{getline; print ($0 ~ /^[ \t]*return/ ? "yes" : "no"); d=1; exit} f&&/^}/{print "yes"; d=1; exit} END{if(!d) print "unknown"}') / $(U src/slic3r/GUI/Plater.cpp | awk '/^(void|bool) Plater::export_gcode_3mf\(/{f=1} f&&/if \(ext != ".3mf"\)/{print "yes"; d=1; exit} f&&/^}/{print "no"; d=1; exit} END{if(!d) print "unknown"}')"
 echo "BA storing an STL returns true whatever the write did (0 = fixed) / the STL export and / the toolpath export take a cancelled file dialog's \"<cancel>\" for the file to write (rel2506/14): $(U src/libslic3r/Format/STL.cpp | grep -c 'FIXME returning false even if write failed') / $(U src/slic3r/GUI/Plater.cpp | awk '/^void Plater::export_stl\(/{f=1} f&&/path.empty\(\)/{print ($0 ~ /<cancel>/ ? "no" : "yes"); d=1; exit} END{if(!d) print "unknown"}') / $(U src/slic3r/GUI/Plater.cpp | awk '/^void Plater::export_toolpaths_to_obj/{f=1} f&&/path.empty\(\)/{print ($0 ~ /<cancel>/ ? "no" : "yes"); d=1; exit} END{if(!d) print "unknown"}')"
 echo "BB the layer slider's change handler holds what follows a change inline, which MCP's layer G-code tools need to run too (rel2506/14; a move): $(U src/slic3r/GUI/Plater.cpp | awk '/EVT_CUSTOMEVT_TICKSCHANGED, \[this\]/{f=1} f&&/on_layer_gcodes_changed/{print "no"; d=1; exit} f&&/set_plater_dirty\(true\)/{print "yes"; d=1; exit} END{if(!d) print "unknown"}')"
 echo "BC Reload from disk returns on a file that fails to load, the scene not updated / takes its undo step before loading (0 = bug) / says nothing of a replacement file that fails to load / Reload All takes one up front / where it finds files is inline (0 = move not upstream) / no native file or folder dialog on an MCP path takes the call's path (0 = keep ours) (rel2506/14): $(U src/slic3r/GUI/Plater.cpp | awk '/^void Plater::priv::reload_from_disk\(/{f=1} f&&/\/\/ error while loading/{getline; print ($0 ~ /return;/ ? "yes" : "no"); d=1; exit} END{if(!d) print "unknown"}') / $(U src/slic3r/GUI/Plater.cpp | grep -c 'struct ReloadUndoStep') / $(U src/slic3r/GUI/Plater.cpp | grep -c 'if (!replace_volume_with_stl(obj_idx, vol_idx, dest, "")) break;') / $(U src/slic3r/GUI/Plater.cpp | awk '/^void Plater::priv::reload_all_from_disk/{f=1} f&&/TakeSnapshot/{print "yes"; d=1; exit} f&&/^}/{print "no"; d=1; exit} END{if(!d) print "unknown"}') / $(U src/slic3r/GUI/Plater.cpp | grep -c 'ReloadSources reload_sources') / $(U src/slic3r/GUI/Plater.cpp | grep -c 'mcp_answer_path_dialog')"
@@ -1343,14 +1339,11 @@ echo "BH a static last vase mode clears the ticks of whichever plate is shown ne
 echo "BI a plate's filament changes count as filaments it uses (Print::extruders, PartPlate::get_extruders) though the slicer applies none on a plate printing with several filaments or by object / a vase plate's filament changes print as filament switches the slider hides / the plate counts the filaments of objects the slicer does not print (rel2506/14; 0 = bug): $(U src/libslic3r/CustomGCode.hpp | grep -c 'tool_changes_apply') / $(U src/libslic3r/CustomGCode.hpp | grep -c 'spiral_vase') / $(U src/slic3r/GUI/PartPlate.hpp | grep -c 'slicer_prints_object')"
 echo "BJ the Preview's slider shows or hides a plate's filament changes by its parts' filaments, not by the slicer's rule: a mixed slot's plate hid a change it prints (rel2506/14): $(U src/slic3r/GUI/GUI_Preview.cpp | awk '/^void Preview::update_layers_slider_mode/{f=1} f&&/tool_changes_off/{print "no"; d=1; exit} f&&/extruder != plate_extruders\[0\]/{print "yes"; d=1; exit} END{if(!d) print "unknown"}')"
 echo "BK Save's steps after its file dialog are inline in save_project, which MCP's save_project and export_3mf need to run too (rel2506/14; a move): $(U src/slic3r/GUI/Plater.cpp | grep -c '^int Plater::save_project_as')"
-echo "BL admesh takes an STL for ASCII when the 128 bytes after its label are all below 128, so a small binary STL at whole millimetres with zero normals loads no geometry (upstream issue #15993; rel2506/15; 0 = bug): $(U deps_src/admesh/stlinit.cpp | grep -c 'binary_by_size')"
 echo "BM on_process_completed tells no one how an export ended, and opens its error dialog, which MCP's export_gcode needs to answer and capture (rel2506/15; a hook: 0 = keep ours): $(U src/slic3r/GUI/Plater.cpp | grep -c 'mcp_gcode_export')"
 echo "BN upstream's Flashforge upload always sends flowCalibration off, and reads its print options from extended_info keys each sender spells for itself (rel2506/10; a feature: non-zero = keep ours): $(U src/slic3r/Utils/Flashforge.cpp | grep -c '.header("flowCalibration", "false")') / $(U src/slic3r/Utils/Flashforge.cpp | grep -c 'extended_info\["levelingBeforePrint"\]')"
 echo "BO the Flashforge send dialog saves its boxes through AppConfig's bool overload, so every config holds \"true\" and the next dialog reads them off / it starts with leveling on and offers no flow calibration (rel2506/10): $(U src/slic3r/GUI/PrintHostDialogs.cpp | grep -c 'CONFIG_KEY_LEVELING, m_leveling_before_print ? "1" : "0"') / $(U src/slic3r/GUI/PrintHostDialogs.hpp | grep -c 'm_leveling_before_print {true}')"
 echo "BP upstream's send dialog is not told which Flashforge it sends to, so it cannot offer only what that machine's start screen offers (rel2506/10; a feature: 0 = keep ours): $(U src/slic3r/Utils/Flashforge.cpp | grep -c 'int\* product_id') / $(U src/slic3r/GUI/PrintHostDialogs.hpp | grep -c 'product_id')"
-echo "BQ AppConfig::set has no const char* overload, so a text literal takes its bool one and stores \"true\" / get_bool(section, key) reads \"1\" from the app section (upstream issue #15994; rel2506/10; 0 = bug for the first, non-zero = bug for the second): $(U src/libslic3r/AppConfig.hpp | grep -c 'const char \*value') / $(U src/libslic3r/AppConfig.hpp | grep -c 'this->get(key) == "1"')"
-echo "BS an agent's launch gets startup dialogs: the Linux SSL prompt and the plugin download before the MCP server, the setup wizard, the update check, the profile-sync notice, the locale error (rel2508; a feature: 0 = keep ours) / the locale error computes \"Application will close.\" and drops it (non-zero = bug): $(U src/slic3r/GUI/GUI_App.cpp | grep -c 'agent_launch_leaves_out') / $(U src/slic3r/GUI/GUI_App.cpp | grep -cF 'message + "\n\nApplication will close.";')"
-echo "BR the CLI's thumbnail render restores the canvas viewport through wxGetApp().plater() with no wx app, so --export-3mf and arrange with thumbnails segfault on macOS (rel2507): $(U src/slic3r/GUI/GLCanvas3D.cpp | awk '/^void GLCanvas3D::render_thumbnail_internal/{f=1} f&&/wxApp::GetInstance\(\)/{print "no"; d=1; exit} f&&/get_camera\(\)\.apply_viewport\(\)/{print "yes"; d=1; exit} END{if(!d) print "unknown"}')"
+echo "BS an agent's launch gets startup dialogs: the Linux SSL prompt and the plugin download before the MCP server, the setup wizard, the update check, the legacy filament preset migration offer, the profile-sync notice, the locale error (rel2508; a feature: 0 = keep ours): $(U src/slic3r/GUI/GUI_App.cpp | grep -c 'agent_launch_leaves_out')"
 echo "BT replies end their head lines with a bare LF / a request line is read up to its CR, so an LF that arrives later begins the next line (2026-10-02, Streamable HTTP): $(U src/slic3r/GUI/HttpServer.cpp | grep -c 'ssOut << std::endl') / $(U src/slic3r/GUI/HttpServer.cpp | grep -c "async_read_until(socket, buff, '\\\\r'")"
 echo "BU Windows CI's compiler cache keeps objects built with the old version after a bump (depend mode cannot see the precompiled header; 0 = bug): $(U .github/workflows/build_orca.yml | grep -c 'CCACHE_EXTRAFILES')"
 ```
@@ -1459,8 +1452,9 @@ or an earlier part's repairs left the icon off under a tooltip listing them. Our
 Item Y: `GCode::process_layer` writes a layer's height as `; Z_HEIGHT:` for Bambu printers and `;Z:`
 for every other, but upstream's processor reads only the first, so on every non-Bambu printer each
 move's `print_z` stayed 0 and the check after a slice (`check_multi_extruder_gcode_valid`) never found
-a toolpath above the printable height. It can be there: the pre-slice height check measures the
-object without its raft. Ours reads both tags (`is_layer_z_tag`). That alone would have failed every
+a toolpath above the printable height. It could be there: until 2026-10 the pre-slice height check
+measured the object without its raft (upstream's f32591ed64 counts it now). Upstream also skips both checks
+on a belt printer (`!m_belt_printer`), whose Z is not comparable; ours keeps that. Ours reads both tags (`is_layer_z_tag`). That alone would have failed every
 slice on the 155 non-Bambu multi-extruder profiles: none sets `extruder_printable_height`, whose 0
 default the per-extruder check took for a 0 mm limit. So an unset height limits nothing
 (`is_height_limit`, `PrintableHeightLimit.hpp`), there, in the bed check -- a `printable_height` of 0,
@@ -1614,30 +1608,26 @@ On "no", upstream dropped the barrier: compare its replacement with ours, keep w
 worker that joins later, and re-run `libslic3r_tests "[Thread]"` (on the barrier, the busy-pool test
 fails at its 30 s deadline).
 
-Item AI: upstream's `fix_model_with_cgal_gui` (`FixModelByCgal.cpp`) runs the whole repair on a
-worker thread against the live `ModelObject` while the progress dialog pumps events: it splits, deletes
-and re-meshes volumes there and creates `ModelVolume`s, whose ids only the main thread may make
-(`ObjectID.hpp`), while the dialog's `YieldFor` runs other main-thread work, an MCP call's among it
-(`CallAfter` events are of the UI category), on the same object. Its worker is a `std::thread` (512 KB
-of stack on macOS), where the app's other CGAL work uses `create_thread`'s 16 MB. When an object's first
-volume is dropped whole, its loop skips the next volume (`part_end` cannot go below 0); a repair whose
-parts are all flat or empty deletes every volume, leaving an object with none; a cancel keeps the
-volumes already changed, but the object list is not told. `ObjectList::fix_through_cgal` takes its undo
-snapshot before the dialog, so what the dialog lets through lands in the repair's undo step, and it
-repairs a multi-volume selection by the indices it read first, which the first repair's split moves.
-Ours splits the repair in three (`capture_cgal_repair`, `plan_cgal_repair`: pure mesh work on any
-thread, predicting the parts `ModelVolume::split` makes; `apply_cgal_repair`: upstream's loop on the
-main thread, taking each part's repaired mesh from the plan), which the object list's Repair, the cut
-gizmo and MCP's `repair_mesh` all run. The loop skips nothing and never deletes the last model part;
-the list captures every selected object or volume before its first dialog, plans each under it, then,
-the dialog no longer updated, takes one snapshot and applies them, finding objects and volumes by
-pointer and id; kept painting is remapped, and each repaired part's convex hull worked out, in the plan
-(painting written between capture and apply is remapped in place instead, from each volume's facet
-timestamps; the paint tools refuse while the Repair dialog runs),
-the hull set through `ModelVolume::set_convex_hull`, which ours adds to `Model.hpp` (additive: the fifth
-count is upstream's own, 0 while it has none; on a non-zero, take upstream's and drop ours). On a "no" or 0, upstream fixed that part: take its version, keep the
-plan/apply split around it, and re-run `slic3rutils_tests "[MeshRepair]"`, whose "planned repair builds
-the same object as the repair done in place" test holds the plan to upstream's loop.
+Item AI: upstream's Repair (`fix_model_with_cgal_gui`, `FixModelByCgal.cpp`; since 2026-10, #16366, each volume
+repaired in place by `ModelVolume::repair` over `Slic3r::repair_mesh`, CGAL 6.2: no split, no delete) still runs on a
+worker thread against the live `ModelObject` while the progress dialog pumps events: it replaces meshes and gives
+volumes new ids there, which only the main thread may do (`ObjectID.hpp`), while the dialog's `YieldFor` runs other
+main-thread work, an MCP call's among it (`CallAfter` events are of the UI category), on the same object. Its worker is a
+`std::thread` (512 KB of stack on macOS), where the app's other CGAL work uses `create_thread`'s 16 MB.
+`ObjectList::fix_through_cgal` takes its undo snapshot before the dialog, so what the dialog lets through lands in the
+repair's undo step, and a cancel keeps the volumes already repaired without refreshing the list. Ours repairs in three
+steps (`capture_cgal_repair`; `plan_cgal_repair`: `repair_mesh` on copies on any thread, with each changed mesh's convex
+hull and kept painting remapped; `apply_cgal_repair`: the end of `ModelVolume::repair` on the main thread, taking the
+plan's mesh, hull and painting), which the object list's Repair and Fix All, the cut gizmo and MCP's `repair_mesh` all
+run. The list captures every object or volume before its first dialog, plans each under it, then, the dialog no longer
+updated, takes one snapshot and applies them, finding objects and volumes by pointer and id; a canceled repair changes
+nothing. Painting written between capture and apply is remapped in place instead, from each volume's facet timestamps
+(the paint tools refuse while the Repair dialog runs). The hull is set through `ModelVolume::set_convex_hull`, which ours
+adds to `Model.hpp` (additive: the fourth count is upstream's own, 0 while it has none; on a non-zero, take upstream's
+and drop ours). On a "no" or 0, upstream fixed that part: take its version, keep the plan/apply split around it, and
+re-run `slic3rutils_tests "[MeshRepair]"`, whose "planned repair builds the same object as the repair done in place" test
+holds the plan to `ModelVolume::repair`. Until 2026-10-22 ours predicted upstream's old split (`ModelVolume::split`, flat
+parts dropped), which upstream's rewrite removed.
 
 Item AK: adding a primitive part or modifier (`ObjectList::load_generic_subobject`, the object list's
 Add Part / Modifier / ... > Cube and friends) ends with `apply_object_instance_transfrom_to_all_volumes`,
@@ -1681,13 +1671,11 @@ instance partly outside it no longer keeps it from slicing). On "no" / a non-zer
 the third, take upstream's and re-run `slic3rutils_tests "[PlateInstances]"`, which calls them as the app
 does.
 
-Item AN: turning a plate's spiral vase on gives every object on it the object settings the vase needs
-(`PartPlate::set_vase_mode_related_object_config`: one wall, no top shell, no infill, no support). Upstream
-reused one key list for the settings the print preset lacks and for each object's own differing ones, so
-after the first object the list held only that object's own, and every later object kept its walls and
-infill on a vase plate. Ours keeps the two apart (`PartPlate::apply_vase_mode_object_config`, with the
-settings in `PartPlate::vase_mode_object_config`, which MCP's `set_plate_settings` reports from). On 0, take
-upstream's and re-run `slic3rutils_tests "[PlateInstances]"`.
+Item AN is a move since upstream fixed the bug (#16091, closing our issue #15995, 2026-10-08): turning a plate's spiral
+vase on gives every object on it the object settings the vase needs (`PartPlate::set_vase_mode_related_object_config`:
+one wall, no top shell, no infill, no support). Ours keeps upstream's loop in `PartPlate::apply_vase_mode_object_config`,
+with the settings in `PartPlate::vase_mode_object_config`, which MCP's `set_plate_settings` reports from. On a non-zero,
+upstream has its own: use it and re-run `slic3rutils_tests "[PlateInstances]"`.
 
 Item AO: deleting a filament slot renumbers every filament an object and its volumes name
 (`ObjectList::update_filament_values_for_items_when_delete_filament`). For a volume's
@@ -1798,17 +1786,17 @@ finished is not cancelled: its completion credits it. On "no", take upstream's c
 for `cancel_slice`; re-run `slic3rutils_tests "[SliceProgress]"`.
 
 Item AZ: `Plater::export_gcode_3mf` (Export plate sliced file, Export all plate sliced file) wrote the file
-with `export_3mf` and then pushed "Exported successfully" whatever it returned: a write that failed (a folder
-that is not there, a file in use) was reported exported. It also left `exporting_status` set, which only the
-background process's completion clears, so the next slice's completion pushed "Exported successfully" for the
-old file again. Ours returns whether it wrote the file, shows the app's "Export failed" error when it did not,
-and clears the status after the (synchronous) export; its file dialog takes MCP's path
+with `export_3mf` and then pushed "Exported successfully" whatever it returned. Since 2026-10 (#16464) upstream returns
+on a failed write, but silently, and it still leaves `exporting_status` set after a write that worked, which only the
+background process's completion clears, so the next slice's completion pushes "Exported successfully" for the old file
+again. Ours returns whether it wrote the file (MCP's `export_gcode` reads it), shows the app's "Export failed" error when
+it did not, and clears the status after the (synchronous) export either way; its file dialog takes MCP's path
 (`mcp_answer_path_dialog`). And it added ".3mf" to a chosen name unless it ended in exactly ".3mf": X.GCODE.3MF
 was written as X.GCODE.3MF.3mf. Ours adds it unless the name ends in .3mf in any case
 (`OrcaMCP::sliced_file_path`, which MCP's `export_gcode` answer reads too, so it names the file written). On
-"no", take upstream's and keep the dialog's MCP branch; export a sliced file to a folder that does not exist,
-then slice: no "Exported successfully". On "no" for the second, upstream compares without case: take its line
-and keep `sliced_file_path` for the answer.
+"no" for the first two, take upstream's and keep the dialog's MCP branch; export a sliced file to a folder that does not
+exist, then slice: an error, then no "Exported successfully". On "no" for the third, upstream compares without case: take
+its line and keep `sliced_file_path` for the answer.
 
 Item BA: `store_stl` (`Format/STL.cpp`) returned true whatever `write_binary` / `write_ascii` did (its own
 FIXME), and `Plater::export_stl` ignored what `store_stl` and `store_drc` returned: an STL or DRC export to a
@@ -1957,14 +1945,6 @@ through (`save_project_to`, `OrcaMCPServer.cpp`): `export_3mf` wrote the file an
 project stayed marked unsaved, and `save_project` named it before saving, so a failed save renamed it. On a
 non-zero count, upstream has its own; on changes to `save_project`, move them the same way.
 
-Item BL: admesh's `stl_open_count_facets` (`deps_src/admesh/stlinit.cpp`) decided binary or ASCII by the 128 bytes
-after the label alone: any byte above 127 meant binary. A small binary STL at whole millimetres with zero normals (10
-and 15 mm cubes from a generator) has none, so it was read as text and loaded no geometry; a binary STL whose label
-starts with "solid" was read right only because its bytes usually cross 127. A binary STL is exactly its label, its
-facet count and 50 bytes per facet, and ours decides by that first, falling back to the byte test; text never
-matches (the count's four bytes read as text are at least 0x09090909 facets, tabs, a file over 7.5 GB). On a non-zero, take upstream's
-and re-run `libslic3r_tests "[stl]"`, which writes such files byte by byte.
-
 Item BM is a hook, not a fix: MCP's `export_gcode` waits for the plain `.gcode` it asked the app to write in the
 background, so `Plater::priv::on_process_completed` tells the call's `OrcaMCP::GcodeExportOutcome`
 (`mcp_gcode_export`, set by `export_gcode_to_file` when the export is scheduled) whether the export was written,
@@ -2001,7 +1981,7 @@ the dialog starts with all three off and offers flow calibration first, as the p
 (item BN). Each box, the material station's too, is saved the moment it is toggled, not in `EndModal` on Send (the
 user's decision, 2026-09-29: Cancel and the close box keep the latest state too), and the station box is read back
 (`remembered_flashforge_material_station`), where upstream always started it from "has a station". The overload
-that made every such literal "true" is fixed at its root (item BQ). On a 0 for the first count, take upstream's
+that made every such literal "true" is fixed at its root, upstream since 2026-10 (#16092, closing our issue #15994). On a 0 for the first count, take upstream's
 save and re-run `slic3rutils_tests "[FlashforgeSendOptions]"`; on a 0 for the second, compare its defaults with the
 user's decision (all off, each box as last left in the dialog).
 
@@ -2012,35 +1992,16 @@ answer (`product_id`, a defaulted argument) and hands it to the dialog, which of
 remembered tick nowhere else (`sent_flashforge_print_options`). On a non-zero, upstream tells the dialog the machine
 itself: use its value in the same predicate and re-run `slic3rutils_tests "[FlashforgeSendOptions],[flashforge]"`.
 
-Item BQ: `AppConfig::set(section, key, value)` has a `std::string` and a `bool` overload, and a `const char*` converts
-to `bool` (a standard conversion) before it converts to `std::string` (a user-defined one), so every call with a text
-literal, or a ternary of two, stored "true" whatever it said: the Flashforge send dialog's boxes (item BO), its
-material-station key, the orient settings (`GLCanvas3D.cpp`), the CrealityPrint self-test box and the setup wizard's
-`firstguide/finish`. Ours adds a `const char*` overload, so each stores what it says. And `get_bool(section, key)` read
-"1" from the app section instead of the key's own. What each caller's old configs now read: the Flashforge boxes take
-"true" for no choice (off, as users saw); the orient keys have no reader; the self-test reader (`std::stoi`) failed on
-"true" and still does (off, as users saw), and a new Send's choice is now remembered; `firstguide/finish` keeps storing
-"true", by passing `true` (`WebGuideDialog.cpp`), since an older build sharing the data folder reads it with the old
-`get_bool`. On a non-zero first count, take upstream's overload; on a 0 second count, take upstream's `get_bool`; re-run
-`libslic3r_tests "[AppConfig]"` and `slic3rutils_tests "[FlashforgeSendOptions]"`.
-
-Item BR: upstream's #15674 (2026-09) ends `GLCanvas3D::render_thumbnail_internal` by restoring the canvas viewport
-through `wxGetApp().plater()`. The CLI renders thumbnails (`--export-3mf`, an arrange that writes a 3MF) with no wx
-application, so on macOS it dereferenced a null app and every such run segfaulted (the external regression suite's
-`arrange-with-allow-rotations`, `export-3mf-metadata-flags`, `object-overrides-roundtrip-export-3mf`, run locally; CI
-runs that suite on Linux only, where it did not crash). Ours restores it only when there is an app and a plater. On "no",
-take upstream's and re-run those three cases against a macOS build with the suite's `run_test.py`.
-
 Item BS is a feature, not a fix: an agent's launch (`ORCAMCP_SKIP_CLOUD_LOGIN`) has nobody at the screen, and on
 2026-09-30 an agent's Linux launch waited for good on the SSL prompt `GUI_App::on_init_inner` shows before the MCP
 server starts: the Linux build's OpenSSL looks for its CA bundle in the build machine's folders, so every fresh
 profile gets it. Ours leaves out each startup dialog on such a launch through `GUI::agent_launch_leaves_out`, which
 logs what it left out: that prompt (as its Yes), the network plugin download in `post_init`, the setup wizard
-(`config_wizard_startup`), the startup `check_new_version_sf`, the pre-2.4.0 profile-sync notice, and
-`load_language`'s missing-locale box (the app still exits). A launch by a person is unchanged. The second count:
-upstream's `load_language` builds `message + "\n\nApplication will close."` as a statement and drops it; ours adds
-it. On a non-zero first count upstream has an agent-launch path of its own: compare. When upstream adds a startup
-dialog, give it the same guard.
+(`config_wizard_startup`), the startup `check_new_version_sf`, the offer to migrate legacy filament presets
+(`check_legacy_user_filament_presets`, also asked after the cloud presets are pulled; Help > Migrate Filament Presets
+still offers it), the pre-2.4.0 profile-sync notice, and `load_language`'s missing-locale box (the app still exits). A
+launch by a person is unchanged. On a non-zero count upstream has an agent-launch path of its own: compare. When
+upstream adds a startup dialog, give it the same guard.
 
 Item BT: upstream's `HttpServer` ends the status line and every header of a reply with a bare LF
 (`std::endl`), where HTTP/1.1 requires CRLF. Browsers take it (the login callbacks), strict clients do not:

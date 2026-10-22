@@ -43,10 +43,10 @@ inline void begin_slicing_run()
     slicing_stage_text().clear();
 }
 
-// Called first thing in on_slicing_update, before upstream prefixes the text and before it drops an
-// update that arrives while a UI job runs. An update of an earlier slice (`generation`), or without a
-// percentage -- a warning refresh, not a stage -- is ignored. The text arrives as
-// " plate 1:Generating walls"; the space is dropped.
+// Called first thing in on_slicing_update, before it drops an update that arrives while a UI job runs.
+// An update of an earlier slice (`generation`), or without a percentage -- a warning refresh, not a
+// stage -- is ignored. The text arrives as the plate's status callback made it, "Slicing plate 1:
+// Generating walls" (translated); spaces around it are dropped.
 inline void note_slicing_status(unsigned generation, int percent, const std::string& text)
 {
     const size_t first = text.find_first_not_of(' ');

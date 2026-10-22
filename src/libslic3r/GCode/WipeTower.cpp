@@ -1,17 +1,42 @@
 #include "WipeTower.hpp"
 
+#include <algorithm>
 #include <cassert>
+#include <cstddef>
+#include <cmath>
+#include <cstdlib>
+#include <cstdio>
 #include <iostream>
+#include <map>
+#include <string>
+#include <utility>
+#include <limits>
+#include <math.h>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <numeric>
 #include <sstream>
 #include <iomanip>
+#include "libslic3r/Circle.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ArcFitter.hpp"
 #include "GCodeProcessor.hpp"
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
+#include "libslic3r/Line.hpp"
 #include "LocalesUtils.hpp"
 #include "libslic3r/PrintableHeightLimit.hpp"
+#include "libslic3r/GCodeWriter.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polyline.hpp"
+#include "libslic3r/MultiNozzleUtils.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 #include "Triangulation.hpp"
+#include "libslic3r/libslic3r.h"
+#include "libslic3r/Config.hpp"
 
 
 namespace Slic3r
@@ -1449,6 +1474,10 @@ public:
     void set_multi_nozzle_group_result(const MultiNozzleUtils::LayeredNozzleGroupResult *multi_nozzle_group_result) { m_multi_nozzle_group_result = multi_nozzle_group_result; }
     void set_physical_extruder_map(const std::vector<int> &physical_extruder_map) { m_physical_extruder_map = physical_extruder_map; }
 
+    // physical_extruder_map defaults to the single element {0} and is only widened to one entry
+    // per extruder on IMEX printers, so indexing it by tool is out of range on any other
+    // multi-extruder machine. Fall back to the tool's own index, matching the bounds-checked
+    // form GCodeProcessor uses for the same map.
 private:
     std::string set_normal_acceleration() {
         std::vector<unsigned int> accelerations = m_is_first_layer ? m_first_layer_normal_accelerations : m_normal_accelerations;
@@ -1501,8 +1530,10 @@ private:
             gcode << "M204 P" << acceleration;
         }
         else if (m_gcode_flavor == gcfKlipper && m_accel_to_decel_enable) {
-            gcode << "SET_VELOCITY_LIMIT ACCEL_TO_DECEL=" << acceleration * m_accel_to_decel_factor / 100;
-            gcode << "\nM204 S" << acceleration;
+            // One line, so Klipper derives the limit from this acceleration rather than the previous one.
+            std::string limits = "SET_VELOCITY_LIMIT ACCEL=" + std::to_string(acceleration);
+            GCodeWriter::append_klipper_accel_to_decel(limits, acceleration, m_accel_to_decel_factor);
+            gcode << limits;
         }
         else {
             // M204: Set default acceleration
@@ -3319,7 +3350,7 @@ WipeTower::ToolChangeResult WipeTower::merge_tcr(ToolChangeResult &first, ToolCh
     WipeTower::ToolChangeResult out = first;
     if ((first.end_pos - second.start_pos).norm() > (float)EPSILON) {
         std::string travel_gcode = "G1 X" + Slic3r::float_to_string_decimal_point(second.start_pos.x(), 3) + " Y" +
-                                   Slic3r::float_to_string_decimal_point(second.start_pos.y(), 3) + " F" + std::to_string(m_max_speed) + "\n";
+                                   Slic3r::float_to_string_decimal_point(second.start_pos.y(), 3) + " F" + Slic3r::float_to_string_decimal_point(m_max_speed, 6) + "\n";
         bool need_insert_travel = true;
         if (second.is_tool_change
             && is_approx(second.start_pos.x(), second.tool_change_start_pos.x())

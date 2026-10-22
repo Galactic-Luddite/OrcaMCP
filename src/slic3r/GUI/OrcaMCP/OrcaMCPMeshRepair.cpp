@@ -31,11 +31,8 @@ std::string without_final_period(std::string text)
 
 std::string nothing_to_repair(int object_id, int volume_id, const nlohmann::json& before)
 {
-    std::string message = volume_id < 0 ? "Nothing to repair: " + subject(object_id, volume_id) +
-                                              " has no open edges, each of its volumes is one shell, and none is flat or empty, "
-                                              "so nothing was changed."
-                                        : "Nothing to repair: " + subject(object_id, volume_id) +
-                                              " has no open edges, is one shell, and is not flat or empty, so nothing was changed.";
+    std::string message = "Nothing to repair: " + subject(object_id, volume_id) +
+                          " is already closed, consistently oriented and free of self-intersections, so nothing was changed.";
     const int recorded = before.value("errors_repaired", 0);
     if (volume_id < 0 && before.value("mesh_warning", false) && recorded > 0)
         message += " Its mesh_warning comes from the " + std::to_string(recorded) + (recorded == 1 ? " repair" : " repairs") +
@@ -59,15 +56,8 @@ std::string failed(const CgalRepairPlan& plan, int object_id)
 {
     const std::string where = plan.error_volume >= 0 ? " on volume " + std::to_string(plan.error_volume) : std::string();
     return "Repairing " + object_label(object_id) + " failed" + where + ": " + without_final_period(plan.error) +
-           ". Nothing was changed.";
-}
-
-std::string leaves_nothing(int object_id, int volume_id)
-{
-    const std::string why = volume_id < 0 ? "Every part of " + subject(object_id, volume_id) + " is flat or empty (no volume)"
-                                          : "Volume " + std::to_string(volume_id) + " of " + object_label(object_id) +
-                                                " is flat or empty (no volume), and the object has no other part to print";
-    return why + ", so repairing it would leave nothing to print. Nothing was changed; delete_object removes the object.";
+           ". Nothing was changed. A volume from which no solid can be built (a flat or empty one) cannot be repaired; "
+           "delete_object with volume_id removes one, or the object.";
 }
 
 bool any_volume_painted(const ModelObject& object)
@@ -102,13 +92,9 @@ RepairStep repair_step(const CgalRepairPlan& plan, bool past_wait_cap)
 {
     if (plan.canceled || past_wait_cap)
         return RepairStep::timed_out;
-    if (!plan.error.empty())
-        return RepairStep::failed;
-    if (plan.leaves_no_model_part())
-        return RepairStep::leaves_nothing;
-    if (plan.changes_nothing())
-        return RepairStep::nothing_to_repair;
-    return RepairStep::apply;
+    if (!plan.changes_nothing())
+        return RepairStep::apply;
+    return plan.error.empty() ? RepairStep::nothing_to_repair : RepairStep::failed;
 }
 
 std::string repair_step_message(RepairStep step, const CgalRepairPlan& plan, int object_id, int volume_id, double wait_cap_s,
@@ -118,7 +104,6 @@ std::string repair_step_message(RepairStep step, const CgalRepairPlan& plan, int
     case RepairStep::nothing_to_repair: return nothing_to_repair(object_id, volume_id, before);
     case RepairStep::timed_out: return timed_out(object_id, volume_id, wait_cap_s, before);
     case RepairStep::failed: return failed(plan, object_id);
-    case RepairStep::leaves_nothing: return leaves_nothing(object_id, volume_id);
     case RepairStep::apply: break;
     }
     return {};
@@ -136,9 +121,21 @@ nlohmann::json repair_facts_json(const ModelObject& object)
     return facts;
 }
 
-nlohmann::json repair_parts_json(const CgalRepairPlan& plan)
+nlohmann::json repair_stats_json(const CgalRepairPlan& plan)
 {
-    return {{"split", plan.parts_split}, {"dropped", plan.parts_dropped}, {"repaired", plan.parts_repaired}};
+    const MeshRepairStats totals = plan.totals();
+    return {{"volumes_repaired", plan.volumes_changed()},     {"welded_vertices", totals.welded_vertices},
+            {"removed_triangles", totals.removed_triangles}, {"reversed_shells", totals.reversed_shells},
+            {"filled_holes", totals.filled_holes},           {"removed_shells", totals.removed_shells},
+            {"self_intersections", totals.self_intersections}};
+}
+
+std::string unrepaired_volumes_message(const CgalRepairPlan& plan)
+{
+    if (plan.error.empty())
+        return {};
+    return "Not every volume could be repaired: " + without_final_period(plan.error) +
+           ". Those volumes were left as they were; the others were repaired.";
 }
 
 nlohmann::json repair_answer_json(int object_id, const std::string& object_name, int volume_id, bool keep_painting,
@@ -150,9 +147,9 @@ nlohmann::json repair_answer_json(int object_id, const std::string& object_name,
         answer["volume_id"] = volume_id;
     answer["keep_painting"]      = keep_painting;
     answer["keep_painting_from"] = keep_painting_given ? "argument" : "app_setting";
-    answer["volumes_before"]     = before.value("volumes", 0);
-    answer["volumes_after"]      = after.value("volumes", 0);
-    answer["parts"]              = repair_parts_json(plan);
+    answer["repair"]             = repair_stats_json(plan);
+    if (const std::string unrepaired = unrepaired_volumes_message(plan); !unrepaired.empty())
+        answer["message"] = unrepaired;
     answer["before"]             = before;
     answer["after"]              = after;
     return answer;

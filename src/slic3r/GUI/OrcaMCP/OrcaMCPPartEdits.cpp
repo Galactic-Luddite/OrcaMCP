@@ -398,7 +398,7 @@ std::vector<double> drop_after_volume_change(ModelObject& object, const std::vec
     for (std::size_t i = 0; i < object.instances.size(); ++i) {
         ModelInstance& instance = *object.instances[i];
         const double   after    = instance_min_z(object, i);
-        if (!instance.auto_drop || after == std::numeric_limits<double>::max())
+        if (!object.auto_drop || after == std::numeric_limits<double>::max())
             continue;
         // GLCanvas3D::do_move drops a floating instance and leaves a sinking one; do_rotate and do_scale
         // also leave one that was sinking before, unless the change lifted it clear of the bed.

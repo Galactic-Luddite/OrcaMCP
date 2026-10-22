@@ -6,13 +6,21 @@
 	#include <pthread.h>
 #endif
 
+#include <optional>
+#include <string>
+#include <cstddef>
+#include <cassert>
+#include <sstream>
+#include <locale.h>
+#include <clocale>
+
 #include <atomic>
 #include <clocale>
 #include <thread>
 #include <tbb/task_scheduler_observer.h>
 
 #include "Thread.hpp"
-#include "Utils.hpp"
+#include <cstring>
 
 namespace Slic3r {
 

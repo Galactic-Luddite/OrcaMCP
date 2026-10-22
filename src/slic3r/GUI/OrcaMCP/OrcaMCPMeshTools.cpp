@@ -82,14 +82,12 @@ nlohmann::json start_repair(const nlohmann::json& params, RepairRequest& request
 // plate bookkeeping every MCP transform uses: every instance re-homed, as a new one
 // (rehome_and_report_placement, which writes the placement fields into `placement`), where the list
 // re-homes instance 0 only.
-void update_after_repair(Plater& plater, int object_id, int volume_id, std::size_t volumes_before, nlohmann::json& placement)
+void update_after_repair(Plater& plater, int object_id, int volume_id, nlohmann::json& placement)
 {
     ModelObject& object = *plater.model().objects[std::size_t(object_id)];
     object.ensure_on_bed();
     plater.changed_mesh(object_id);
     ObjectList* list = wxGetApp().obj_list();
-    if (object.volumes.size() != volumes_before)
-        list->add_volumes_to_object_in_list(std::size_t(object_id));
     rehome_and_report_placement(placement, object_id, /*moved=*/true);
     list->update_plate_values_for_items();
     list->update_item_error_icon(object_id, volume_id);
@@ -149,37 +147,30 @@ nlohmann::json finish_repair(RepairRequest& request, CgalRepairPlan& plan, bool 
 
     // The object list's own undo step: nothing above changed the object.
     Plater::TakeSnapshot snapshot(plater, _u8L("Repairing model object"));
-    if (!request.keep_painting)
-        plater->clear_before_change_mesh(object_id);
-    const std::size_t      volumes_before = object->volumes.size();
+    const bool             painted_before = request.before.value("painted", false);
     const CgalRepairResult result         = Slic3r::apply_cgal_repair(*object, request.keep_painting, plan);
-    nlohmann::json         placement      = nlohmann::json::object();
-    update_after_repair(*plater, object_id, volume_id < 0 ? -1 : result.first_volume, volumes_before, placement);
+    if (!result.error.empty())
+        return guard.report(with_closed_tool(error_response("Repairing object " + std::to_string(object_id) + " changed nothing: " +
+                                                            result.error),
+                                             closed_tool));
+    nlohmann::json placement = nlohmann::json::object();
+    update_after_repair(*plater, object_id, volume_id, placement);
 
     nlohmann::json answer = repair_answer_json(object_id, object->name, volume_id, request.keep_painting,
                                                request.keep_painting_given, request.before, repair_facts_json(*object), plan);
+    // As the object list's Repair tells the user when a repair cleared painting.
+    if (painted_before && !answer["after"].value("painted", false))
+        plater->notify_painting_removed();
     answer.update(placement);
-    answer["volumes"] = mesh_volume_rows_json(*object);
-    if (volume_id >= 0) {
-        nlohmann::json became = nlohmann::json::array();
-        for (int i = result.first_volume; i >= 0 && i <= result.last_volume; ++i)
-            became.push_back(i);
-        answer["volume_ids_after"] = std::move(became);
-    }
-    if (!result.error.empty()) {
-        // A part the plan had not foreseen failed here: what the loop changed before it stays.
-        answer["status"]  = "error";
-        answer["message"] = "Repairing object " + std::to_string(object_id) + " stopped partway: " + result.error +
-                            " What it changed before that stays; undo reverts the whole repair.";
-    }
+    answer["volumes"]         = mesh_volume_rows_json(*object);
     answer["active_warnings"] = get_active_warnings_json(plater);
     return guard.report(with_closed_tool(std::move(answer), closed_tool));
 }
 
-// repair_mesh: capture on the main thread, the CGAL work on this (the HTTP) thread, apply on the main
-// thread. The main thread never waits for CGAL, and only it changes the model. The work stops between
-// parts when the app quits (the gate closes, and the next run_on_main_thread refuses with -32002,
-// nothing applied) or when this call's wait runs out; a part being repaired runs to its end.
+// repair_mesh: capture on the main thread, the repair on this (the HTTP) thread, apply on the main
+// thread. The main thread never waits for the repair, and only it changes the model. The work stops,
+// within a volume too, when the app quits (the gate closes, and the next run_on_main_thread refuses with
+// -32002, nothing applied) or when this call's wait runs out.
 nlohmann::json repair_mesh(const nlohmann::json& params)
 {
     RepairRequest        request;
@@ -251,20 +242,22 @@ void OrcaMCPServer::register_mesh_tools()
         "repair_mesh",
         ToolCategory::Models,
         "Repair a mesh: close holes, open edges",
-        "Repair an object's mesh: close its holes (open edges, non-manifold) with the app's own repair -- the "
-        "object list's Repair, CGAL-based, on every platform. Each volume made of several shells is split into "
-        "one volume per shell; shells with no volume (flat or empty) are deleted; every shell with open edges "
-        "has its holes closed. A closed stray shell is not deleted: it becomes a volume of its own "
-        "(get_object_components lists shells). The object is then dropped onto the bed. Painting is cleared "
-        "unless keep_painting keeps it. One undo step. When there is a repair to apply, an open toolbar tool "
+        "Repair an object's mesh with the app's own repair -- the object list's Repair (Fix Model), on every "
+        "platform: each volume is repaired in place, its cracks welded, its shells oriented consistently, its holes "
+        "(open edges, non-manifold) filled, its self-intersections removed and its shells of fewer than 4 facets "
+        "removed. No volume is split or deleted; a closed stray shell stays in its volume (get_object_components "
+        "lists shells). A volume from which no solid can be built (flat or empty) is left as it is, and the answer "
+        "says so. The object is then dropped onto the bed. A repaired volume's painting is cleared unless "
+        "keep_painting keeps it. One undo step. When there is a repair to apply, an open toolbar tool "
         "(gizmo) is closed first, as the Repair needs, and the answer names it (closed_toolbar_tool); closing "
         "a painting tool records its own undo step, as when the user closes it. Nothing changes when there "
         "is nothing to repair, when the call is "
         "refused or fails, or when the repair takes longer than this call may wait (a little under the "
-        "bridge's ORCAMCP_TIMEOUT). The answer: get_mesh_health's numbers before and after, the volumes before "
-        "and after, the parts split, dropped and repaired, whether painting was kept, and the object's "
-        "placement. Refused while a slice, an export or an upload runs (wait_for_slice first), or an arrange "
-        "or orient. A large mesh can take minutes.",
+        "bridge's ORCAMCP_TIMEOUT). The answer: get_mesh_health's numbers before and after, `repair` (volumes "
+        "repaired, vertices welded, triangles removed, shells reversed, holes filled, shells removed, "
+        "self-intersections removed), whether painting was kept, and the object's placement. Refused while a "
+        "slice, an export or an upload runs (wait_for_slice first), or an arrange or orient. A large mesh can "
+        "take minutes.",
         {
             {"type", "object"},
             {"properties", {

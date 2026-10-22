@@ -314,10 +314,10 @@ TEST_CASE("a sinking object is left sinking by a transform", "[transform_frames]
     CHECK_THAT(world_box(*built.object).min.z(), WithinAbs(-10.0, 1e-6));
 }
 
-TEST_CASE("an instance with auto_drop off is not dropped", "[transform_frames]")
+TEST_CASE("an object with auto_drop off is not dropped", "[transform_frames]")
 {
     RotatedObject built = make_rotated_box();
-    built.object->instances[0]->auto_drop = false;
+    built.object->auto_drop = false;
     transform_instances_on_bed(*built.object, Geometry::scale_transform(Vec3d(1.5, 1.5, 1.5)));
     CHECK_THAT(world_box(*built.object).min.z(), WithinAbs(-5.0, 1e-6));
 }

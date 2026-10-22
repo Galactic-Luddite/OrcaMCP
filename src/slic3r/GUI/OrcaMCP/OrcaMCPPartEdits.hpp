@@ -159,8 +159,8 @@ std::vector<double> instances_lowest_z(const ModelObject& object);
 // (should_drop_to_bed, with the lowest point before).
 enum class VolumeChange { move, reshape };
 
-// The GUI's drop after a volume changed, for every instance with auto_drop; how far each instance
-// went down (0 for one that stayed).
+// The GUI's drop after a volume changed, for every instance of an object with auto_drop (an object's
+// setting, shared by its instances); how far each instance went down (0 for one that stayed).
 std::vector<double> drop_after_volume_change(ModelObject& object, const std::vector<double>& lowest_before, VolumeChange change);
 
 // ---- Settings on objects and parts ----

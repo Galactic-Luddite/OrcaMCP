@@ -1,8 +1,24 @@
 #include "Http.hpp"
 #include "ThreadCancel.hpp"
+#include "libslic3r_version.h"
 
+#include <algorithm>
+#include <atomic>
+#include <boost/filesystem/operations.hpp>
+#include <cassert>
 #include <cstdlib>
+#include <curl/curlver.h>
+#include <fstream>
 #include <functional>
+#include <memory>
+#include <string>
+#include <stdlib.h>
+#include <map>
+#include <mutex>
+#include <ios>
+#include "libslic3r/Exception.hpp"
+#include <iterator>
+#include <ostream>
 #include <thread>
 #include <deque>
 #include <sstream>
@@ -14,6 +30,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <curl/curl.h>
+#include <utility>
 
 #ifdef OPENSSL_CERT_OVERRIDE
 #include <openssl/x509.h>
@@ -45,7 +62,6 @@ struct CurlGlobalInit
             "/etc/ssl/ca-bundle.pem"              // OpenSUSE Tumbleweed
         };
 
-        namespace fs = boost::filesystem;
         // Env var name for the OpenSSL CA bundle (SSL_CERT_FILE nomally)
         const char *const SSL_CA_FILE = X509_get_default_cert_file_env();
         const char * ssl_cafile = ::getenv(SSL_CA_FILE);
@@ -54,10 +70,14 @@ struct CurlGlobalInit
             ssl_cafile = X509_get_default_cert_file();
 
         int replace = true;
-        if (!ssl_cafile || !fs::exists(fs::path(ssl_cafile))) {
+        // ORCA: non-throwing overload; fs_ec is deliberately unread. An existing but unreadable
+        //       path (a static build's baked-in OPENSSLDIR run as another user, say) must fall
+        //       through to CA_BUNDLES, not throw out of this constructor.
+        boost::system::error_code fs_ec;
+        if (!ssl_cafile || !fs::exists(fs::path(ssl_cafile), fs_ec)) {
             const char * bundle = nullptr;
             for (const char * b : CA_BUNDLES) {
-                if (fs::exists(fs::path(b))) {
+                if (fs::exists(fs::path(b), fs_ec)) {
                     ::setenv(SSL_CA_FILE, bundle = b, replace);
                     break;
                 }
@@ -123,7 +143,7 @@ struct Http::priv
 	std::string error_buffer;    // Used for CURLOPT_ERRORBUFFER
     std::string headers;
 	size_t limit;
-	bool cancel;
+	std::atomic_bool cancel;
 	bool cancelled_by_thread = false; // Orca: by the thread's ScopedThreadCancelCheck, not by cancel()
     std::unique_ptr<form_file> putFile;
 
@@ -262,16 +282,16 @@ int Http::priv::xfercb(void *userp, curl_off_t dltotal, curl_off_t dlnow, curl_o
 		self->progressfn(progress, cb_cancel);
 	}
 
-	if (cb_cancel) { self->cancel = true; }
+	if (cb_cancel) { self->cancel.store(true); }
 
 	// Orca: a blocking transfer gives up once its thread is cancelled (the app is quitting, see
 	// ThreadCancel.hpp); perform() then reports it to the error callback.
-	if (!self->cancel && this_thread_cancelled()) {
-		self->cancel              = true;
+	if (!self->cancel.load() && this_thread_cancelled()) {
 		self->cancelled_by_thread = true;
+		self->cancel              = true;
 	}
 
-	return self->cancel;
+	return self->cancel.load();
 }
 
 int Http::priv::xfercb_legacy(void *userp, double dltotal, double dlnow, double ultotal, double ulnow)
@@ -474,6 +494,14 @@ void Http::priv::http_perform()
 	if (!postfields.empty()) {
 		::curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postfields.c_str());
 		::curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, postfields.size());
+	} else if (method == "POST" && form == nullptr && mime == nullptr) {
+		// A POST with no body. Without CURLOPT_POSTFIELDS, curl takes the request body from
+		// the read callback, but form_file_read_cb only has a usable user pointer for a PUT
+		// (set_put_body) or a streamed multipart part (form_add_file); for an empty POST it
+		// dereferences libcurl's default READDATA as a form_file and crashes. Point curl at a
+		// zero-length body so the read callback is never used.
+		::curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postfields.c_str());
+		::curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
 	}
 
 	CURLcode res = ::curl_easy_perform(curl);
@@ -485,7 +513,7 @@ void Http::priv::http_perform()
 			if (cancelled_by_thread) {
 				// Orca: an error, so a caller that never set on_progress does not read it as success
 				if (errorfn) { errorfn(std::move(buffer), "Request cancelled", 0); }
-			} else if (cancel) {
+			} else if (cancel.load()) {
 				// The abort comes from the request being cancelled programatically
 				Progress dummyprogress(0, 0, 0, 0, std::string());
 				bool cancel = true;
@@ -796,7 +824,7 @@ void Http::perform_sync()
 
 void Http::cancel()
 {
-	if (p) { p->cancel = true; }
+	if (p) { p->cancel.store(true); }
 }
 
 void Http::print() const
@@ -942,13 +970,12 @@ std::string Http::tls_global_init()
 
 std::string Http::tls_system_cert_store()
 {
-    std::string ret;
-
 #ifdef OPENSSL_CERT_OVERRIDE
-    ret = ::getenv(X509_get_default_cert_file_env());
+    if (const char *cert_file = ::getenv(X509_get_default_cert_file_env()))
+        return cert_file;
 #endif
 
-    return ret;
+    return {};
 }
 
 std::string Http::url_encode(const std::string &str)
