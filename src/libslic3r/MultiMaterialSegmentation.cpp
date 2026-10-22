@@ -1928,6 +1928,10 @@ static void remove_multiple_edges_in_vertices(MMU_Graph &graph, const std::vecto
 }
 
 
+// File-local: libslic3r has another IslandLocator (ConnectedBodies.hpp), and two classes of one name in one
+// namespace share whichever inline destructor the linker keeps -- which freed this one's grid as the other's
+// vector<bool> and aborted every slice of a painted object (OrcaMCP, 2026-10-23).
+namespace {
 // Finds the islands (layer ExPolygons) a region piece overlaps. A top or bottom region is projected from the neighbouring
 // layers and may reach past the island it belongs to, or over several islands.
 class IslandLocator
@@ -1987,6 +1991,7 @@ private:
     coord_t                          m_cell_w = 1, m_cell_h = 1;
     std::vector<std::vector<size_t>> m_grid;
 };
+} // namespace
 
 static std::vector<std::vector<ExPolygons>> merge_segmented_layers(const std::vector<ExPolygons>              &input_expolygons,
                                                                    const std::vector<std::vector<ExPolygons>> &segmented_regions,
