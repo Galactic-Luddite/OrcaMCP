@@ -124,8 +124,9 @@ private:
                             const FlashforgeApi::PrintOptions&                      options,
                             const nlohmann::json&                                   material_mappings,
                             std::optional<FlashforgeJobProgress::SliceTable>        slice_table = std::nullopt) const;
-    // Hands a print's slice table to the flashforge-obico agent the preset's Obico names, and logs how
-    // that went; nothing without an Obico. Bounded to a few seconds per step.
+    // Hands a print's slice table to the flashforge-obico agent the preset's Obico names, logs how that
+    // went (a warning when the agent did not take it) and records it on the print start for
+    // get_printer_status. Nothing without an Obico. Bounded to a few seconds per step.
     void hand_slice_table_to_obico_agent(const std::string& file_name, const FlashforgeJobProgress::SliceTable& table) const;
     std::string make_http_url(const std::string& path) const;
     int  get_err_code_from_body(const std::string &body) const;

@@ -169,30 +169,32 @@ bool read_obico_document(const std::string& obico_url, const std::string& token,
     return true;
 }
 
-std::string hand_over_slice_table(const std::string&                       obico_url,
-                                  const std::string&                       token,
-                                  const std::string&                       file_name,
-                                  const FlashforgeJobProgress::SliceTable& table)
+Outcome hand_over_slice_table(const std::string&                       obico_url,
+                              const std::string&                       token,
+                              const std::string&                       file_name,
+                              const FlashforgeJobProgress::SliceTable& table)
 {
     nlohmann::json document;
     std::string    error;
     if (!read_obico_document(obico_url, token, document, error))
-        return "not handed to the Obico agent: " + error;
+        return {false, "not handed to the Obico agent: " + error};
     const auto agent = agent_url(document);
     if (!agent)
-        return "not handed to the Obico agent: Obico lists no camera address of the agent";
+        return {false, "not handed to the Obico agent: Obico lists no camera address of the agent"};
 
-    std::string outcome;
+    Outcome outcome{false, "not handed to the Obico agent at " + *agent + ": no answer"};
     Http::post(*agent + "/api/slice-table")
         .header("Content-Type", "application/json")
         .set_post_body(slice_table_body(file_name, table))
         .timeout_connect(static_cast<long>(kStepTimeout.count()))
         .timeout_max(static_cast<long>(2 * kStepTimeout.count()))
         .on_complete([&](std::string body, unsigned status) {
-            outcome = (boost::format("handed to the Obico agent at %1%: HTTP %2% %3%") % *agent % status % body).str();
+            const bool taken = status >= 200 && status < 300;
+            outcome          = {taken, (boost::format("%1% the Obico agent at %2%: HTTP %3% %4%") %
+                                        (taken ? "handed to" : "not taken by") % *agent % status % body).str()};
         })
         .on_error([&](std::string body, std::string err, unsigned status) {
-            outcome = (boost::format("not handed to the Obico agent at %1%: HTTP %2% %3% %4%") % *agent % status % err % body).str();
+            outcome = {false, (boost::format("not handed to the Obico agent at %1%: HTTP %2% %3% %4%") % *agent % status % err % body).str()};
         })
         .perform_sync();
     return outcome;

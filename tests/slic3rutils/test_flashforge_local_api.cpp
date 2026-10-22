@@ -296,6 +296,26 @@ TEST_CASE("StatusCache returns a host's last status with its age", "[flashforge]
     CHECK_FALSE(cache.get("10.0.0.101", t0).has_value()); // another printer's status is not this one's
 }
 
+TEST_CASE("A print start learns how its slice table reached the agent without growing younger", "[flashforge]")
+{
+    using Clock = PrintStartLog::Clock;
+    PrintStartLog           log;
+    const Clock::time_point t0 = Clock::now();
+
+    const auto took = [](PrintStart& start) { start.obico_agent_took_table = true; };
+    log.update("10.0.0.100", took); // nothing recorded: nothing to change
+    CHECK_FALSE(log.get("10.0.0.100", t0).has_value());
+
+    PrintStart start;
+    start.file_name = "vase.gcode.3mf";
+    log.put("10.0.0.100", start, t0);
+    log.update("10.0.0.100", took);
+    const auto recorded = log.get("10.0.0.100", t0 + std::chrono::seconds(30));
+    REQUIRE(recorded.has_value());
+    CHECK(recorded->value.obico_agent_took_table == std::optional<bool>(true));
+    CHECK(recorded->age_s == 30);
+}
+
 TEST_CASE("PrintStartLog keeps each printer's last accepted start with its age", "[flashforge]")
 {
     using Clock = PrintStartLog::Clock;

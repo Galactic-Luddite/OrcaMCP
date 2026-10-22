@@ -134,6 +134,14 @@ public:
         m_entries[host] = Entry{std::move(value), now};
     }
 
+    // Changes the host's value in place, keeping when it was put; nothing when there is none.
+    template<class Change> void update(const std::string& host, Change&& change)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (const auto it = m_entries.find(host); it != m_entries.end())
+            change(it->second.value);
+    }
+
     std::optional<Aged> get(const std::string& host, Clock::time_point now = Clock::now()) const
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -172,6 +180,10 @@ struct PrintStart
     // The slice of the file, for a print this app sliced and sent: reads the printer's progress
     // (FlashforgeJobProgress::apply). None for a file printed from the printer's storage.
     std::optional<FlashforgeJobProgress::SliceTable> slice_table;
+    // Whether the flashforge-obico agent the preset's Obico names took that table, and its answer or
+    // why not. Unset with no Obico or no table.
+    std::optional<bool> obico_agent_took_table;
+    std::string         obico_agent_detail;
 };
 
 // The last print each host accepted from this process. Flashforge::upload_local_api (with printNow)

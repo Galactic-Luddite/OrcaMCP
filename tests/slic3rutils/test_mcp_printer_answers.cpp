@@ -162,6 +162,13 @@ TEST_CASE("last_print_started_here says what the last start asked for, and nothi
     // entries are not that shape, so nothing invites sending them back as one.
     CHECK_FALSE(answer.contains("material_mappings"));
     CHECK(answer["fed_from"] == json::array({{{"tool_id", 0}, {"slot_id", 2}, {"material", "PLA"}, {"color", "#FF0000"}}}));
+    // No Obico, or no slice table to hand over: nothing to say.
+    CHECK(answer["obico_agent"].is_null());
+
+    recorded.value.obico_agent_took_table = false;
+    recorded.value.obico_agent_detail     = "not handed to the Obico agent: connect: Connection refused";
+    CHECK(print_start_json(recorded)["obico_agent"] ==
+          json{{"took_slice_table", false}, {"detail", "not handed to the Obico agent: connect: Connection refused"}});
 }
 
 namespace {

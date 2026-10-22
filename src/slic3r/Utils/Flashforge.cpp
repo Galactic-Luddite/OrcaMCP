@@ -790,8 +790,17 @@ void Flashforge::hand_slice_table_to_obico_agent(const std::string& file_name, c
 {
     if (m_obico_url.empty())
         return;
-    BOOST_LOG_TRIVIAL(info) << "[Flashforge] slice table of " << file_name << " "
-                            << ObicoAgentHandoff::hand_over_slice_table(m_obico_url, m_obico_token, file_name, table);
+    const ObicoAgentHandoff::Outcome outcome = ObicoAgentHandoff::hand_over_slice_table(m_obico_url, m_obico_token, file_name, table);
+    if (outcome.handed)
+        BOOST_LOG_TRIVIAL(info) << "[Flashforge] slice table of " << file_name << " " << outcome.detail;
+    else
+        BOOST_LOG_TRIVIAL(warning) << "[Flashforge] slice table of " << file_name << " " << outcome.detail;
+    FlashforgeLocalApi::print_start_log().update(m_local_api_host, [&](FlashforgeLocalApi::PrintStart& start) {
+        if (start.file_name != file_name)
+            return;
+        start.obico_agent_took_table = outcome.handed;
+        start.obico_agent_detail     = outcome.detail;
+    });
 }
 
 bool Flashforge::request_local_api_json(const std::string& path, const std::string& body, std::string& response_body, wxString& error_msg, FlashforgeLocalApi::RequestFailure* failure_out) const

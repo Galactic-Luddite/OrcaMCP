@@ -355,7 +355,10 @@ nlohmann::json print_start_json(const std::optional<FlashforgeLocalApi::Recorded
             {"leveling", start.options.leveling},
             {"flow_calibration", start.options.flow_calibration},
             {"time_lapse", start.options.time_lapse},
-            {"fed_from", fed_from}};
+            {"fed_from", fed_from},
+            {"obico_agent", start.obico_agent_took_table ? nlohmann::json{{"took_slice_table", *start.obico_agent_took_table},
+                                                                          {"detail", start.obico_agent_detail}}
+                                                         : nlohmann::json()}};
 }
 
 nlohmann::json print_host_preset_json(const std::string& name, const DynamicPrintConfig& config, bool is_selected)

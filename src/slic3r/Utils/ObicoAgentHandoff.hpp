@@ -33,9 +33,16 @@ std::string obico_websocket_target(const std::string& token);
 // within a few seconds. Only an http:// Obico is read. False with `error` set otherwise.
 bool read_obico_document(const std::string& obico_url, const std::string& token, nlohmann::json& document, std::string& error);
 
+// How a hand-off went: whether the agent took the table, and its answer or why nothing was handed over.
+struct Outcome
+{
+    bool        handed{false};
+    std::string detail;
+};
+
 // Hands `table` to the agent of the printer whose Obico URL and token are given. Bounded to a few
-// seconds per step. Returns what happened, for the log: the agent's answer, or why nothing was handed over.
-std::string hand_over_slice_table(const std::string&                       obico_url,
+// seconds per step.
+Outcome hand_over_slice_table(const std::string&                       obico_url,
                                   const std::string&                       token,
                                   const std::string&                       file_name,
                                   const FlashforgeJobProgress::SliceTable& table);
