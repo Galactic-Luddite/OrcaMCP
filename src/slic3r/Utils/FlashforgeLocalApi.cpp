@@ -6,6 +6,7 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/format.hpp>
 
+#include <cctype>
 #include <regex>
 #include <vector>
 
@@ -238,6 +239,61 @@ PrintStartLog& print_start_log()
 {
     static PrintStartLog log;
     return log;
+}
+
+nlohmann::json print_start_to_json(const PrintStart& start)
+{
+    nlohmann::json doc = {{"file_name", start.file_name},
+                          {"accepted_unix_s", start.accepted_unix_s},
+                          {"leveling", start.options.leveling},
+                          {"flow_calibration", start.options.flow_calibration},
+                          {"time_lapse", start.options.time_lapse},
+                          {"material_mappings", start.material_mappings.is_array() ? start.material_mappings : nlohmann::json::array()}};
+    if (start.slice_table)
+        doc["slice_table"] = nlohmann::json::parse(FlashforgeJobProgress::to_json(*start.slice_table));
+    if (start.obico_agent_took_table) {
+        doc["obico_agent_took_table"] = *start.obico_agent_took_table;
+        doc["obico_agent_detail"]     = start.obico_agent_detail;
+    }
+    return doc;
+}
+
+std::optional<PrintStart> print_start_from_json(const nlohmann::json& doc)
+{
+    if (!doc.is_object() || !doc.contains("file_name") || !doc["file_name"].is_string() || !doc.contains("accepted_unix_s") ||
+        !doc["accepted_unix_s"].is_number_integer())
+        return std::nullopt;
+    PrintStart start;
+    start.file_name = doc["file_name"].get<std::string>();
+    if (start.file_name.empty())
+        return std::nullopt;
+    const auto flag = [&doc](const char* key) { return doc.contains(key) && doc[key].is_boolean() && doc[key].get<bool>(); };
+    start.options.leveling         = flag("leveling");
+    start.options.flow_calibration = flag("flow_calibration");
+    start.options.time_lapse       = flag("time_lapse");
+    if (doc.contains("material_mappings") && doc["material_mappings"].is_array())
+        start.material_mappings = doc["material_mappings"];
+    if (doc.contains("slice_table")) {
+        // A table that does not read back is dropped, never half-applied.
+        start.slice_table = FlashforgeJobProgress::from_json(doc["slice_table"].dump());
+        if (!start.slice_table)
+            return std::nullopt;
+    }
+    if (doc.contains("obico_agent_took_table") && doc["obico_agent_took_table"].is_boolean()) {
+        start.obico_agent_took_table = doc["obico_agent_took_table"].get<bool>();
+        start.obico_agent_detail     = doc.value("obico_agent_detail", std::string());
+    }
+    start.accepted_unix_s = doc["accepted_unix_s"].get<long long>();
+    return start;
+}
+
+std::string print_start_file_name(const std::string& host)
+{
+    std::string safe = host;
+    for (char& c : safe)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-'))
+            c = '_';
+    return "print_start_" + safe + ".json";
 }
 
 }} // namespace Slic3r::FlashforgeLocalApi

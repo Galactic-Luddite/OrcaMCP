@@ -184,18 +184,30 @@ struct PrintStart
     // why not. Unset with no Obico or no table.
     std::optional<bool> obico_agent_took_table;
     std::string         obico_agent_detail;
+    // When the printer accepted it, in Unix seconds: how old a start read back from disk is.
+    long long accepted_unix_s{0};
 };
 
-// The last print each host accepted from this process. Flashforge::upload_local_api (with printNow)
-// and Flashforge::print_gcode_file record into it once the printer said yes, so the send dialog,
-// send_to_printer, print_printer_file and the printer agent are all here. A print started on the
-// printer's screen, from another computer or OrcaMCP instance, or before this one launched is not.
-// Memory only.
+// The last print each host accepted. Flashforge::upload_local_api (with printNow) and
+// Flashforge::print_gcode_file record into it once the printer said yes, so the send dialog,
+// send_to_printer, print_printer_file and the printer agent are all here. A copy is kept on disk in the
+// data folder (print_start_to_json), so an OrcaMCP started again mid-print -- closed, crashed -- still
+// reads the print it sent by its slice; instances on one data folder share it. A print started on the
+// printer's screen or from another computer is not in it.
 using PrintStartLog      = LatestPerHost<PrintStart>;
 using RecordedPrintStart = PrintStartLog::Aged;
 
 // The process-wide log every Flashforge host records into.
 PrintStartLog& print_start_log();
+
+// A print start as the document kept on disk.
+nlohmann::json print_start_to_json(const PrintStart& start);
+// The start from print_start_to_json's document; nullopt for anything else, a slice table that does not read
+// back included.
+std::optional<PrintStart> print_start_from_json(const nlohmann::json& document);
+// The file a host's last start is kept in, inside the data folder's "flashforge" folder: the host with
+// every character outside [A-Za-z0-9.-] as '_'.
+std::string print_start_file_name(const std::string& host);
 
 }} // namespace Slic3r::FlashforgeLocalApi
 

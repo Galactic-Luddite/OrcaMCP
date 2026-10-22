@@ -296,6 +296,40 @@ TEST_CASE("StatusCache returns a host's last status with its age", "[flashforge]
     CHECK_FALSE(cache.get("10.0.0.101", t0).has_value()); // another printer's status is not this one's
 }
 
+TEST_CASE("A print start kept on disk reads back whole, so a restarted OrcaMCP still reads its print by the slice", "[flashforge]")
+{
+    PrintStart start;
+    start.file_name               = "bird_whistle_C5P_PLA_2h27m.gcode.3mf";
+    start.options.leveling        = true;
+    start.material_mappings       = nlohmann::json::array({{{"toolId", 1}, {"slotId", 2}}});
+    start.slice_table             = Slic3r::FlashforgeJobProgress::SliceTable{1000, {100, 200}, {10, 70}, 100, {150}, {40}};
+    start.obico_agent_took_table  = true;
+    start.obico_agent_detail      = "handed to the Obico agent: HTTP 200";
+    start.accepted_unix_s         = 1792700000;
+
+    const auto back = print_start_from_json(nlohmann::json::parse(print_start_to_json(start).dump()));
+    REQUIRE(back.has_value());
+    CHECK(back->file_name == start.file_name);
+    CHECK(back->options == start.options);
+    CHECK(back->material_mappings == start.material_mappings);
+    REQUIRE(back->slice_table.has_value());
+    CHECK(back->slice_table->layer_start_bytes == start.slice_table->layer_start_bytes);
+    CHECK(back->slice_table->mark_bytes == start.slice_table->mark_bytes);
+    CHECK(back->obico_agent_took_table == std::optional<bool>(true));
+    CHECK(back->accepted_unix_s == 1792700000);
+
+    // Anything else is no start: never a half-read one.
+    CHECK_FALSE(print_start_from_json(nlohmann::json::array()).has_value());
+    CHECK_FALSE(print_start_from_json({{"file_name", ""}, {"accepted_unix_s", 1}}).has_value());
+    CHECK_FALSE(print_start_from_json({{"file_name", "a.gcode"}}).has_value());
+    nlohmann::json bad_table = print_start_to_json(start);
+    bad_table["slice_table"]["layers"] = nlohmann::json::array({{900, 10}, {100, 70}});
+    CHECK_FALSE(print_start_from_json(bad_table).has_value());
+
+    CHECK(print_start_file_name("10.0.0.100") == "print_start_10.0.0.100.json");
+    CHECK(print_start_file_name("[fd00::2]") == "print_start__fd00__2_.json");
+}
+
 TEST_CASE("A print start learns how its slice table reached the agent without growing younger", "[flashforge]")
 {
     using Clock = PrintStartLog::Clock;

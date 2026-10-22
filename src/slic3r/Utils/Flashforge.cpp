@@ -47,6 +47,7 @@
 
 #include "PrintHost.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/I18N.hpp"
 #include "Http.hpp"
@@ -66,9 +67,50 @@ namespace Slic3r {
 
 namespace {
 
-// The printer reports its own camera address in every status (`cameraStreamUrl`). The Device (Web)
-// tab is built from the preset alone and must not block on the network, so the last address each
-// host reported is remembered here and used in preference to the derived default.
+// Each host's last accepted print, kept in the data folder so an OrcaMCP started again mid-print still reads it
+// by its slice. None without a data folder (the unit tests).
+std::optional<fs::path> print_start_path(const std::string& host)
+{
+    if (data_dir().empty())
+        return std::nullopt;
+    return fs::path(data_dir()) / "flashforge" / FlashforgeLocalApi::print_start_file_name(host);
+}
+
+long long unix_now_s()
+{
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Written whole under a temporary name and renamed. A failure costs only the copy, so it is logged, never thrown.
+void save_print_start(const std::string& host, const FlashforgeLocalApi::PrintStart& start)
+{
+    const auto path = print_start_path(host);
+    if (!path)
+        return;
+    try {
+        fs::create_directories(path->parent_path());
+        const fs::path tmp = path->string() + ".tmp";
+        {
+            std::ofstream out(tmp.string(), std::ios::binary | std::ios::trunc);
+            out << FlashforgeLocalApi::print_start_to_json(start).dump();
+            if (!out)
+                throw std::runtime_error("write failed");
+        }
+        fs::rename(tmp, *path);
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(warning) << "[Flashforge] the last print start was not kept on disk: " << e.what();
+    }
+}
+
+std::optional<FlashforgeLocalApi::PrintStart> load_print_start(const std::string& host)
+{
+    const auto path = print_start_path(host);
+    if (!path || !fs::exists(*path))
+        return std::nullopt;
+    std::ifstream in(path->string(), std::ios::binary);
+    const json    doc = json::parse(in, nullptr, false);
+    return FlashforgeLocalApi::print_start_from_json(doc);
+}
 } // namespace
 
 namespace {
@@ -629,7 +671,22 @@ std::optional<FlashforgeLocalApi::CachedStatus> Flashforge::last_known_status() 
 
 std::optional<FlashforgeLocalApi::RecordedPrintStart> Flashforge::last_print_start() const
 {
-    return FlashforgeLocalApi::print_start_log().get(m_local_api_host);
+    auto& log = FlashforgeLocalApi::print_start_log();
+    if (auto recorded = log.get(m_local_api_host))
+        return recorded;
+    // Nothing from this process: the copy an earlier run kept, read once per host.
+    static std::mutex            tried_mutex;
+    static std::set<std::string> tried;
+    {
+        std::lock_guard<std::mutex> lock(tried_mutex);
+        if (!tried.insert(m_local_api_host).second)
+            return std::nullopt;
+    }
+    if (const auto start = load_print_start(m_local_api_host)) {
+        const long long age_s = std::max<long long>(0, unix_now_s() - start->accepted_unix_s);
+        log.put(m_local_api_host, *start, FlashforgeLocalApi::PrintStartLog::Clock::now() - std::chrono::seconds(age_s));
+    }
+    return log.get(m_local_api_host);
 }
 
 void Flashforge::record_print_start(const std::string&                               file_name,
@@ -642,6 +699,8 @@ void Flashforge::record_print_start(const std::string&                          
     start.options           = options;
     start.material_mappings = material_mappings.is_array() ? material_mappings : json::array();
     start.slice_table       = std::move(slice_table);
+    start.accepted_unix_s   = unix_now_s();
+    save_print_start(m_local_api_host, start);
     FlashforgeLocalApi::print_start_log().put(m_local_api_host, std::move(start));
 }
 
@@ -838,6 +897,7 @@ void Flashforge::hand_slice_table_to_obico_agent(const std::string& file_name, c
             return;
         start.obico_agent_took_table = outcome.handed;
         start.obico_agent_detail     = outcome.detail;
+        save_print_start(m_local_api_host, start);
     });
 }
 
