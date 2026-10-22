@@ -13,6 +13,7 @@
 #include "slic3r/GUI/OrcaMCP/OrcaMCPPaintSelect.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPRenderMath.hpp"
 #include "libslic3r/Color.hpp"
+#include "slic3r/GUI/OrcaMCP/OrcaMCPBedExclusion.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPPlateOccupancy.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -107,11 +108,17 @@ struct PlateEntry
     nlohmann::json model_objects  = nlohmann::json::array();
     nlohmann::json prime_tower    = nlohmann::json::object();
     nlohmann::json excluded_areas = nlohmann::json::array();
+    nlohmann::json exclusion_regions = nlohmann::json::array(); // every region the 3D view draws (exclusion_region_json)
     nlohmann::json occupancy      = nlohmann::json::array();
     nlohmann::json settings       = nlohmann::json::object(); // the plate's own settings (set_plate_settings' shape)
     nlohmann::json effective      = nlohmann::json::object(); // what applies on it
     nlohmann::json layer_gcodes   = nlohmann::json::array();  // its G-code at a layer (plate_layer_gcodes_json)
 };
+
+namespace OrcaMCP {
+// The bed exclusion regions plate `plate` draws, in plate mm, from the plater's config (none without one).
+std::vector<ExclusionRegion> plate_exclusion_regions(PartPlate& plate);
+} // namespace OrcaMCP
 
 class OrcaMCPPlateUtils {
 public:

@@ -274,7 +274,7 @@ wxImage draw_layer_plan(const std::vector<ToolpathRun>&   runs,
                         const std::vector<LegendEntry>&   legend,
                         const PlanMapping&                mapping,
                         const BoundingBoxf3&              plate,
-                        const std::vector<BoundingBoxf3>& excluded_areas,
+                        const std::vector<ExcludedRegionOverlay>& excluded,
                         const std::vector<OverlayLabel>&  labels,
                         const OverlayOptions&             overlays);
 

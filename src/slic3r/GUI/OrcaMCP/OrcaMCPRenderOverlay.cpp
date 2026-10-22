@@ -116,6 +116,36 @@ struct OverlayPainter
 
 } // namespace
 
+// One excluded region: hatched on its base face (the plate's, or its lower Z for a height-limited one); a region
+// outside the layer shown is dashed and unfilled. A height-limited one also gets its top outline and vertical edges.
+static void draw_excluded_region(wxGraphicsContext& gc, const OverlayPainter& paint, const ExcludedRegionOverlay& region, double plate_z)
+{
+    const double base_z = region.height_limited ? region.z_min : plate_z;
+    const wxPen  pen    = region.active ? wxPen(wxColour(200, 40, 40, 200), 1) : wxPen(wxColour(200, 40, 40, 200), 1, wxPENSTYLE_SHORT_DASH);
+    const auto   corners = [&region](double z) {
+        std::vector<Vec3d> out;
+        for (const Vec2d& point : region.outline)
+            out.push_back(Vec3d(point.x(), point.y(), z));
+        return out;
+    };
+    wxGraphicsPath path = gc.CreatePath();
+    if (!paint.polygon(corners(base_z), path))
+        return;
+    gc.SetBrush(region.active ? wxBrush(wxColour(200, 40, 40, 120), wxBRUSHSTYLE_CROSSDIAG_HATCH) : *wxTRANSPARENT_BRUSH);
+    gc.SetPen(pen);
+    gc.DrawPath(path);
+    if (!region.height_limited)
+        return;
+    wxGraphicsPath top = gc.CreatePath();
+    if (paint.polygon(corners(region.z_max), top)) {
+        gc.SetBrush(*wxTRANSPARENT_BRUSH);
+        gc.SetPen(pen);
+        gc.StrokePath(top);
+    }
+    for (const Vec2d& point : region.outline)
+        paint.line(Vec3d(point.x(), point.y(), base_z), Vec3d(point.x(), point.y(), region.z_max), pen);
+}
+
 // Grid and outline belong on the bed, under the parts, but a 2D pass has no depth. They are drawn
 // on a transparent layer and composited only where the render still shows its background colour,
 // so an object's pixels are never crossed by a grid line. Anti-aliased edges are the only pixels
@@ -145,7 +175,7 @@ static void composite_on_background(wxImage& base, const wxImage& layer, const w
 void draw_overlays(wxImage&                          image,
                    const CameraFrame&                camera,
                    const BoundingBoxf3&              plate_box,
-                   const std::vector<BoundingBoxf3>& excluded_areas,
+                   const std::vector<ExcludedRegionOverlay>& excluded,
                    const std::vector<OverlayLabel>&  labels,
                    const OverlayOptions&             options,
                    const wxColour&                   background)
@@ -197,14 +227,8 @@ void draw_overlays(wxImage&                          image,
     OverlayPainter paint{*gc, camera, image.GetWidth(), image.GetHeight()};
 
     if (options.excluded) {
-        for (const BoundingBoxf3& area : excluded_areas) {
-            wxGraphicsPath path = gc->CreatePath();
-            if (!paint.polygon(OverlayPainter::footprint_corners(area, z), path))
-                continue;
-            gc->SetBrush(wxBrush(wxColour(200, 40, 40, 120), wxBRUSHSTYLE_CROSSDIAG_HATCH));
-            gc->SetPen(wxPen(wxColour(200, 40, 40, 200), 1));
-            gc->DrawPath(path);
-        }
+        for (const ExcludedRegionOverlay& region : excluded)
+            draw_excluded_region(*gc, paint, region, z);
     }
 
     if (options.origin) {

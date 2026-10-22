@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "slic3r/GUI/OrcaMCP/OrcaMCPBedExclusion.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPCommon.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPMeshHealth.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPPlateUtils.hpp"
@@ -188,4 +189,25 @@ TEST_CASE("get_scene_info's reference example has the keys a real response has",
         CHECK(occupant.contains("kind"));
         CHECK(occupant.contains("footprint"));
     }
+}
+
+TEST_CASE("The reference's exclusion region example has the keys the builders write", "[McpSceneDescription][orcamcp]")
+{
+    const json example = reference_example("<!-- exclusion region example");
+
+    ExclusionRegion region;
+    region.outline        = {Vec2d(30., 30.), Vec2d(40., 30.), Vec2d(40., 40.), Vec2d(30., 40.)};
+    region.footprint.merge(Vec2d(30., 30.));
+    region.footprint.merge(Vec2d(40., 40.));
+    region.z_min_mm       = 5.;
+    region.z_max_mm       = 15.;
+    region.height_limited = true;
+    region.source         = "bed_exclude_volumes";
+    region.extruders      = {0, 1};
+
+    REQUIRE(example.at("exclusion_regions").size() == 1);
+    check_keys("exclusion_regions[0]", example.at("exclusion_regions").at(0), exclusion_region_json(region));
+    REQUIRE(example.at("occupancy").size() == 1);
+    check_keys("occupancy[0]", example.at("occupancy").at(0), exclusion_occupancy_json(region));
+    CHECK(example.at("occupancy").at(0).at("kind") == "exclusion_volume");
 }

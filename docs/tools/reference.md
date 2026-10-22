@@ -199,6 +199,7 @@ and a stray shell; the object list's warning icon shows for it):
       "stored_position": {"x": 165.0, "y": 225.09014892578125, "frame": "plate_local_mm"}
     },
     "excluded_areas": [],
+    "exclusion_regions": [],
     "occupancy_frame": "plate_mm",
     "occupancy": [
       {"kind": "object", "name": "gallows.stl", "object_index": 0, "instances_on_plate": [0],
@@ -311,6 +312,33 @@ out where there is free space.
 | `object` | A model object, its footprint grown by the brim its settings will print |
 | `prime_tower` | The prime tower, its footprint grown by `prime_tower_brim_width`. Present only when a tower is actually printed on that plate |
 | `excluded_area` | Bed the printer will not print on (`bed_exclude_area` in the printer config — the filament-cutting corner on an X1, for instance). Empty on most printers |
+| `exclusion_volume` | A toolhead collision volume (`bed_exclude_volumes`, or per extruder `extruder_bed_exclude_volumes`): its footprint's bounding rectangle, `z_min_mm`/`z_max_mm` (an object may pass under or over a height-limited one), `extruders` (0-based) it applies to |
+
+Each plate's `exclusion_regions` lists every exclusion region as the 3D view draws it (upstream's
+`get_bed_excluded_regions_by_extruder`, the plate's origin added): `kind` (`collision_volume`, or
+`material_keepout` for the legacy `bed_exclude_area`), `legacy`, `source`, `outline` (the polygon,
+counter-clockwise, `[x, y]` in plate mm), `footprint`, `z_min_mm`, `z_max_mm`, `height_limited` (the
+volume has a Z range of its own; otherwise it spans the printable height), `extruders` (0-based, the
+physical extruders it applies to) and `all_extruders`. A shared definition and the legacy area are listed
+once; in toolhead-offset or per-extruder mode each extruder's own volumes are, and identical ones merge.
+`excluded_areas` keeps the legacy area alone, as before. Collision volumes are also in `occupancy`.
+
+<!-- exclusion region example: test_mcp_scene_description.cpp holds its keys to what the response writes -->
+```json
+{
+  "exclusion_regions": [{
+    "kind": "collision_volume", "legacy": false, "source": "bed_exclude_volumes",
+    "outline": [[30.0, 30.0], [40.0, 30.0], [40.0, 40.0], [30.0, 40.0]],
+    "footprint": {"min_x": 30.0, "min_y": 30.0, "max_x": 40.0, "max_y": 40.0, "size_x": 10.0, "size_y": 10.0},
+    "z_min_mm": 5.0, "z_max_mm": 15.0, "height_limited": true, "extruders": [0, 1], "all_extruders": true
+  }],
+  "occupancy": [{
+    "kind": "exclusion_volume", "name": "Collision volume",
+    "footprint": {"min_x": 30.0, "min_y": 30.0, "max_x": 40.0, "max_y": 40.0, "size_x": 10.0, "size_y": 10.0},
+    "includes_brim": false, "footprint_is_exact": true, "z_min_mm": 5.0, "z_max_mm": 15.0, "extruders": [0, 1]
+  }]
+}
+```
 
 Every `footprint` in `occupancy` **includes the brim**, because the brim is printed plastic and a
 part placed flush against a bounding box collides with it. `includes_brim` says whether the entry
@@ -1789,7 +1817,8 @@ plate's printable area; the error carries `allowed_range` in plate millimetres. 
 one OrcaSlicer's own arranger clamps to, so a position this tool accepts is one the slicer keeps.
 A tower too large for the plate at all is refused with a message saying so.
 
-Overlapping an object or an excluded area is **not** refused — an agent rearranging a plate moves
+Overlapping an object, an excluded area or a collision volume (`kind: "exclusion_volume"`, when the tower's height
+reaches its Z range) is **not** refused — an agent rearranging a plate moves
 things through each other's way on purpose. The move is applied and the overlaps come back in
 `conflicts`, with `conflict_note` warning that slicing will report a clearance error until it is
 resolved.
@@ -3018,7 +3047,7 @@ starts at x ≈ 307. A camera aimed at another plate's area returns a flat image
 | `save_to_file` | boolean | No | Write a PNG to the system temp directory and return its path (recommended) instead of inline base64. |
 | `resolution` | integer | No | Pixels per view side (default 512, 32–2048). Prefer `fit` to an object over more pixels. |
 | `image_format` | `"png"` / `"jpeg"` | No | Default `png` for files, `jpeg` for inline base64. |
-| `overlays` | boolean / object | No | `true` (default) draws all; `false` none; or `{outline, grid, origin, labels, excluded}` booleans. |
+| `overlays` | boolean / object | No | `true` (default) draws all; `false` none; or `{outline, grid, origin, labels, excluded}` booleans. `excluded` draws the hatched excluded areas and collision volumes (a height-limited one drawn at its height; in a layer plan, dashed when not at that layer). |
 | `layer_view` | `"first_layer"` / object | No | A top-down plan instead of a 3D render: the **first-layer plan**, or **any sliced layer** as `{layer: N}` or `{z: mm}` — see below. Ignores `views`. |
 
 **A view** is one of:

@@ -299,7 +299,7 @@ wxImage paint_plan(const PlanMapping& m, const std::function<void(wxGraphicsCont
 wxImage draw_first_layer_plan(const FirstLayerPlan&             plan,
                               const PlanMapping&                m,
                               const BoundingBoxf3&              plate,
-                              const std::vector<BoundingBoxf3>& excluded_areas,
+                              const std::vector<ExcludedRegionOverlay>& excluded,
                               const OverlayOptions&             overlays)
 {
     wxImage image = paint_plan(m, [&](wxGraphicsContext& gc) {
@@ -324,7 +324,7 @@ wxImage draw_first_layer_plan(const FirstLayerPlan&             plan,
             fill_expolygons(gc, union_ex(plan.loose_brim), m, wxBrush(wxColour(80, 80, 80, 90)), wxPen(wxColour(80, 80, 80, 200), 1));
     });
 
-    draw_overlays(image, plan_camera(m), plate, excluded_areas, plan_labels(plan), overlays, plan_background());
+    draw_overlays(image, plan_camera(m), plate, excluded, plan_labels(plan), overlays, plan_background());
     return image;
 }
 

@@ -43,6 +43,7 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/CutUtils.hpp"
+#include "libslic3r/ExclusionVolumeGeometry.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Slicing.hpp"
@@ -1065,7 +1066,8 @@ void OrcaMCPServer::register_builtin_tools()
         "number, kept for older readers, and internal_id is the app's own number, which no tool takes. "
         "Each plate also carries `occupancy`, the complete list of what stands on it in plate "
         "millimetres -- every object's printed footprint (brim included), the prime tower's "
-        "footprint (brim included) when one is printed, and the printer's excluded bed areas. Use "
+        "footprint (brim included) when one is printed, and the printer's excluded bed areas and collision volumes "
+        "(exclusion_regions: each one's outline, Z range and the extruders it applies to). Use "
         "`occupancy`, not `model_objects`, to work out where there is free space. An object with "
         "instances on several plates is listed under each by the instances there "
         "(`instances_on_plate`): its bounding_box, position and footprint are theirs. `unplaced_objects` "
@@ -1358,7 +1360,7 @@ void OrcaMCPServer::register_builtin_tools()
                 }},
                 {"overlays", {
                     {"type", {"boolean", "object"}},
-                    {"description", "Self-locating overlays drawn on the image: plate outline, 10 mm grid, origin with X/Y, numbered object labels, hatched excluded areas. true/omitted = all, false = none, or an object {outline, grid, origin, labels, excluded} of booleans."},
+                    {"description", "Self-locating overlays drawn on the image: plate outline, 10 mm grid, origin with X/Y, numbered object labels, hatched excluded areas and collision volumes (a height-limited one drawn at its height; in a layer plan, dashed when not at that layer). true/omitted = all, false = none, or an object {outline, grid, origin, labels, excluded} of booleans."},
                     {"properties", {
                         {"outline", {{"type", "boolean"}}}, {"grid", {{"type", "boolean"}}}, {"origin", {{"type", "boolean"}}},
                         {"labels", {{"type", "boolean"}}}, {"excluded", {{"type", "boolean"}}}
@@ -4581,6 +4583,10 @@ void OrcaMCPServer::register_builtin_tools()
                         if (OrcaMCP::footprints_overlap(after.footprint, OrcaMCP::footprint_of(area)))
                             conflicts.push_back({{"kind", "excluded_area"}, {"name", "Excluded bed area"}});
                     }
+                    for (const ExclusionRegion& region : plate_exclusion_regions(*plate))
+                        if (!region.legacy && footprints_overlap(after.footprint, region.footprint) &&
+                            bed_exclusion_z_ranges_overlap(region.z_min_mm, region.z_max_mm, 0., after.size.z()))
+                            conflicts.push_back({{"kind", "exclusion_volume"}, {"name", "Collision volume"}});
                 }
                 result["conflicts"] = conflicts;
                 if (!conflicts.empty())

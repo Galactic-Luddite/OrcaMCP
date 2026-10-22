@@ -2,7 +2,7 @@
 #define slic3r_OrcaMCPRenderOverlay_hpp_
 
 // 2D overlays drawn on a finished render so the picture locates itself: the plate outline, a 10 mm
-// grid, the origin corner with X/Y letters, numbered object labels, hatched excluded areas. Every
+// grid, the origin corner with X/Y letters, numbered object labels, hatched excluded areas and collision volumes. Every
 // point is projected through the render camera's own matrices (OrcaMCPRenderMath), so the overlay
 // sits exactly on the geometry from any viewpoint. No GL: the drawing happens with wx on the
 // wxImage, which is why a plan view drawn entirely on the CPU can use the same code.
@@ -17,6 +17,7 @@
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Color.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
+#include "slic3r/GUI/OrcaMCP/OrcaMCPBedExclusion.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPRenderMath.hpp"
 
 namespace Slic3r { namespace GUI { namespace OrcaMCP {
@@ -49,11 +50,12 @@ wxImage thumbnail_to_wximage(const ThumbnailData& thumbnail_data);
 // A colour as wx draws it, with `alpha` in place of its own.
 wxColour to_wx_colour(const ColorRGBA& color, unsigned char alpha = 255);
 
-// Draws the requested overlays onto `image` in place. `plate_box` and `excluded_areas` are bed mm.
+// Draws the requested overlays onto `image` in place. `plate_box` and `excluded` are bed mm; a height-limited
+// excluded region is drawn at its height, and one not `active` dashed.
 void draw_overlays(wxImage&                          image,
                    const CameraFrame&                camera,
                    const BoundingBoxf3&              plate_box,
-                   const std::vector<BoundingBoxf3>& excluded_areas,
+                   const std::vector<ExcludedRegionOverlay>& excluded,
                    const std::vector<OverlayLabel>&  labels,
                    const OverlayOptions&             options,
                    const wxColour&                   background = wxColour(237, 237, 237));

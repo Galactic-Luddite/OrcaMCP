@@ -501,6 +501,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/OrcaMCP/OrcaMCPNextSteps.hpp
     GUI/OrcaMCP/OrcaMCPNextSteps.cpp
     GUI/OrcaMCP/OrcaMCPMeshTools.cpp
+    GUI/OrcaMCP/OrcaMCPBedExclusion.hpp
+    GUI/OrcaMCP/OrcaMCPBedExclusion.cpp
     GUI/OrcaMCP/OrcaMCPPlateOccupancy.hpp
     GUI/OrcaMCP/OrcaMCPPlateOccupancy.cpp
     GUI/OrcaMCP/OrcaMCPPlateUtils.hpp

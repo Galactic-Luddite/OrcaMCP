@@ -304,8 +304,10 @@ json concepts()
             {"z_axis", "Z=0 is the bed surface. Object bottoms rest at Z=0. Object center Z = half the object height."},
             {"get_bed_bounds", "Call get_scene_info and read bed.min_x, bed.max_x, bed.min_y, bed.max_y"},
             {"find_free_space", "Call get_scene_info and subtract plates[].occupancy footprints from the "
-                                "plate's bounding box. The occupancy list includes the prime tower and "
-                                "excluded bed areas, which model_objects does not."},
+                                "plate's bounding box. The occupancy list includes the prime tower, "
+                                "excluded bed areas and collision volumes (an exclusion_volume entry's "
+                                "z_min_mm/z_max_mm: an object may pass above or below one), which "
+                                "model_objects does not."},
             {"transform_response", "All transforms return position, rotation_degrees, scale, on_bed and instance_placement. Use on_bed to verify placement: it is true when every instance is inside the plate it is on, and instance_placement says which one is not."},
             {"rotation_degrees_note", "rotation_degrees is the instance's rotation, the same numbers get_object_info reports. rotate_object turns the object about the plate's axes and updates it."},
             {"recommendation", "Read bed bounds first. Use arrange_objects to auto-place, or relative=true with offsets."}

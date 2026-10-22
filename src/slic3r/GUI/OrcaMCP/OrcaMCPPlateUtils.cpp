@@ -53,15 +53,9 @@ namespace {
         };
     }
 
-    // One shape for every rectangle on the bed, so an agent comparing a tower against an object
-    // against an exclusion area is comparing four numbers of the same kind in the same frame.
-    nlohmann::json rect_to_json(const BoundingBoxf& box) {
-        return {
-            {"min_x", box.min.x()}, {"min_y", box.min.y()},
-            {"max_x", box.max.x()}, {"max_y", box.max.y()},
-            {"size_x", box.max.x() - box.min.x()}, {"size_y", box.max.y() - box.min.y()}
-        };
-    }
+    // One shape for every rectangle on the bed (OrcaMCP::rect_json), so an agent comparing a tower against an
+    // object against an exclusion area is comparing four numbers of the same kind in the same frame.
+    nlohmann::json rect_to_json(const BoundingBoxf& box) { return OrcaMCP::rect_json(box); }
 
     BoundingBoxf translated(const BoundingBoxf& box, const Vec2d& offset) {
         BoundingBoxf out;
@@ -250,7 +244,8 @@ struct PlanTarget
     PartPlate&                    plate;
     int                           plate_index = 0;
     BoundingBoxf3                 plate_box;
-    std::vector<BoundingBoxf3>    excluded_areas;
+    std::vector<BoundingBoxf3>    legacy_boxes;       // PartPlate::get_exclude_areas
+    std::vector<OrcaMCP::ExclusionRegion> exclusion_regions;
     int                           resolution = 512;
     OrcaMCP::OverlayOptions       overlays;
     ImageOutput                   output;
@@ -264,7 +259,10 @@ static nlohmann::json render_first_layer_view(const PlanTarget& target)
     const OrcaMCP::FirstLayerPlan plan        = OrcaMCP::collect_first_layer(target.plate, full_config);
     const OrcaMCP::PlanMapping    mapping     = OrcaMCP::plan_mapping(target.plate_box, target.resolution);
     const OrcaMCP::CameraFrame    camera      = OrcaMCP::plan_camera(mapping);
-    wxImage image = OrcaMCP::draw_first_layer_plan(plan, mapping, target.plate_box, target.excluded_areas, target.overlays);
+    // The first layer is printed between the bed and the initial layer height: a collision volume above that is not in its way.
+    const double first_layer_top = full_config.opt_float("initial_layer_print_height");
+    const auto   excluded        = OrcaMCP::exclusion_overlays(target.legacy_boxes, target.exclusion_regions, std::make_pair(0., first_layer_top));
+    wxImage image = OrcaMCP::draw_first_layer_plan(plan, mapping, target.plate_box, excluded, target.overlays);
 
     nlohmann::json entry;
     entry["layer_view"] = "first_layer";
@@ -410,8 +408,11 @@ static nlohmann::json render_sliced_layer_view(const PlanTarget& target, const O
     entry["overlays"] = OrcaMCP::overlay_options_to_json(target.overlays);
 
     const auto    measured = std::chrono::steady_clock::now();
+    // The layer is printed between the one below it and its own top.
+    const double layer_bottom = chosen.index > 0 ? layers[chosen.index - 1].z : 0.;
+    const auto   excluded     = OrcaMCP::exclusion_overlays(target.legacy_boxes, target.exclusion_regions, std::make_pair(layer_bottom, double(layer.z)));
     const wxImage image    = OrcaMCP::draw_layer_plan(runs, request.color_by, slot_colors, legend, mapping, target.plate_box,
-                                                      target.excluded_areas, labels, target.overlays);
+                                                      excluded, labels, target.overlays);
     const auto    drawn    = std::chrono::steady_clock::now();
     add_image(entry, image, target.output);
     using ms = std::chrono::duration<double, std::milli>;
@@ -444,7 +445,8 @@ nlohmann::json OrcaMCPPlateUtils::RenderPlateView(const nlohmann::json& params) 
     if (plate == nullptr)
         throw std::runtime_error("plate_index out of range");
     const BoundingBoxf3              plate_box      = plate->get_plate_box();
-    const std::vector<BoundingBoxf3> excluded_areas = plate->get_exclude_areas();
+    const std::vector<BoundingBoxf3>             legacy_boxes      = plate->get_exclude_areas();
+    const std::vector<OrcaMCP::ExclusionRegion> exclusion_regions = OrcaMCP::plate_exclusion_regions(*plate);
 
     // A layer plan is a different picture altogether: top-down, drawn on the CPU. "first_layer" from
     // the sliced Print (or footprints when unsliced); {layer} / {z} from the sliced G-code.
@@ -452,7 +454,7 @@ nlohmann::json OrcaMCPPlateUtils::RenderPlateView(const nlohmann::json& params) 
     if (!layer_view.is_null() && layer_view != "") {  // "" was always read as no layer view
         // Read before anything is looked up, so a malformed request is reported as that, not as "unsliced".
         const OrcaMCP::LayerView asked = OrcaMCP::parse_layer_view(layer_view);
-        const PlanTarget target{*plate, plate_index, plate_box, excluded_areas, resolution, overlay_options, {save_to_file, use_png}};
+        const PlanTarget target{*plate, plate_index, plate_box, legacy_boxes, exclusion_regions, resolution, overlay_options, {save_to_file, use_png}};
         return asked.first_layer ? render_first_layer_view(target) : render_sliced_layer_view(target, asked.sliced);
     }
 
@@ -522,7 +524,8 @@ nlohmann::json OrcaMCPPlateUtils::RenderPlateView(const nlohmann::json& params) 
         for (const RenderedVolume& v : report.drawn)
             if (!v.wipe_tower)
                 labels.push_back({std::to_string(v.object_index), v.world_bbox.center(), v.color});
-        OrcaMCP::draw_overlays(image, cam.frame, report.plate_box, excluded_areas, labels, overlay_options);
+        OrcaMCP::draw_overlays(image, cam.frame, report.plate_box, OrcaMCP::exclusion_overlays(legacy_boxes, exclusion_regions, std::nullopt),
+                               labels, overlay_options);
 
         // Everything pick_facet needs to turn a pixel of this image back into a ray. The three
         // required keys are written by the same function pick_facet parses with, so the two halves
@@ -1046,6 +1049,16 @@ nlohmann::json OrcaMCPPlateUtils::ScenePlateObjectJson(const ModelObject& obj, i
     return object_info;
 }
 
+std::vector<OrcaMCP::ExclusionRegion> OrcaMCP::plate_exclusion_regions(PartPlate& plate)
+{
+    const DynamicPrintConfig* config = wxGetApp().plater()->config();
+    if (config == nullptr)
+        return {};
+    const Vec3d origin = plate.get_origin();
+    return resolve_exclusion_regions(get_bed_excluded_regions_by_extruder(*config), active_bed_exclude_volume_mode(*config),
+                                     Vec2d(origin.x(), origin.y()));
+}
+
 nlohmann::json OrcaMCPPlateUtils::PlateJson(const PlateEntry& plate)
 {
     return {
@@ -1057,6 +1070,7 @@ nlohmann::json OrcaMCPPlateUtils::PlateJson(const PlateEntry& plate)
         {"model_objects", plate.model_objects},
         {"prime_tower", plate.prime_tower},
         {"excluded_areas", plate.excluded_areas},
+        {"exclusion_regions", plate.exclusion_regions},
         {"occupancy", plate.occupancy},
         {"occupancy_frame", "plate_mm"},
         {"settings", plate.settings},
@@ -1173,6 +1187,14 @@ nlohmann::json OrcaMCPPlateUtils::GetPlates(bool with_model_object_features, con
             });
         }
         entry.excluded_areas = std::move(excluded);
+
+        // The 3D view's exclusion regions: the legacy area too, and each collision volume with its Z range, which
+        // an object may pass under or over: occupancy lists them with their heights.
+        for (const OrcaMCP::ExclusionRegion& region : OrcaMCP::plate_exclusion_regions(*plate)) {
+            entry.exclusion_regions.push_back(OrcaMCP::exclusion_region_json(region));
+            if (!region.legacy)
+                occupancy.push_back(OrcaMCP::exclusion_occupancy_json(region));
+        }
         entry.occupancy      = std::move(occupancy);
 
         j.push_back(PlateJson(entry));
