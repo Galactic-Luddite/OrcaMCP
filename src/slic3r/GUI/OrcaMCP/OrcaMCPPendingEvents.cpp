@@ -1,6 +1,7 @@
 // src/slic3r/GUI/OrcaMCP/OrcaMCPPendingEvents.cpp
 #include "OrcaMCPPendingEvents.hpp"
 
+#include <wx/app.h>
 #include <wx/event.h>
 #include <wx/list.h>
 #include <wx/thread.h>
