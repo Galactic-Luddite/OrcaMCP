@@ -148,6 +148,15 @@ std::vector<NextStep> split_parts_next_steps(int object_id, int volume_id, const
              {{"object_id", object_id}}}};
 }
 
+std::vector<NextStep> repair_timed_out_next_steps(const std::vector<int>& timed_out)
+{
+    if (timed_out.empty())
+        return {};
+    return {{"repair_mesh",
+             "objects " + listed_ids(timed_out) + " were not repaired within the call's wait: repair_mesh with object_id repairs one at a time",
+             {{"object_id", timed_out.front()}}}};
+}
+
 std::vector<NextStep> new_volume_next_steps(int object_id, int volume_id, const std::string& type_name, bool beside_object)
 {
     std::vector<NextStep> steps;

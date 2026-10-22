@@ -338,6 +338,17 @@ TEST_CASE("A split to parts points at get_object_components, to find a fragment 
     CHECK(split_parts_next_steps(4, 1, {1}).empty());
 }
 
+TEST_CASE("A repair of several objects that ran out of time points at repair_mesh for the first it did not reach", "[McpNextSteps][orcamcp]")
+{
+    const std::vector<NextStep> steps = repair_timed_out_next_steps({4, 7});
+    REQUIRE(steps.size() == 1);
+    CHECK(steps[0].tool == "repair_mesh");
+    CHECK(steps[0].arguments == json{{"object_id", 4}});
+    CHECK(mentions(steps[0].why, "4 and 7"));
+    CHECK(unusable(steps[0]) == std::nullopt);
+    CHECK(repair_timed_out_next_steps({}).empty());
+}
+
 TEST_CASE("A new primitive is pointed at move_object, and a modifier at its settings", "[McpNextSteps][orcamcp]")
 {
     const std::vector<NextStep> primitive = new_volume_next_steps(2, 3, "modifier", /*beside_object=*/true);
@@ -537,7 +548,9 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
     for (const std::string& installed : {std::string(), std::string("Flashforge AD5X 0.4 nozzle")})
         for (NextStep& step : printer_setup_next_steps({true, installed}))
             steps.push_back(std::move(step));
-    REQUIRE(steps.size() == 34);
+    for (NextStep& step : repair_timed_out_next_steps({4, 7}))
+        steps.push_back(std::move(step));
+    REQUIRE(steps.size() == 35);
 
     const mcp_tool_references::ToolNames names(OrcaMCPServer::registered_tools());
     json                                 response = json::object();

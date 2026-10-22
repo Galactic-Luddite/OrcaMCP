@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -50,6 +51,8 @@ nlohmann::json repair_facts_json(const ModelObject& object);
 // vertices welded, triangles removed, shells reversed, holes filled, shells removed (fewer than 4 facets)
 // and self-intersections removed.
 nlohmann::json repair_stats_json(const CgalRepairPlan& plan);
+// The same summed over several plans (a repair of several objects).
+nlohmann::json repair_stats_json(const std::vector<const CgalRepairPlan*>& plans);
 
 // The volumes the repair could not repair, which it left as they were, in the repair's words; "" when
 // none.
@@ -60,6 +63,49 @@ std::string unrepaired_volumes_message(const CgalRepairPlan& plan);
 nlohmann::json repair_answer_json(int object_id, const std::string& object_name, int volume_id, bool keep_painting,
                                   bool keep_painting_given, const nlohmann::json& before, const nlohmann::json& after,
                                   const CgalRepairPlan& plan);
+
+
+// ---- repair_mesh of several objects: a plate's Fix All, or Fix All Plates ----
+
+// Which objects a call names: one (object_id, where volume_id may also be given), every object on a plate
+// (plate_index) or every object in the project (all_plates).
+enum class RepairScope { object, plate, all_plates };
+
+// Why the call names none of the three, or several, or a volume_id without object_id, or nothing.
+// `all_plates` is the flag's value: false names nothing.
+std::optional<std::string> repair_scope_error(bool object_given, bool volume_given, bool plate_given, bool all_plates);
+
+// `object_indices` ascending, each once, as ObjectList::fix_all_through_cgal sorts them.
+std::vector<int> repair_order(std::vector<int> object_indices);
+
+// How one object of several came out. timed_out: not planned within the call's wait (nothing was changed on it);
+// changed_meanwhile: no longer what was captured when its plan was to be applied (nothing was changed on it).
+enum class BatchRepairResult { repaired, nothing_to_repair, failed, changed_meanwhile, timed_out };
+
+// `plan` null: not planned. `planned_in_time`: the plan finished before the call's wait ran out.
+// `unchanged_in_app`: the object is still as it was captured. A plan with a volume that could not be repaired,
+// beside ones that could, is `failed` though the others are applied.
+BatchRepairResult batch_repair_result(const CgalRepairPlan* plan, bool planned_in_time, bool unchanged_in_app);
+
+// One object of a repair of several, as the tool leaves it for the answer. `plan` outlives the item.
+struct BatchRepairItem
+{
+    int                   object_id = -1;
+    std::string           object_name;
+    nlohmann::json        before;
+    nlohmann::json        after;
+    nlohmann::json        placement;
+    BatchRepairResult     result  = BatchRepairResult::timed_out;
+    bool                  changed = false; // some volume of it was repaired and applied
+    const CgalRepairPlan* plan    = nullptr;
+};
+
+// The object's entry in the answer: its result, and what came of it.
+nlohmann::json batch_repair_object_json(const BatchRepairItem& item, double wait_cap_s);
+
+// The answer to a repair of several objects (`scope` plate or all_plates; `plate_index` only for a plate).
+nlohmann::json batch_repair_answer_json(RepairScope scope, std::optional<int> plate_index, bool keep_painting,
+                                        bool keep_painting_given, const std::vector<BatchRepairItem>& items, double wait_cap_s);
 
 }} // namespace GUI::OrcaMCP
 } // namespace Slic3r

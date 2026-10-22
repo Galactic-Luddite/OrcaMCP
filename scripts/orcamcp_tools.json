@@ -2483,28 +2483,35 @@
     },
     {
       "category": "Models",
-      "description": "Repair an object's mesh with the app's own repair -- the object list's Repair (Fix Model), on every platform: each volume is repaired in place, its cracks welded, its shells oriented consistently, its holes (open edges, non-manifold) filled, its self-intersections removed and its shells of fewer than 4 facets removed. No volume is split or deleted; a closed stray shell stays in its volume (get_object_components lists shells). A volume from which no solid can be built (flat or empty) is left as it is, and the answer says so. The object is then dropped onto the bed. A repaired volume's painting is cleared unless keep_painting keeps it. One undo step. When there is a repair to apply, an open toolbar tool (gizmo) is closed first, as the Repair needs, and the answer names it (closed_toolbar_tool); closing a painting tool records its own undo step, as when the user closes it. Nothing changes when there is nothing to repair, when the call is refused or fails, or when the repair takes longer than this call may wait (a little under the bridge's ORCAMCP_TIMEOUT). The answer: get_mesh_health's numbers before and after, `repair` (volumes repaired, vertices welded, triangles removed, shells reversed, holes filled, shells removed, self-intersections removed), whether painting was kept, and the object's placement. Refused while a slice, an export or an upload runs (wait_for_slice first), or an arrange or orient. A large mesh can take minutes.",
+      "description": "Repair an object's mesh with the app's own repair -- the object list's Repair (Fix Model), on every platform: each volume is repaired in place, its cracks welded, its shells oriented consistently, its holes (open edges, non-manifold) filled, its self-intersections removed and its shells of fewer than 4 facets removed. No volume is split or deleted; a closed stray shell stays in its volume (get_object_components lists shells). A volume from which no solid can be built (flat or empty) is left as it is, and the answer says so. The object is then dropped onto the bed. A repaired volume's painting is cleared unless keep_painting keeps it. One undo step. When there is a repair to apply, an open toolbar tool (gizmo) is closed first, as the Repair needs, and the answer names it (closed_toolbar_tool); closing a painting tool records its own undo step, as when the user closes it. Nothing changes when there is nothing to repair, when the call is refused or fails, or when the repair takes longer than this call may wait (a little under the bridge's ORCAMCP_TIMEOUT). The answer: get_mesh_health's numbers before and after, `repair` (volumes repaired, vertices welded, triangles removed, shells reversed, holes filled, shells removed, self-intersections removed), whether painting was kept, and the object's placement. Refused while a slice, an export or an upload runs (wait_for_slice first), or an arrange or orient. A large mesh can take minutes. Give exactly one of object_id (one object; volume_id for one of its volumes), plate_index (every object with an instance on that plate, as the plate's Fix All) or all_plates: true (every object in the project, as Fix All Plates; locked plates are not skipped, as the app does not skip them). For several objects: they are repaired one after another within this call's one wait; those finished in time are applied together in one undo step, and the rest are left as they are. The answer's `objects` gives each one's result -- repaired, nothing_to_repair, failed (some volume no solid can be built from; the others are still repaired), changed_meanwhile (changed in the app during the repair: left as it is) or timed_out (next_steps names repair_mesh for it) -- `counts` as the app counts them, and `repair` summed.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "all_plates": {
+            "description": "true: repair every object in the project -- on every plate, locked ones included, and on none -- as Fix All Plates does. Instead of object_id",
+            "type": "boolean"
+          },
           "keep_painting": {
             "description": "Remap the object's painting (colour, supports, seams, fuzzy skin) onto the repaired mesh instead of clearing it; the app calls this experimental. Left out: the app's \"Keep painted feature after mesh change\" setting, which the answer's keep_painting_from names",
             "type": "boolean"
           },
           "object_id": {
-            "description": "Object index (0-based)",
+            "description": "Object index (0-based): repair this one object. Give object_id, plate_index or all_plates",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plate_index": {
+            "description": "Repair every object with an instance on this plate (0-based, get_scene_info's plate_index), as the plate's Fix All does. Instead of object_id; the current plate stays as it is",
             "minimum": 0,
             "type": "integer"
           },
           "volume_id": {
-            "description": "Repair only this volume (0-based, as get_mesh_health's volumes list them), as the object list's Repair does for a selected part. Left out: every volume",
+            "description": "Repair only this volume (0-based, as get_mesh_health's volumes list them), as the object list's Repair does for a selected part. Left out: every volume. Only with object_id",
             "minimum": 0,
             "type": "integer"
           }
         },
-        "required": [
-          "object_id"
-        ],
+        "required": [],
         "type": "object"
       },
       "name": "repair_mesh",

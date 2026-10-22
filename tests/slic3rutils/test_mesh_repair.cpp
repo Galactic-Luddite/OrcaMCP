@@ -569,6 +569,139 @@ TEST_CASE("repair_mesh's answer carries the numbers before and after, the repair
     CHECK(mentions(partial["message"].get<std::string>(), "left as they were"));
 }
 
+TEST_CASE("repair_mesh of several objects names exactly one scope", "[MeshRepair][orcamcp]")
+{
+    // object_given, volume_given, plate_given, all_plates
+    CHECK(repair_scope_error(true, false, false, false) == std::nullopt);
+    CHECK(repair_scope_error(true, true, false, false) == std::nullopt);
+    CHECK(repair_scope_error(false, false, true, false) == std::nullopt);
+    CHECK(repair_scope_error(false, false, false, true) == std::nullopt);
+
+    const auto none = repair_scope_error(false, false, false, false);
+    REQUIRE(none);
+    CHECK(mentions(*none, "plate_index"));
+    CHECK(mentions(*none, "all_plates: true"));
+    for (const std::optional<std::string>& several : {repair_scope_error(true, false, true, false), repair_scope_error(true, false, false, true),
+                                                      repair_scope_error(false, false, true, true), repair_scope_error(true, false, true, true)}) {
+        REQUIRE(several);
+        CHECK(mentions(*several, "not several"));
+    }
+    const auto volume = repair_scope_error(false, true, true, false);
+    REQUIRE(volume);
+    CHECK(mentions(*volume, "give object_id with it"));
+}
+
+TEST_CASE("The objects of a plate are repaired in ascending order, each once", "[MeshRepair][orcamcp]")
+{
+    CHECK(repair_order({5, 2, 5, 0}) == std::vector<int>{0, 2, 5});
+    CHECK(repair_order({}).empty());
+}
+
+TEST_CASE("Each object of a repair of several comes out as repaired, clean, failed, changed meanwhile or timed out", "[MeshRepair][orcamcp]")
+{
+    OnePartObject hole{TriangleMesh(cube_missing_facet())};
+    OnePartObject clean{TriangleMesh(its_make_cube(10.0, 10.0, 10.0))};
+    OnePartObject sheet{TriangleMesh(flat_square())};
+    const CgalRepairPlan hole_plan  = planned(*hole.object);
+    const CgalRepairPlan clean_plan = planned(*clean.object);
+    const CgalRepairPlan sheet_plan = planned(*sheet.object);
+
+    CHECK(batch_repair_result(&hole_plan, true, true) == BatchRepairResult::repaired);
+    CHECK(batch_repair_result(&clean_plan, true, true) == BatchRepairResult::nothing_to_repair);
+    CHECK(batch_repair_result(&sheet_plan, true, true) == BatchRepairResult::failed);
+
+    CgalRepairPlan partly = hole_plan;
+    partly.error          = "No solid can be built from the mesh.";
+    CHECK(batch_repair_result(&partly, true, true) == BatchRepairResult::failed);
+
+    CgalRepairPlan canceled = hole_plan;
+    canceled.canceled       = true;
+    CHECK(batch_repair_result(&canceled, true, true) == BatchRepairResult::timed_out);
+    CHECK(batch_repair_result(nullptr, false, false) == BatchRepairResult::timed_out);
+    CHECK(batch_repair_result(&hole_plan, false, true) == BatchRepairResult::timed_out);
+    CHECK(batch_repair_result(&hole_plan, true, false) == BatchRepairResult::changed_meanwhile);
+}
+
+TEST_CASE("The answer to a repair of several objects counts them as the app does and sums what was repaired", "[MeshRepair][orcamcp]")
+{
+    OnePartObject hole{TriangleMesh(cube_missing_facet())};
+    OnePartObject other_hole{TriangleMesh(cube_missing_facet())};
+    OnePartObject clean{TriangleMesh(its_make_cube(10.0, 10.0, 10.0))};
+    OnePartObject sheet{TriangleMesh(flat_square())};
+    CgalRepairPlan hole_plan       = planned(*hole.object);
+    CgalRepairPlan other_hole_plan = planned(*other_hole.object);
+    CgalRepairPlan clean_plan      = planned(*clean.object);
+    CgalRepairPlan sheet_plan      = planned(*sheet.object);
+
+    const auto item = [](int id, const OnePartObject& f, const CgalRepairPlan& plan, BatchRepairResult result, bool changed) {
+        BatchRepairItem entry;
+        entry.object_id   = id;
+        entry.object_name = "object " + std::to_string(id);
+        entry.before      = repair_facts_json(*f.object);
+        entry.after       = entry.before;
+        entry.placement   = {{"plate_index", 0}, {"on_bed", true}};
+        entry.result      = result;
+        entry.changed     = changed;
+        entry.plan        = &plan;
+        return entry;
+    };
+    std::vector<BatchRepairItem> items;
+    items.push_back(item(0, hole, hole_plan, BatchRepairResult::repaired, true));
+    items.push_back(item(2, sheet, sheet_plan, BatchRepairResult::failed, false));
+    items.push_back(item(3, clean, clean_plan, BatchRepairResult::nothing_to_repair, false));
+    items.push_back(item(4, other_hole, other_hole_plan, BatchRepairResult::repaired, true));
+    items.push_back(item(5, clean, clean_plan, BatchRepairResult::changed_meanwhile, false));
+    BatchRepairItem late;
+    late.object_id   = 6;
+    late.object_name = "late";
+    items.push_back(late);
+
+    const json answer = batch_repair_answer_json(RepairScope::plate, 1, false, true, items, 105.0);
+    CHECK(answer["status"] == "success");
+    CHECK(answer["changed"] == true);
+    CHECK(answer["scope"] == "plate");
+    CHECK(answer["plate_index"] == 1);
+    CHECK(answer["keep_painting_from"] == "argument");
+    CHECK(answer["counts"] == json{{"repaired", 2}, {"failed", 2}, {"nothing_to_repair", 1}, {"timed_out", 1}});
+    CHECK(answer["repair"]["volumes_repaired"] == 2);
+    REQUIRE(answer["objects"].size() == 6);
+    CHECK(answer["objects"][0]["object_id"] == 0);
+    CHECK(answer["objects"][0]["result"] == "repaired");
+    CHECK(answer["objects"][0]["changed"] == true);
+    CHECK(answer["objects"][0]["plate_index"] == 0);
+    CHECK_FALSE(answer["objects"][0].contains("message"));
+    CHECK(answer["objects"][1]["result"] == "failed");
+    CHECK(mentions(answer["objects"][1]["message"], "failed"));
+    CHECK(answer["objects"][2]["result"] == "nothing_to_repair");
+    CHECK(answer["objects"][4]["result"] == "changed_meanwhile");
+    CHECK(mentions(answer["objects"][4]["message"], "repair_mesh with object_id 5 again"));
+    CHECK(answer["objects"][5]["result"] == "timed_out");
+    const std::string late_message = answer["objects"][5]["message"];
+    CHECK(mentions(late_message, "105 s"));
+    CHECK(mentions(late_message, "ORCAMCP_TIMEOUT"));
+
+    const std::string message = answer["message"];
+    CHECK(mentions(message, "Repaired objects 0 and 4."));
+    CHECK(mentions(message, "Failed: object 2 (\"object 2\")"));
+    CHECK(mentions(message, "1 object needed no repair."));
+
+    // Never a GUI button.
+    std::vector<std::string> texts = {message};
+    for (const json& entry : answer["objects"])
+        if (entry.contains("message"))
+            texts.push_back(entry["message"]);
+    for (const std::string& text : texts)
+        for (const char* gui : {"click", "Click", "the user", "GUI", "button"}) {
+            INFO(text << " names " << gui);
+            CHECK(text.find(gui) == std::string::npos);
+        }
+
+    const json all = batch_repair_answer_json(RepairScope::all_plates, std::nullopt, true, false, {items[0]}, 105.0);
+    CHECK(all["scope"] == "all_plates");
+    CHECK_FALSE(all.contains("plate_index"));
+    CHECK(all["keep_painting_from"] == "app_setting");
+}
+
 // Hidden ([.]): where the time goes on large meshes -- how long the main thread's two steps (capture,
 // apply) and the plan take -- printed, not asserted, since it depends on the machine and the build.
 // Run it by its tag; the painted cases take minutes on the -O0 build (the remap, in the plan).

@@ -854,13 +854,45 @@ runs, and while the app's own Repair runs.
 **Parameters:**
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `object_id` | integer | Yes | Object index (0-based) |
-| `volume_id` | integer | No | Repair only this volume, as `get_mesh_health`'s `volumes` number them. Left out: every volume |
+| `object_id` | integer | One of three | Object index (0-based): repair this one object |
+| `plate_index` | integer | One of three | Repair every object with an instance on this plate (0-based, `get_scene_info`'s `plate_index`), as the plate menu's Fix All. The current plate stays as it is |
+| `all_plates` | boolean | One of three | `true`: repair every object in the project, on every plate (locked ones included, as the app does not skip them) and on none, as Fix All Plates |
+| `volume_id` | integer | No | Repair only this volume, as `get_mesh_health`'s `volumes` number them. Left out: every volume. Only with `object_id` |
 | `keep_painting` | boolean | No | Remap the painting onto the repaired mesh instead of clearing it. Left out: the app's setting |
 
 **Example:**
 ```json
 {"name": "repair_mesh", "arguments": {"object_id": 0}}
+```
+
+**Several objects (Fix All).** Give exactly one of `object_id`, `plate_index` and `all_plates: true`
+(`volume_id` only with `object_id`); anything else is refused, naming the three. A plate's objects are
+those with an instance on it, once each, in index order; `all_plates` takes every object, those on no
+plate and on locked plates included. The objects are repaired one after another within this call's one
+wait (`tool_wait_cap`), as the app's Cancel keeps the plans made so far: those finished in time are
+applied together under one undo step, "Repairing model object", and the rest are left as they are. The
+answer's `objects` gives each one's `result`: `repaired`, `nothing_to_repair`, `failed` (a volume no solid
+can be built from; the object's other volumes are still repaired, `changed: true`), `changed_meanwhile`
+(changed in the app during the repair, left as it is) or `timed_out` (not reached within the wait); `counts`
+are the app's notification counts (`failed` includes `changed_meanwhile`), `repair` is summed over what was
+applied, and `next_steps` names `repair_mesh` with the first `timed_out` object. The same refusals apply as for one
+object; an open toolbar tool is closed only when there is a repair to apply.
+
+```json
+{"name": "repair_mesh", "arguments": {"plate_index": 0}}
+// -> {"status": "success", "changed": true, "scope": "plate", "plate_index": 0,
+//     "keep_painting": false, "keep_painting_from": "app_setting",
+//     "counts": {"repaired": 1, "failed": 1, "nothing_to_repair": 1, "timed_out": 0},
+//     "repair": {"volumes_repaired": 1, "filled_holes": 1, ...},
+//     "objects": [
+//       {"object_id": 0, "object_name": "holed_cube.stl", "result": "repaired", "changed": true,
+//        "repair": {...}, "open_edges_before": 3, "open_edges_after": 0, "mesh_warning_after": false,
+//        "plate_index": 0, "on_bed": true},
+//       {"object_id": 1, "object_name": "sheet.stl", "result": "failed", "changed": false,
+//        "message": "Repairing object 1 failed on volume 0: ... Nothing was changed. ..."},
+//       {"object_id": 2, "object_name": "cube.stl", "result": "nothing_to_repair", "changed": false,
+//        "message": "Nothing to repair: object 2 is already closed, ..."}],
+//     "message": "Repaired object 0. Failed: object 1 (\"sheet.stl\"): ... 1 object needed no repair."}
 ```
 
 **Response** (a 20 mm cube with one facet missing: the hole is filled, and the cube stays one volume
@@ -4385,6 +4417,7 @@ nothing to suggest has no `next_steps`.
 |----------|------|------|
 | `load_model` (the objects it added), `get_scene_info` (every object), `reload_from_disk` / `replace_volume_with_file` (the objects they changed) | `get_mesh_health` | an object shows the object list's mesh warning icon (open edges, or repairs a 3MF recorded) |
 | `get_mesh_health` | `repair_mesh` for that object | the object has open edges. Not for a closed mesh whose icon shows repairs recorded at load: a repair leaves it as it is |
+| `repair_mesh` (`plate_index` / `all_plates`) | `repair_mesh` with the first timed-out `object_id` | the wait ran out before some objects were repaired |
 | | `get_object_components` | a model part of the object is more than one shell: a loose part or a stray fragment, which leaves no warning icon when it is closed |
 | `slice_all` | `wait_for_slice` | `slicing_started`, or `not_started` with `busy_slicing` (wait, then `slice_all` again) |
 | | `get_slicing_status` | `busy_job`: an arrange, orient or bed fill holds the app, which `wait_for_slice` does not wait for; `slice_all` again once `ui_job` is null |

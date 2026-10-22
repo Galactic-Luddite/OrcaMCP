@@ -3,6 +3,9 @@
 #include "OrcaMCPCommon.hpp"
 #include "OrcaMCPMeshHealth.hpp"
 #include "OrcaMCPMeshRepair.hpp"
+#include "OrcaMCPNextSteps.hpp"
+#include "OrcaMCPPartEdits.hpp"
+#include "OrcaMCPPlateSettings.hpp"
 #include "OrcaMCPUiJob.hpp"
 
 #include "slic3r/GUI/GUI_App.hpp"
@@ -16,7 +19,9 @@
 #include "libslic3r/Model.hpp"
 
 #include <chrono>
+#include <optional>
 #include <string>
+#include <vector>
 
 using namespace Slic3r::GUI;
 using namespace Slic3r::GUI::OrcaMCP;
@@ -26,6 +31,7 @@ namespace {
 using Slic3r::CgalRepairInput;
 using Slic3r::CgalRepairPlan;
 using Slic3r::CgalRepairResult;
+using Slic3r::Model;
 using Slic3r::ModelObject;
 
 // A repair_mesh call, as its first step leaves it for the next two.
@@ -167,11 +173,202 @@ nlohmann::json finish_repair(RepairRequest& request, CgalRepairPlan& plan, bool 
     return guard.report(with_closed_tool(std::move(answer), closed_tool));
 }
 
-// repair_mesh_tool: capture on the main thread, the repair on this (the HTTP) thread, apply on the main
+// ---- repair_mesh of several objects: a plate's Fix All, or Fix All Plates ----
+
+// A repair of several objects, as its first step leaves it for the next two. `items` and `inputs` run in
+// the repair's order (repair_order).
+struct BatchRepairRequest
+{
+    RepairScope                  scope = RepairScope::plate;
+    std::optional<int>           plate_index;
+    bool                         keep_painting       = false;
+    bool                         keep_painting_given = false;
+    std::vector<BatchRepairItem> items;
+    std::vector<CgalRepairInput> inputs;
+};
+
+// The model's object indices the scope names, ascending: the plate's objects (ObjectList::fix_all_through_cgal
+// takes the plate's get_objects_on_this_plate), or every object. Empty with `error` set when there are none.
+std::vector<int> batch_object_indices(Plater& plater, const BatchRepairRequest& request, std::string& error)
+{
+    PartPlateList&   plates = plater.get_partplate_list();
+    std::vector<int> indices;
+    if (request.scope == RepairScope::all_plates) {
+        for (int i = 0; i < int(plater.model().objects.size()); ++i)
+            indices.push_back(i);
+    } else {
+        if (const auto plate_error = plate_index_error(*request.plate_index, plates.get_plate_count())) {
+            error = *plate_error;
+            return {};
+        }
+        for (const ModelObject* object : objects_on_plate(*plates.get_plate(*request.plate_index)))
+            indices.push_back(model_object_index(object));
+        indices = repair_order(std::move(indices));
+    }
+    if (indices.empty())
+        error = request.scope == RepairScope::all_plates ? "The project has no objects to repair"
+                                                         : "Plate " + std::to_string(*request.plate_index) + " has no objects to repair";
+    return indices;
+}
+
+// Main thread, the first step: the call checked and every object's repair captured. Null to go on, else the answer.
+nlohmann::json start_batch(const nlohmann::json& params, BatchRepairRequest& request)
+{
+    Plater*     plater = wxGetApp().plater();
+    std::string error;
+    request.keep_painting_given = params.contains("keep_painting");
+    if (request.keep_painting_given && !parse_boolean_param(params.at("keep_painting"), request.keep_painting))
+        return error_response("keep_painting must be true or false");
+    if (!request.keep_painting_given)
+        request.keep_painting = wxGetApp().app_config->get_bool("keep_painting");
+    if (const auto refusal = app_repair_refusal(*plater))
+        return error_response(*refusal);
+    const std::vector<int> indices = batch_object_indices(*plater, request, error);
+    if (!error.empty())
+        return error_response(error);
+    for (int index : indices) {
+        const ModelObject& object = *plater->model().objects[std::size_t(index)];
+        BatchRepairItem    item;
+        item.object_id   = index;
+        item.object_name = object.name;
+        item.before      = repair_facts_json(object);
+        request.items.push_back(std::move(item));
+        request.inputs.push_back(Slic3r::capture_cgal_repair(object, -1, request.keep_painting));
+    }
+    return nullptr;
+}
+
+// The HTTP thread, the second step: each captured object planned in turn within the call's one wait, as the
+// app's Cancel keeps the plans made so far. `in_time[i]` is false for the plan that was stopped; later
+// objects have no plan.
+void plan_batch(std::vector<CgalRepairInput>& inputs, std::chrono::steady_clock::time_point deadline,
+                std::vector<std::optional<CgalRepairPlan>>& plans, std::vector<bool>& in_time)
+{
+    using Clock    = std::chrono::steady_clock;
+    const auto stop = [deadline] { return Slic3r::this_thread_cancelled() || Clock::now() > deadline; };
+    plans.resize(inputs.size());
+    in_time.assign(inputs.size(), false);
+    for (std::size_t i = 0; i < inputs.size() && !stop(); ++i) {
+        plans[i]   = Slic3r::plan_cgal_repair(std::move(inputs[i]), {}, stop);
+        in_time[i] = !plans[i]->canceled && Clock::now() <= deadline;
+        if (!in_time[i])
+            break;
+    }
+}
+
+// Whether item `item`'s object is still as its plan captured it (found by the plan, not the index, which the
+// app may have moved); sets item.object_id to where it is now.
+bool object_unchanged(const Model& model, BatchRepairItem& item)
+{
+    const int index = Slic3r::cgal_repair_object_index(model, *item.plan);
+    if (index < 0)
+        return false;
+    item.object_id = index;
+    return item.plan->applies_to(*model.objects[std::size_t(index)]);
+}
+
+// Whether the item's plan is to be applied: a repair, or a partly failed one, whose other volumes are repaired.
+bool applies(const BatchRepairItem& item)
+{
+    return item.result == BatchRepairResult::repaired || (item.result == BatchRepairResult::failed && !item.plan->changes_nothing());
+}
+
+// Applies one item's plan, as the object list's Repair does after its snapshot. A plan the repair refuses
+// at the last step is a failure that changed nothing on its object.
+void apply_batch_item(Plater& plater, BatchRepairItem& item, CgalRepairPlan& plan, bool keep_painting, bool& painting_removed)
+{
+    ModelObject&           object = *plater.model().objects[std::size_t(item.object_id)];
+    const CgalRepairResult result = Slic3r::apply_cgal_repair(object, keep_painting, plan);
+    if (!result.error.empty()) {
+        plan.error  = result.error;
+        item.result = BatchRepairResult::failed;
+        return;
+    }
+    if (result.volumes_changed == 0)
+        return;
+    item.changed = true;
+    update_after_repair(plater, item.object_id, -1, item.placement);
+    item.after = repair_facts_json(object);
+    painting_removed = painting_removed || (item.before.value("painted", false) && !item.after.value("painted", false));
+}
+
+// Main thread, the last step: every plan made in time applied under one undo snapshot, if its object is still
+// as captured; the rest left as they are, each with its result.
+nlohmann::json finish_batch(BatchRepairRequest& request, std::vector<std::optional<CgalRepairPlan>>& plans,
+                            const std::vector<bool>& in_time, double wait_cap_s)
+{
+    Plater*                   plater = wxGetApp().plater();
+    McpDialogSuppressionGuard guard;
+    if (const auto refusal = app_repair_refusal(*plater))
+        return error_response(*refusal);
+
+    const Model& model = plater->model();
+    for (std::size_t i = 0; i < request.items.size(); ++i) {
+        BatchRepairItem& item = request.items[i];
+        item.plan             = plans[i] ? &*plans[i] : nullptr;
+        item.result = batch_repair_result(item.plan, in_time[i], item.plan != nullptr && object_unchanged(model, item));
+    }
+
+    std::string closed_tool;
+    if (std::any_of(request.items.begin(), request.items.end(), applies)) {
+        closed_tool = close_open_toolbar_tool(*plater);
+        if (!closed_tool.empty() && toolbar_tool_open(*plater))
+            return guard.report(with_closed_tool(error_response("The toolbar tool " + closed_tool +
+                                                                " is open in the app and did not close, so nothing was repaired"),
+                                                 closed_tool));
+        // Closing the tool may have changed an object: such a plan is no longer applied.
+        for (BatchRepairItem& item : request.items)
+            if (applies(item) && !object_unchanged(model, item))
+                item.result = BatchRepairResult::changed_meanwhile;
+    }
+
+    bool painting_removed = false;
+    if (std::any_of(request.items.begin(), request.items.end(), applies)) {
+        Plater::TakeSnapshot snapshot(plater, _u8L("Repairing model object"));
+        for (std::size_t i = 0; i < request.items.size(); ++i)
+            if (applies(request.items[i]))
+                apply_batch_item(*plater, request.items[i], *plans[i], request.keep_painting, painting_removed);
+    }
+    if (painting_removed)
+        plater->notify_painting_removed();
+
+    nlohmann::json answer = batch_repair_answer_json(request.scope, request.plate_index, request.keep_painting, request.keep_painting_given,
+                                                     request.items, wait_cap_s);
+    std::vector<int> timed_out;
+    for (const BatchRepairItem& item : request.items)
+        if (item.result == BatchRepairResult::timed_out)
+            timed_out.push_back(item.object_id);
+    add_next_steps(answer, repair_timed_out_next_steps(timed_out));
+    answer["active_warnings"] = get_active_warnings_json(plater);
+    return guard.report(with_closed_tool(std::move(answer), closed_tool));
+}
+
+// repair_mesh for a plate or the project: the same three steps as one object's, over every captured object, the
+// plans made one after another within the call's one wait.
+nlohmann::json repair_objects_tool(const nlohmann::json& params, RepairScope scope, std::optional<int> plate_index)
+{
+    BatchRepairRequest request;
+    request.scope       = scope;
+    request.plate_index = plate_index;
+    const nlohmann::json refusal = run_on_main_thread([&]() -> nlohmann::json { return start_batch(params, request); });
+    if (!refusal.is_null())
+        return refusal;
+
+    using Clock                                 = std::chrono::steady_clock;
+    const auto                                 wait_cap   = tool_wait_cap();
+    const auto                                 deadline   = Clock::now() + wait_cap;
+    std::vector<std::optional<CgalRepairPlan>> plans;
+    std::vector<bool>                          in_time;
+    plan_batch(request.inputs, deadline, plans, in_time);
+    const double wait_cap_s = std::chrono::duration<double>(wait_cap).count();
+    return run_on_main_thread([&]() -> nlohmann::json { return finish_batch(request, plans, in_time, wait_cap_s); });
+}
+
+// repair_one_object_tool: capture on the main thread, the repair on this (the HTTP) thread, apply on the main
 // thread. The main thread never waits for the repair, and only it changes the model. The work stops,
 // within a volume too, when the app quits (the gate closes, and the next run_on_main_thread refuses with
 // -32002, nothing applied) or when this call's wait runs out.
-nlohmann::json repair_mesh_tool(const nlohmann::json& params)
+nlohmann::json repair_one_object_tool(const nlohmann::json& params)
 {
     RepairRequest        request;
     const nlohmann::json refusal = run_on_main_thread([&params, &request]() -> nlohmann::json { return start_repair(params, request); });
@@ -186,6 +383,22 @@ nlohmann::json repair_mesh_tool(const nlohmann::json& params)
     const bool     past_cap    = Clock::now() > deadline;
     const double   wait_cap_s  = std::chrono::duration<double>(wait_cap).count();
     return run_on_main_thread([&]() -> nlohmann::json { return finish_repair(request, plan, past_cap, wait_cap_s); });
+}
+
+// repair_mesh: one object (object_id, with volume_id for one volume), or every object of a plate or of the
+// project, as the plate menu's Fix All and Fix All Plates.
+nlohmann::json repair_mesh_tool(const nlohmann::json& params)
+{
+    std::string                  error;
+    const std::optional<int>     plate_index = read_plate_index(params, error);
+    const bool                   all_plates  = error.empty() && read_flag(params, "all_plates", error).value_or(false);
+    if (!error.empty())
+        return error_response(error);
+    if (const auto scope_error = repair_scope_error(params.contains("object_id"), params.contains("volume_id"), plate_index.has_value(), all_plates))
+        return error_response(*scope_error);
+    if (params.contains("object_id"))
+        return repair_one_object_tool(params);
+    return repair_objects_tool(params, all_plates ? RepairScope::all_plates : RepairScope::plate, plate_index);
 }
 
 } // namespace
@@ -257,22 +470,38 @@ void OrcaMCPServer::register_mesh_tools()
         "repaired, vertices welded, triangles removed, shells reversed, holes filled, shells removed, "
         "self-intersections removed), whether painting was kept, and the object's placement. Refused while a "
         "slice, an export or an upload runs (wait_for_slice first), or an arrange or orient. A large mesh can "
-        "take minutes.",
+        "take minutes. Give exactly one of object_id (one object; volume_id for one of its volumes), plate_index "
+        "(every object with an instance on that plate, as the plate's Fix All) or all_plates: true (every object in "
+        "the project, as Fix All Plates; locked plates are not skipped, as the app does not skip them). For several "
+        "objects: they are repaired one after another within this call's one wait; those finished in time are applied "
+        "together in one undo step, and the rest are left as they are. The answer's `objects` gives each one's result "
+        "-- repaired, nothing_to_repair, failed (some volume no solid can be built from; the others are still "
+        "repaired), changed_meanwhile (changed in the app during the repair: left as it is) or timed_out (next_steps "
+        "names repair_mesh for it) -- `counts` as the app counts them, and `repair` summed.",
         {
             {"type", "object"},
             {"properties", {
-                {"object_id", {{"type", "integer"}, {"minimum", 0}, {"description", "Object index (0-based)"}}},
+                {"object_id", {{"type", "integer"}, {"minimum", 0},
+                               {"description", "Object index (0-based): repair this one object. Give object_id, "
+                                               "plate_index or all_plates"}}},
+                {"plate_index", {{"type", "integer"}, {"minimum", 0},
+                                 {"description", "Repair every object with an instance on this plate (0-based, "
+                                                 "get_scene_info's plate_index), as the plate's Fix All does. Instead of "
+                                                 "object_id; the current plate stays as it is"}}},
+                {"all_plates", {{"type", "boolean"},
+                                {"description", "true: repair every object in the project -- on every plate, locked "
+                                                "ones included, and on none -- as Fix All Plates does. Instead of "
+                                                "object_id"}}},
                 {"volume_id", {{"type", "integer"}, {"minimum", 0},
                                {"description", "Repair only this volume (0-based, as get_mesh_health's volumes list "
                                                "them), as the object list's Repair does for a selected part. Left out: "
-                                               "every volume"}}},
+                                               "every volume. Only with object_id"}}},
                 {"keep_painting", {{"type", "boolean"},
                                    {"description", "Remap the object's painting (colour, supports, seams, fuzzy skin) "
                                                    "onto the repaired mesh instead of clearing it; the app calls this "
                                                    "experimental. Left out: the app's \"Keep painted feature after mesh "
                                                    "change\" setting, which the answer's keep_painting_from names"}}}
-            }},
-            {"required", {"object_id"}}
+            }}
         },
         [](const nlohmann::json& params) -> nlohmann::json { return repair_mesh_tool(params); }
     });

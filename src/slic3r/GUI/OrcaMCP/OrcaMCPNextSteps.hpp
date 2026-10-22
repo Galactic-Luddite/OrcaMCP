@@ -59,6 +59,10 @@ std::vector<NextStep> mesh_repair_next_steps(const ModelObject& object, int obje
 // deletes one).
 std::vector<NextStep> split_parts_next_steps(int object_id, int volume_id, const std::vector<int>& pieces);
 
+// What a repair_mesh of several objects leaves undone: repair_mesh of the first of the objects
+// (`timed_out`) the call's wait ran out before, one at a time. Nothing when none.
+std::vector<NextStep> repair_timed_out_next_steps(const std::vector<int>& timed_out);
+
 // What set_instance_count's added instances lead to: arrange_objects of every plate when some of them
 // (`on_no_plate`) stand on no plate -- a plate's arrange takes only the instances it holds, so only the
 // arrange of every plate places them -- else arrange_objects of plate `plate_index` when some overlap

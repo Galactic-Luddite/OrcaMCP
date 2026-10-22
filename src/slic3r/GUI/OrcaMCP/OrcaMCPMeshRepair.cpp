@@ -3,6 +3,7 @@
 
 #include "OrcaMCPCommon.hpp"
 #include "OrcaMCPMeshHealth.hpp"
+#include "OrcaMCPNextSteps.hpp"
 #include "OrcaMCPUiJob.hpp"
 
 #include "slic3r/Utils/FixModelByCgal.hpp"
@@ -58,6 +59,81 @@ std::string failed(const CgalRepairPlan& plan, int object_id)
     return "Repairing " + object_label(object_id) + " failed" + where + ": " + without_final_period(plan.error) +
            ". Nothing was changed. A volume from which no solid can be built (a flat or empty one) cannot be repaired; "
            "delete_object with volume_id removes one, or the object.";
+}
+
+std::string changed_meanwhile_message(int object_id)
+{
+    return "Object " + std::to_string(object_id) + " changed in the app while it was being repaired, so nothing was changed on it: "
+           "call repair_mesh with object_id " + std::to_string(object_id) + " again";
+}
+
+std::string timed_out_in_batch_message(int object_id, double wait_cap_s)
+{
+    return "Object " + std::to_string(object_id) + " was not repaired within this call's wait (" +
+           std::to_string(int(std::lround(wait_cap_s))) +
+           " s), so nothing was changed on it. That wait is set a little under the MCP bridge's ORCAMCP_TIMEOUT; repair_mesh with "
+           "object_id " + std::to_string(object_id) + " repairs it on its own";
+}
+
+const char* batch_result_name(BatchRepairResult result)
+{
+    switch (result) {
+    case BatchRepairResult::repaired: return "repaired";
+    case BatchRepairResult::nothing_to_repair: return "nothing_to_repair";
+    case BatchRepairResult::failed: return "failed";
+    case BatchRepairResult::changed_meanwhile: return "changed_meanwhile";
+    case BatchRepairResult::timed_out: return "timed_out";
+    }
+    return "timed_out";
+}
+
+// Why an object that is not a clean repaired one came out as it did; "" for one that is.
+std::string batch_repair_message(const BatchRepairItem& item, double wait_cap_s)
+{
+    switch (item.result) {
+    case BatchRepairResult::repaired: return {};
+    case BatchRepairResult::nothing_to_repair:
+        return repair_step_message(RepairStep::nothing_to_repair, *item.plan, item.object_id, -1, wait_cap_s, item.before);
+    case BatchRepairResult::failed:
+        return item.changed ? unrepaired_volumes_message(*item.plan)
+                            : repair_step_message(RepairStep::failed, *item.plan, item.object_id, -1, wait_cap_s, item.before);
+    case BatchRepairResult::changed_meanwhile: return changed_meanwhile_message(item.object_id);
+    case BatchRepairResult::timed_out: return timed_out_in_batch_message(item.object_id, wait_cap_s);
+    }
+    return {};
+}
+
+std::vector<int> object_ids_with(const std::vector<BatchRepairItem>& items, BatchRepairResult result)
+{
+    std::vector<int> ids;
+    for (const BatchRepairItem& item : items)
+        if (item.result == result)
+            ids.push_back(item.object_id);
+    return ids;
+}
+
+std::string plural_objects(std::size_t count) { return std::to_string(count) + (count == 1 ? " object" : " objects"); }
+
+// The answer's one sentence: who was repaired, who failed and why, who needed nothing, who was not reached.
+std::string batch_repair_summary(const std::vector<BatchRepairItem>& items, double wait_cap_s)
+{
+    std::string summary;
+    const auto  add = [&summary](const std::string& sentence) { summary += (summary.empty() ? "" : " ") + sentence; };
+    if (const auto repaired = object_ids_with(items, BatchRepairResult::repaired); !repaired.empty())
+        add("Repaired " + std::string(repaired.size() == 1 ? "object " : "objects ") + listed_ids(repaired) + ".");
+    std::string failed_text;
+    for (const BatchRepairItem& item : items)
+        if (item.result == BatchRepairResult::failed || item.result == BatchRepairResult::changed_meanwhile)
+            failed_text += (failed_text.empty() ? "" : "; ") + ("object " + std::to_string(item.object_id) + " (\"" + item.object_name +
+                                                                  "\"): " + without_final_period(batch_repair_message(item, wait_cap_s)));
+    if (!failed_text.empty())
+        add("Failed: " + failed_text + ".");
+    if (const auto clean = object_ids_with(items, BatchRepairResult::nothing_to_repair); !clean.empty())
+        add(plural_objects(clean.size()) + " needed no repair.");
+    if (const auto late = object_ids_with(items, BatchRepairResult::timed_out); !late.empty())
+        add(plural_objects(late.size()) + " (" + listed_ids(late) + ") not repaired within this call's wait (" +
+            std::to_string(int(std::lround(wait_cap_s))) + " s); repair_mesh with object_id repairs one on its own.");
+    return summary;
 }
 
 bool any_volume_painted(const ModelObject& object)
@@ -121,13 +197,29 @@ nlohmann::json repair_facts_json(const ModelObject& object)
     return facts;
 }
 
+nlohmann::json repair_stats_json(const std::vector<const CgalRepairPlan*>& plans)
+{
+    MeshRepairStats totals;
+    std::size_t     volumes = 0;
+    for (const CgalRepairPlan* plan : plans) {
+        const MeshRepairStats each = plan->totals();
+        totals.welded_vertices += each.welded_vertices;
+        totals.removed_triangles += each.removed_triangles;
+        totals.reversed_shells += each.reversed_shells;
+        totals.filled_holes += each.filled_holes;
+        totals.removed_shells += each.removed_shells;
+        totals.self_intersections += each.self_intersections;
+        volumes += plan->volumes_changed();
+    }
+    return {{"volumes_repaired", volumes},           {"welded_vertices", totals.welded_vertices},
+            {"removed_triangles", totals.removed_triangles}, {"reversed_shells", totals.reversed_shells},
+            {"filled_holes", totals.filled_holes},   {"removed_shells", totals.removed_shells},
+            {"self_intersections", totals.self_intersections}};
+}
+
 nlohmann::json repair_stats_json(const CgalRepairPlan& plan)
 {
-    const MeshRepairStats totals = plan.totals();
-    return {{"volumes_repaired", plan.volumes_changed()},     {"welded_vertices", totals.welded_vertices},
-            {"removed_triangles", totals.removed_triangles}, {"reversed_shells", totals.reversed_shells},
-            {"filled_holes", totals.filled_holes},           {"removed_shells", totals.removed_shells},
-            {"self_intersections", totals.self_intersections}};
+    return repair_stats_json(std::vector<const CgalRepairPlan*>{&plan});
 }
 
 std::string unrepaired_volumes_message(const CgalRepairPlan& plan)
@@ -152,6 +244,88 @@ nlohmann::json repair_answer_json(int object_id, const std::string& object_name,
         answer["message"] = unrepaired;
     answer["before"]             = before;
     answer["after"]              = after;
+    return answer;
+}
+
+
+std::optional<std::string> repair_scope_error(bool object_given, bool volume_given, bool plate_given, bool all_plates)
+{
+    const int named = int(object_given) + int(plate_given) + int(all_plates);
+    if (named == 0)
+        return std::string("Give object_id to repair one object, plate_index to repair every object on that plate, or all_plates: "
+                           "true to repair every object in the project");
+    if (named > 1)
+        return std::string("Give one of object_id, plate_index and all_plates, not several");
+    if (volume_given && !object_given)
+        return std::string("volume_id names a volume of object_id's object: give object_id with it, or leave volume_id out to repair "
+                           "whole objects");
+    return std::nullopt;
+}
+
+std::vector<int> repair_order(std::vector<int> object_indices)
+{
+    std::sort(object_indices.begin(), object_indices.end());
+    object_indices.erase(std::unique(object_indices.begin(), object_indices.end()), object_indices.end());
+    return object_indices;
+}
+
+BatchRepairResult batch_repair_result(const CgalRepairPlan* plan, bool planned_in_time, bool unchanged_in_app)
+{
+    if (plan == nullptr || !planned_in_time || plan->canceled)
+        return BatchRepairResult::timed_out;
+    if (!unchanged_in_app)
+        return BatchRepairResult::changed_meanwhile;
+    if (plan->changes_nothing())
+        return plan->error.empty() ? BatchRepairResult::nothing_to_repair : BatchRepairResult::failed;
+    return plan->error.empty() ? BatchRepairResult::repaired : BatchRepairResult::failed;
+}
+
+nlohmann::json batch_repair_object_json(const BatchRepairItem& item, double wait_cap_s)
+{
+    nlohmann::json entry = {{"object_id", item.object_id},
+                            {"object_name", item.object_name},
+                            {"result", batch_result_name(item.result)},
+                            {"changed", item.changed}};
+    if (item.changed) {
+        entry["repair"]            = repair_stats_json(*item.plan);
+        entry["open_edges_before"] = item.before.value("open_edges", 0);
+        entry["open_edges_after"]  = item.after.value("open_edges", 0);
+        entry["mesh_warning_after"] = item.after.value("mesh_warning", false);
+        for (const char* key : {"plate_index", "on_bed"})
+            if (item.placement.contains(key))
+                entry[key] = item.placement[key];
+    }
+    if (const std::string message = batch_repair_message(item, wait_cap_s); !message.empty())
+        entry["message"] = message;
+    return entry;
+}
+
+nlohmann::json batch_repair_answer_json(RepairScope scope, std::optional<int> plate_index, bool keep_painting,
+                                        bool keep_painting_given, const std::vector<BatchRepairItem>& items, double wait_cap_s)
+{
+    nlohmann::json                  objects = nlohmann::json::array();
+    std::vector<const CgalRepairPlan*> applied;
+    bool                            any_changed = false;
+    for (const BatchRepairItem& item : items) {
+        objects.push_back(batch_repair_object_json(item, wait_cap_s));
+        if (item.changed) {
+            applied.push_back(item.plan);
+            any_changed = true;
+        }
+    }
+    nlohmann::json answer = {{"status", "success"}, {"changed", any_changed}, {"scope", scope == RepairScope::plate ? "plate" : "all_plates"}};
+    if (scope == RepairScope::plate && plate_index)
+        answer["plate_index"] = *plate_index;
+    answer["keep_painting"]      = keep_painting;
+    answer["keep_painting_from"] = keep_painting_given ? "argument" : "app_setting";
+    answer["counts"]             = {{"repaired", object_ids_with(items, BatchRepairResult::repaired).size()},
+                                    {"failed", object_ids_with(items, BatchRepairResult::failed).size() +
+                                                   object_ids_with(items, BatchRepairResult::changed_meanwhile).size()},
+                                    {"nothing_to_repair", object_ids_with(items, BatchRepairResult::nothing_to_repair).size()},
+                                    {"timed_out", object_ids_with(items, BatchRepairResult::timed_out).size()}};
+    answer["repair"]  = repair_stats_json(applied);
+    answer["objects"] = std::move(objects);
+    answer["message"] = batch_repair_summary(items, wait_cap_s);
     return answer;
 }
 
