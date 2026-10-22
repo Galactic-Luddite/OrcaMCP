@@ -36,9 +36,16 @@ compared by their strings; not by running them):
   the current settings"), then a yes/no for high- and low-temperature filaments together. Nothing in
   `detail` reports either, and no upload or `printGcode` field skips or pre-confirms them. Whether they
   run for a LAN start, and what `status` says while one waits, is not known yet.
-- **"Fixed the extended print time issue"** reads as the print itself running long: 2.0.0's Klipper
+- **"Fixed the extended print time issue" is the print itself, and it holds**: 2.0.0's Klipper
   `virtual_sdcard.py` is rewritten for G-code throughput (a fast path for G0/G1, batched yields, a
-  shorter busy wait). Whether `estimatedTime` changed meaning is not visible in the strings.
+  shorter busy wait). Measured on 2026-10-22 (a 5 h single-filament plate of 857 layers at 0.12 mm,
+  sent from OrcaMCP, speed 100 %): `printDuration` ended at 18120 s against the slicer's 18079 s, 0.2 %
+  over. Leveling and flow calibration before it took 18 min and are not in `printDuration`.
+- **`estimatedTime` did not change**: it is still the slicer's total times `1 − printProgress` (bytes),
+  updated in 30 s steps, so it ran up to 74 min over on that print (an hour of ironing on one layer is
+  little of the file's bytes). Read progress by the sliced file instead (`progress_source: "slice"`):
+  OrcaMCP's reading was within a minute of the true time left from mid-print on.
+- **`printLayer` still runs ahead**, by two layers on that print.
 
 ---
 
@@ -477,9 +484,9 @@ Two ways, both on port 8898. `gcodeThumb` (section 4) gives a stored file's PNG,
 credentials and a `fileName`: OrcaMCP's Device page and the flashforge-obico console show the job
 printing that way, by its `printFileName`, and check the PNG signature first. `detail.printFileThumbUrl`,
 present on 2.0.0 and empty while idle, is by third-party reports `http://<ip>:8898/getThum` during a
-print: a plain GET with **no credentials**, so it would cover a print from a USB drive too. Its image
-format is unconfirmed (a BMP by one report, a PNG file name in its header by the firmware's strings);
-not used here until it has been seen on this machine.
+print: a plain GET with **no credentials**, so it would cover a print from a USB drive too. Seen on
+2026-10-22: `http://10.0.0.100:8898/getThum`, served as `Content-Type: image/bmp` but a PNG by its bytes
+(6,347 bytes). Check the signature, not the header.
 
 ---
 
