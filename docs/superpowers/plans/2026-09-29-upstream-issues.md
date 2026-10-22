@@ -63,3 +63,8 @@ The user picks about five; offer this list and a one-line recommendation each.
 All eight, on OrcaSlicer/OrcaSlicer: AH #15988, O #15989, P #15990, BD #15991, BG #15992, BL #15993,
 BQ #15994, AN #15995. Each number is also on its probe line in CLAUDE.md. At each upstream sync, a closed
 issue is a hint to re-run that probe.
+
+## Filed (2026-10-23)
+
+BV, as a pull request at the user's request (the same three-part text, with a Tests section):
+https://github.com/OrcaSlicer/OrcaSlicer/pull/16774 -- two classes named `Slic3r::IslandLocator` abort every painted slice.

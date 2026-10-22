@@ -1346,6 +1346,7 @@ echo "BP upstream's send dialog is not told which Flashforge it sends to, so it 
 echo "BS an agent's launch gets startup dialogs: the Linux SSL prompt and the plugin download before the MCP server, the setup wizard, the update check, the legacy filament preset migration offer, the profile-sync notice, the locale error (rel2508; a feature: 0 = keep ours): $(U src/slic3r/GUI/GUI_App.cpp | grep -c 'agent_launch_leaves_out')"
 echo "BT replies end their head lines with a bare LF / a request line is read up to its CR, so an LF that arrives later begins the next line (2026-10-02, Streamable HTTP): $(U src/slic3r/GUI/HttpServer.cpp | grep -c 'ssOut << std::endl') / $(U src/slic3r/GUI/HttpServer.cpp | grep -c "async_read_until(socket, buff, '\\\\r'")"
 echo "BU Windows CI's compiler cache keeps objects built with the old version after a bump (depend mode cannot see the precompiled header; 0 = bug): $(U .github/workflows/build_orca.yml | grep -c 'CCACHE_EXTRAFILES')"
+echo "BV two classes named Slic3r::IslandLocator (ConnectedBodies.hpp, MultiMaterialSegmentation.cpp) share one destructor symbol, aborting every painted slice (PR #16774; 0 = bug): $(U src/libslic3r/MultiMaterialSegmentation.cpp | grep -B6 '^class IslandLocator' | grep -c 'namespace {')"
 ```
 
 Items M and N: upstream's `HttpServer::stop` closes every connection at once, so a reply still being
@@ -2026,6 +2027,14 @@ came back from the cache compiled with the old version (v2.5.0.11-dev's first Wi
 other header inside the Windows precompiled header (`src/libslic3r/pchheader.hpp`, `src/slic3r/pchheader.hpp`) is
 missed the same way; it does not change the version, so this does not cover it. On a non-zero, upstream hashes something
 itself: check that it covers the version, and re-check that a bump's Windows build reports the new version.
+
+Item BV: upstream's #16291 (center of mass markers) added `Slic3r::IslandLocator` in `ConnectedBodies.hpp`, and #15985
+(faster slicing of layers cut into many pieces) another class of that name inside `MultiMaterialSegmentation.cpp`. Two
+classes of one name in one namespace break the one-definition rule: their inline destructors share a symbol, the linker
+kept `ConnectedBodies`', and `merge_segmented_layers` freed its grid as a `vector<bool>`: every slice of a painted object
+aborted ("pointer being freed was not allocated", 2026-10-23, the dev build). Ours puts the segmentation's class in an
+unnamed namespace (e81a88ab9e); offered upstream as PR https://github.com/OrcaSlicer/OrcaSlicer/pull/16774. On a non-zero
+count, or once either class is renamed, take upstream's.
 
 Item I is not a fork patch -- we deliberately carry nothing for it (see
 `docs/superpowers/plans/2026-09-17-next-release-plan.md`, Stage 3). It is here so the sync notices
