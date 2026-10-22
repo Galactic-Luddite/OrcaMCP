@@ -836,6 +836,7 @@ bool Flashforge::run_local_api_request(const std::string& url, const LocalApiAtt
         /*may_wait=*/!wxThread::IsMain(), failure, attempts);
 
     log_local_api_outcome(url, ok, failure, attempts);
+    m_last_request_timed_out = !ok && FlashforgeLocalApi::curl_code_of(failure.error) == FlashforgeLocalApi::kCurlOperationTimedout;
     if (!ok && FlashforgeLocalApi::curl_code_of(failure.error) != 0)
         error_msg = GUI::from_u8(FlashforgeLocalApi::describe_failure(m_local_api_host, failure, attempts));
     if (failure_out != nullptr)

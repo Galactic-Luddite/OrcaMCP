@@ -77,6 +77,12 @@ long project_remaining_s(const std::string& state, long duration_s, double progr
 // (`loading` seen on 2.0.0) -- so they count only with a file named.
 bool job_running(const std::string& state, const std::string& print_file);
 
+// Whether the printer is getting a job ready: running one (job_running), not paused, nothing printed yet
+// (no print duration) -- heating, leveling, calibrating. Firmware 2.0.0 answers no control command then
+// (2026-10-22: two print-speed commands during calibration got no answer in 15 s, and the speed changed
+// as calibration ended).
+bool job_getting_ready(const std::string& state, const std::string& print_file, long duration_s);
+
 // Returns false with `error` set if the body is not a successful API response.
 bool parse_detail(const std::string& body, PrinterStatus& out, std::string& error);
 

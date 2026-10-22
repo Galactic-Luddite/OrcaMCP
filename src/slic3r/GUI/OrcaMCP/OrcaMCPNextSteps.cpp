@@ -393,6 +393,13 @@ std::vector<NextStep> printer_control_next_steps()
              "the printer applies a command within a few seconds; printer.controls there reads back what it now reports"}};
 }
 
+std::vector<NextStep> unanswered_command_next_steps()
+{
+    return {{"get_printer_status", "the printer may still carry out the command it did not answer: printer.controls (a "
+                                   "setting) or printer.state (pause, resume, cancel) says whether it did; send it "
+                                   "again only if not"}};
+}
+
 std::vector<NextStep> untrusted_status_next_steps(const std::vector<std::string>& implausible_telemetry)
 {
     if (implausible_telemetry.empty())

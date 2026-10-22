@@ -128,6 +128,17 @@ TEST_CASE("a job runs while printing or paused, or getting ready with a file nam
     }
 }
 
+TEST_CASE("a job is getting ready until it has printed for a second", "[flashforge]") {
+    // 2.0.0 reports "printing" through heating, leveling and calibration, with no print duration yet.
+    CHECK(job_getting_ready("printing", "box.gcode.3mf", 0));
+    CHECK(job_getting_ready("calibrate_doing", "box.gcode.3mf", 0));
+    CHECK_FALSE(job_getting_ready("printing", "box.gcode.3mf", 8));
+    CHECK_FALSE(job_getting_ready("paused", "box.gcode.3mf", 0));
+    CHECK_FALSE(job_getting_ready("pausing", "box.gcode.3mf", 0));
+    CHECK_FALSE(job_getting_ready("calibrate_doing", "", 0)); // a calibration from the screen is no job
+    CHECK_FALSE(job_getting_ready("ready", "", 0));
+}
+
 TEST_CASE("parse_detail falls back to rightTemp for single nozzle printers", "[flashforge]") {
     PrinterStatus s; std::string err;
     REQUIRE(parse_detail(R"({"code":0,"detail":{"status":"ready","rightTemp":25,"rightTargetTemp":0,"platTemp":24,"platTargetTemp":0}})", s, err));

@@ -42,4 +42,11 @@ std::optional<std::string> status_refusal(const PrinterControlRequest& request, 
 // report is null.
 nlohmann::json printer_controls_json(const nlohmann::json& raw);
 
+// printer_control's answer when the printer answered no command in time but a status read right after did
+// (state, print_file, duration_s): the command may still be carried out, so it is not to be sent again
+// blind. While the printer gets a job ready (FlashforgeApi::job_getting_ready) it answers no command, and
+// carried one out once calibration ended (firmware 2.0.0, 2026-10-22).
+std::string unanswered_command_message(const std::string& action, const std::string& state,
+                                       const std::string& print_file, long duration_s);
+
 }}} // namespace Slic3r::GUI::OrcaMCP

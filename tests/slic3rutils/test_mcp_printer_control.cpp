@@ -275,3 +275,18 @@ TEST_CASE("printer_control sends nothing back from a report it cannot trust", "[
     CHECK_FALSE(control_body({{"action", "light_on"}}, unreadable).contains("refused"));
     CHECK_FALSE(control_body({{"action", "cancel"}}, unreadable).contains("refused"));
 }
+
+TEST_CASE("a command the printer did not answer is not called a network failure", "[McpPrinterControl][orcamcp]")
+{
+    // 2.0.0 during calibration: no answer in 15 s, and the speed changed as calibration ended.
+    const std::string getting_ready = unanswered_command_message("set_print_speed", "printing", "box.gcode.3mf", 0);
+    CHECK(getting_ready.find("may still carry it out") != std::string::npos);
+    CHECK(getting_ready.find("getting the job ready") != std::string::npos);
+    CHECK(getting_ready.find("duration_s is above 0") != std::string::npos);
+    CHECK(getting_ready.find("network") == std::string::npos);
+
+    const std::string printing = unanswered_command_message("pause", "printing", "box.gcode.3mf", 600);
+    CHECK(printing.find("may still carry it out") != std::string::npos);
+    CHECK(printing.find("getting the job ready") == std::string::npos);
+    CHECK(printing.find("again only if it did not") != std::string::npos);
+}

@@ -58,6 +58,10 @@ public:
 
     // Local API status and control. All are safe to call off the main thread; all return false and fill `msg` on failure.
     bool has_local_api_credentials() const { return !m_serial_number.empty() && !m_check_code.empty(); }
+    // Whether this host's last local API request got no answer in time: the printer took the connection
+    // and said nothing, as it does to a command while it gets a job ready. One host per call, as its users
+    // make one: not for sharing across threads.
+    bool last_request_timed_out() const { return m_last_request_timed_out; }
     // `unreachable`, when given, says whether a failure was the printer not being reachable at all
     // (FlashforgeLocalApi::is_connectivity_failure) rather than its own answer, e.g. a wrong check code.
     bool fetch_status(FlashforgeApi::PrinterStatus& out, wxString& msg, bool* unreachable = nullptr) const;
@@ -91,6 +95,7 @@ private:
     // flashforge-obico agent watching this printer is found, to hand it a started print's slice table.
     std::string m_obico_url;
     std::string m_obico_token;
+    mutable bool m_last_request_timed_out{false};
     std::string m_console_port;
     const int m_bufferSize;
     GCodeFlavor m_gcFlavor;

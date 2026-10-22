@@ -463,6 +463,15 @@ TEST_CASE("A slot change that renumbered objects points at checking them, since 
     CHECK(slot_change_next_steps(false).empty());
 }
 
+TEST_CASE("A command the printer did not answer points at reading its status before sending it again", "[McpNextSteps][orcamcp]")
+{
+    const std::vector<NextStep> steps = unanswered_command_next_steps();
+    REQUIRE(steps.size() == 1);
+    CHECK(steps[0].tool == "get_printer_status");
+    CHECK(mentions(steps[0].why, "printer.controls"));
+    CHECK(mentions(steps[0].why, "again only if not"));
+}
+
 TEST_CASE("A printer report with numbers no reading can be points at reading it again", "[McpNextSteps][orcamcp][FlashforgeTelemetry]")
 {
     const std::vector<NextStep> steps = untrusted_status_next_steps({"printSpeedAdjust 65660", "chamberFanSpeed 5177344"});
@@ -515,6 +524,8 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
         steps.push_back(std::move(step));
     for (NextStep& step : printer_control_next_steps())
         steps.push_back(std::move(step));
+    for (NextStep& step : unanswered_command_next_steps())
+        steps.push_back(std::move(step));
     for (NextStep& step : untrusted_status_next_steps({"printSpeedAdjust 65660", "chamberFanSpeed 5177344"}))
         steps.push_back(std::move(step));
     for (NextStep& step : missing_slot_next_steps({3, 4}, true))
@@ -526,7 +537,7 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
     for (const std::string& installed : {std::string(), std::string("Flashforge AD5X 0.4 nozzle")})
         for (NextStep& step : printer_setup_next_steps({true, installed}))
             steps.push_back(std::move(step));
-    REQUIRE(steps.size() == 33);
+    REQUIRE(steps.size() == 34);
 
     const mcp_tool_references::ToolNames names(OrcaMCPServer::registered_tools());
     json                                 response = json::object();

@@ -982,8 +982,19 @@ void OrcaMCPServer::register_printer_tools()
                 return error_response(error + " Nothing was sent.");
 
             wxString msg;
-            if (!run_console_operation(*ff, operation, msg))
+            if (!run_console_operation(*ff, operation, msg)) {
+                // No answer in time is not a refusal: a printer that still answers its status may carry the
+                // command out yet, and sending it again blind could pause twice or cancel a resumed print.
+                Slic3r::FlashforgeApi::PrinterStatus after;
+                wxString                             status_msg;
+                if (ff->last_request_timed_out() && ff->fetch_status(after, status_msg)) {
+                    nlohmann::json answer = error_response(
+                        unanswered_command_message(request.action, after.state, after.print_file, after.duration_s));
+                    add_next_steps(answer, unanswered_command_next_steps());
+                    return answer;
+                }
                 return error_response(msg.empty() ? ("Failed to perform action '" + request.action + "'") : to_std(msg));
+            }
 
             nlohmann::json answer = {{"status", "success"}, {"action", request.action}};
             if (request.reads_status) {

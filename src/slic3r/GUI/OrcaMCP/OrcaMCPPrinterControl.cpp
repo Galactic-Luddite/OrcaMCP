@@ -1,6 +1,7 @@
 // src/slic3r/GUI/OrcaMCP/OrcaMCPPrinterControl.cpp
 #include "OrcaMCPPrinterControl.hpp"
 #include "OrcaMCPCommon.hpp"
+#include "slic3r/Utils/FlashforgeApi.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -273,6 +274,18 @@ json printer_controls_json(const json& raw)
     if (raw.contains("coolingLeftFanSpeed"))
         controls["cooling_left_fan_percent"] = number_or_null(raw, "coolingLeftFanSpeed");
     return controls;
+}
+
+std::string unanswered_command_message(const std::string& action, const std::string& state,
+                                       const std::string& print_file, long duration_s)
+{
+    const std::string head = "The printer did not answer " + action + " in time, though it answers its status, so it may "
+                             "still carry it out. ";
+    if (FlashforgeApi::job_getting_ready(state, print_file, duration_s))
+        return head + "It is getting the job ready (heating, leveling or calibrating: nothing printed yet), and then "
+                      "it answers no command; one sent then has taken effect as it started printing. Read "
+                      "get_printer_status once printer.duration_s is above 0, and send it again only if it did not.";
+    return head + "Read get_printer_status, and send it again only if it did not.";
 }
 
 }}} // namespace Slic3r::GUI::OrcaMCP

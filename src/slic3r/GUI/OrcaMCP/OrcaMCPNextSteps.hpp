@@ -135,6 +135,11 @@ std::vector<NextStep> support_paint_next_steps(int object_id, bool support_enabl
 // to apply a command, as the Device page shows by waiting for the next status.
 std::vector<NextStep> printer_control_next_steps();
 
+// What printer_control's answer to a command the printer did not answer in time leads to: get_printer_status,
+// which says whether it was carried out after all -- printer.controls for a setting, printer.state for a job
+// action -- before anything is sent again.
+std::vector<NextStep> unanswered_command_next_steps();
+
 // What get_printer_status's answer, or printer_control's refusal, leads to when the printer's report has
 // job and control numbers no reading can be (PrinterStatus::implausible_telemetry, named in `why`):
 // get_printer_status again, a few seconds later. None when there are none.

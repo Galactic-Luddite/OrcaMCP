@@ -416,6 +416,11 @@ bool job_running(const std::string& state, const std::string& print_file)
            std::any_of(std::begin(job_phases), std::end(job_phases), [&state](const char* phase) { return state == phase; });
 }
 
+bool job_getting_ready(const std::string& state, const std::string& print_file, long duration_s)
+{
+    return job_running(state, print_file) && state != "paused" && state != "pausing" && duration_s <= 0;
+}
+
 bool try_parse_json_int(const nlohmann::json& value, int& out)
 {
     try {

@@ -245,6 +245,15 @@ confirmation. Consequences for a bridge:
 - Whether the firmware *queues or drops* the command has not been settled by a deliberate
   reproduction; the observed behaviour (still printing at layer 3, 21 s later) says drop.
 
+**Firmware 2.0.0 answers nothing instead** (2026-10-22, one print): during the leveling and flow
+calibration before a print (`status` `printing`, `printDuration` 0, `stateAction` 5), two
+`printerCtl_cmd` speed changes (50 → 100 %) each got no HTTP answer within 15 s, while `detail` went on
+answering every 10 s. The speed then changed to 100 % at the end of calibration, 20 s before the first
+extrusion: the firmware held the command and carried it out (unless the operator changed it on the
+screen at that moment). So a command that times out in this phase is not a failure to repeat blind.
+OrcaMCP's `printer_control` reads the status after such a timeout and says so
+(`unanswered_command_message`), with get_printer_status as the next step.
+
 ### There is no failure detection here
 
 Worth stating plainly, because it is the reason an Obico bridge exists at all. The full `detail`
