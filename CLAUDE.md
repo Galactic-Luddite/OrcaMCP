@@ -1275,6 +1275,11 @@ git push origin main
 git push origin mcp
 ```
 
+Before that push, bump the external regression suite's pin (`test_repo_sha` in `.github/workflows/build_orca.yml`) to
+the `OrcaSlicer/orca-test-repo` revision upstream's green Build all of the merged commit used (upstream clones its
+HEAD: the newest commit older than that run's "Run external slicer regression tests" step). The old pin expects the
+old behaviour and fails the Linux job on code that now matches upstream (2026-10-23: three cases).
+
 ### One-Liner for Quick Sync
 
 ```bash
