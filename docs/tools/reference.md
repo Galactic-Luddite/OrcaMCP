@@ -216,7 +216,7 @@ and a stray shell; the object list's warning icon shows for it):
   "untracked_modal_loop": false,
   "active_warnings": {"count": 1, "warnings": [{
     "level": "warning", "type": "MeshErrors", "object_id": 0, "object_name": "gallows.stl",
-    "message": "Error: 3 non-manifold edges. repair_mesh repairs it with the app's own repair, on every platform: it splits the mesh into its parts, drops parts with no volume and closes each part's holes; painting is cleared unless keep_painting keeps it. Slicing also closes each layer's outline across gaps of up to 2 mm, so a hole that small usually prints closed; a wider one can leave that outline out of a layer, so check the sliced preview there. Details: get_mesh_health {object_id: 0}; repair: repair_mesh {object_id: 0}."}]},
+    "message": "Error: 3 non-manifold edges. repair_mesh repairs it with the app's own repair, on every platform: it fills the holes and welds the cracks of each volume in place; painting is cleared unless keep_painting keeps it. Slicing also closes each layer's outline across gaps of up to 2 mm, so a hole that small usually prints closed; a wider one can leave that outline out of a layer, so check the sliced preview there. Details: get_mesh_health {object_id: 0}; repair: repair_mesh {object_id: 0}."}]},
   "next_steps": [
     {"tool": "get_mesh_health", "arguments": {"object_id": 0},
      "why": "object 0 (\"gallows.stl\") shows the mesh warning icon: Error: 3 non-manifold edges."},
@@ -782,7 +782,7 @@ recorded repairs as they are.
   "mesh_warning": true,
   "tooltip": "Remaining errors:\n\t3 non-manifold edges",
   "mesh_warning_reason": "Error: 3 non-manifold edges.",
-  "advice": "repair_mesh repairs it with the app's own repair, on every platform: it splits the mesh into its parts, drops parts with no volume and closes each part's holes; painting is cleared unless keep_painting keeps it. Slicing also closes each layer's outline across gaps of up to 2 mm, so a hole that small usually prints closed; a wider one can leave that outline out of a layer, so check the sliced preview there.",
+  "advice": "repair_mesh repairs it with the app's own repair, on every platform: it fills the holes and welds the cracks of each volume in place; painting is cleared unless keep_painting keeps it. Slicing also closes each layer's outline across gaps of up to 2 mm, so a hole that small usually prints closed; a wider one can leave that outline out of a layer, so check the sliced preview there.",
   "summary": {"facets": 1215, "shells": 2, "open_edges": 3, "manifold": false, "repaired": false,
               "errors_repaired": 0,
               "repaired_errors": {"edges_fixed": 0, "degenerate_facets": 0, "facets_removed": 0,
@@ -807,7 +807,7 @@ recorded repairs as they are.
   ],
   "next_steps": [
     {"tool": "repair_mesh", "arguments": {"object_id": 0},
-     "why": "object 0 (\"bracket\") has 3 open edges: repair_mesh closes its holes, after splitting each volume into its shells and dropping those with no volume; painting is cleared unless keep_painting keeps it"}
+     "why": "object 0 (\"bracket\") has 3 open edges: repair_mesh fills its holes and welds its cracks, each volume in place; painting is cleared unless keep_painting keeps it"}
   ]
 }
 ```
@@ -818,34 +818,35 @@ there only when it is `true`, the same shape `get_scene_info` and `load_model` u
 ---
 
 ### repair_mesh
-Repair an object's mesh: close its holes (open edges, non-manifold) with the app's own repair -- the
-object list's Repair (`ObjectList::fix_through_cgal`, CGAL), on every platform, and the same code.
+Repair an object's mesh with the app's own repair -- the object list's Repair (Fix Model,
+`ObjectList::fix_through_cgal`), on every platform, and the same code: upstream's `repair_mesh`
+(`MeshRepair.hpp`, CGAL 6.2).
 
 What it does, as the object list's Repair does:
-- Each volume made of several shells is split into one volume per shell, named `<name>_1`, `<name>_2`
-  ..., each with the filament the whole had. The object keeps its place on the plate.
-- A shell with no volume -- flat, empty, or thinner than 1e-4 mm -- is deleted. A closed stray shell,
-  however small, is kept, as a volume of its own (`get_object_components` lists shells).
-- Every shell with open edges has its holes closed. The repaired mesh records no repairs, so its
-  warning goes; a closed one-shell mesh whose warning shows repairs recorded at load is left as it is.
+- Each volume is repaired in place: its cracks are welded, its shells oriented consistently, its holes
+  (open edges) filled, its self-intersections removed, and its shells of fewer than 4 facets (a flat
+  sheet, a stray triangle) removed. No volume is split or deleted, and a closed stray shell, however
+  small, stays in its volume (`get_object_components` lists shells). The object keeps its place.
+- A volume from which no solid can be built (flat or empty) is left as it is; when others were
+  repaired, the answer's `message` names it.
+- The repaired mesh records no repairs, so its warning goes; a closed mesh whose warning shows repairs
+  recorded at load is left as it is.
 - The object is then dropped onto the bed.
-- Painting is cleared unless `keep_painting` keeps it: remapped onto the repaired mesh, which the app
-  calls experimental. Left out, the app's "Keep painted feature after mesh change" setting decides,
-  and `keep_painting_from` says `app_setting`.
+- A repaired volume's painting is cleared unless `keep_painting` keeps it: remapped onto the repaired
+  mesh, which the app calls experimental. Left out, the app's "Keep painted feature after mesh change"
+  setting decides, and `keep_painting_from` says `app_setting`.
 
 It changes nothing when there is nothing to repair (`changed: false` and a `message`), when it is
-refused, when a part's repair fails, when it would leave the object no part to print, or when the
-repair takes longer than this call may wait (a little under the bridge's `ORCAMCP_TIMEOUT`). Otherwise
-it is one undo step, "Repairing model object". When there is a repair to apply, an open toolbar tool
-(gizmo) is closed first, as the Repair needs, and named in `closed_toolbar_tool`; closing a painting
-tool records its own undo step, as when the user closes it. A `volume_id` the object does not have,
-negative included, is refused.
+refused, when no volume could be repaired, or when the repair takes longer than this call may wait (a
+little under the bridge's `ORCAMCP_TIMEOUT`). Otherwise it is one undo step, "Repairing model object".
+When there is a repair to apply, an open toolbar tool (gizmo) is closed first, as the Repair needs, and
+named in `closed_toolbar_tool`; closing a painting tool records its own undo step, as when the user
+closes it. A `volume_id` the object does not have, negative included, is refused.
 
-The CGAL work, the remap of kept painting and the repaired parts' convex hulls run off the app's main
-thread, so the app stays responsive; the main thread only applies the result (the split, with a
-convex hull per new part). On the unoptimised dev build a 20,000-facet sphere with a hole took 0.8 s,
-100,000 facets 3.9 s, 500,000 facets 28 s, of which 0.2 s on the main thread. Keeping painting is slow:
-about 12 minutes for 10,000 painted facets on that build, all of it off the main thread.
+The repair, the remap of kept painting and the repaired meshes' convex hulls run off the app's main
+thread, so the app stays responsive; the main thread only gives each repaired volume its new mesh.
+Keeping painting is slow: minutes per 10,000 painted facets on the unoptimised dev build, all of it off
+the main thread.
 
 Refused while a slice, an export or an upload runs (`wait_for_slice` first), while an arrange or orient
 runs, and while the app's own Repair runs.
@@ -862,33 +863,32 @@ runs, and while the app's own Repair runs.
 {"name": "repair_mesh", "arguments": {"object_id": 0}}
 ```
 
-**Response** (a 20 mm cube with a flat stray sheet beside it: the sheet is dropped, and the cube stays
-where it was -- `position` is the box centre, which the sheet had widened):
+**Response** (a 20 mm cube with one facet missing: the hole is filled, and the cube stays one volume
+where it was; taken from a live call on 2026-10-22):
 ```json
 {
   "status": "success",
   "changed": true,
   "object_id": 0,
-  "object_name": "Object_1",
+  "object_name": "holed_cube.stl",
   "keep_painting": false,
   "keep_painting_from": "app_setting",
-  "volumes_before": 1,
-  "volumes_after": 1,
-  "parts": {"split": 2, "dropped": 1, "repaired": 0},
-  "before": {"facets": 14, "shells": 2, "open_edges": 4, "manifold": false, "repaired": false,
+  "repair": {"volumes_repaired": 1, "welded_vertices": 0, "removed_triangles": 0, "reversed_shells": 0,
+             "filled_holes": 1, "removed_shells": 0, "self_intersections": 0},
+  "before": {"facets": 11, "shells": 1, "open_edges": 3, "manifold": false, "repaired": false,
              "errors_repaired": 0,
              "repaired_errors": {"edges_fixed": 0, "degenerate_facets": 0, "facets_removed": 0,
                                  "facets_reversed": 0, "backwards_edges": 0},
              "mesh_warning": true, "volumes": 1, "painted": false,
-             "position": {"x": 128.0, "y": 128.0, "z": 10.0}},
+             "position": {"x": 100.0, "y": 100.0, "z": 10.0}},
   "after": {"facets": 12, "shells": 1, "open_edges": 0, "manifold": true, "repaired": false,
             "errors_repaired": 0,
             "repaired_errors": {"edges_fixed": 0, "degenerate_facets": 0, "facets_removed": 0,
                                 "facets_reversed": 0, "backwards_edges": 0},
             "mesh_warning": false, "volumes": 1, "painted": false,
-            "position": {"x": 118.0, "y": 128.0, "z": 10.0}},
+            "position": {"x": 100.0, "y": 100.0, "z": 10.0}},
   "volumes": [
-    {"volume_id": 0, "name": "Object_1_1", "type": "part", "facets": 12, "shells": 1, "open_edges": 0,
+    {"volume_id": 0, "name": "holed_cube.stl", "type": "part", "facets": 12, "shells": 1, "open_edges": 0,
      "manifold": true, "repaired": false, "errors_repaired": 0,
      "repaired_errors": {"edges_fixed": 0, "degenerate_facets": 0, "facets_removed": 0,
                          "facets_reversed": 0, "backwards_edges": 0},
@@ -898,10 +898,12 @@ where it was -- `position` is the box centre, which the sheet had widened):
   "plate_indices": [0],
   "on_bed": true,
   "instance_placement": [{"instance_id": 0, "plate_index": 0, "on_bed": true,
-                          "position": {"x": 118.0, "y": 128.0, "z": 10.0}}],
+                          "position": {"x": 100.0, "y": 100.0, "z": 10.0}}],
   "active_warnings": {"count": 0, "warnings": []}
 }
 ```
+When some volume could not be repaired while others were, `message` names it: "Not every volume could
+be repaired: ... Those volumes were left as they were; the others were repaired."
 
 - `parts.split`: the parts the splits made (0: no volume had several shells); `dropped`: the parts
   with no volume deleted; `repaired`: the parts whose holes were closed.

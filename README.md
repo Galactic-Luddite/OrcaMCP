@@ -20,7 +20,7 @@
 ## What this is
 
 OrcaMCP is OrcaSlicer with a [Model Context Protocol](https://modelcontextprotocol.io/) server
-built into the application. Point Claude Code, or any MCP client, at it and the agent gets 78
+built into the application. Point Claude Code, or any MCP client, at it and the agent gets 106
 tools that do what you do with the mouse: load and cut models, paint them, change any setting,
 slice, look at the result, and send it to the printer. It runs on your machine and talks to your
 printers over your own network. Nothing goes to a cloud.
@@ -234,24 +234,27 @@ API, with no cloud account and no closed network plugin. Details, limits and set
 
 ## Tools
 
-78 tools, by category. Parameters and examples for each are in the
-[tools reference](docs/tools/reference.md).
+106 tools, by category: 102 in the app, and 4 the bridge answers itself. Parameters and examples
+for each are in the [tools reference](docs/tools/reference.md).
 
 | Category | Tools |
 |----------|-------|
-| **Scene** | `get_scene_info`, `new_project`, `load_project`, `save_project`, `export_3mf` |
-| **Models** | `load_model`, `auto_orient`, `arrange_objects`, `get_object_info`, `rename_object`, `set_object_printable` |
-| **Transforms** | `move_object`, `rotate_object`, `scale_object`, `mirror_object`, `flatten_object`, `clone_object`, `cut_object`, `delete_object`, `transform_objects` |
-| **Plates** | `add_plate`, `select_plate`, `delete_plate`, `set_prime_tower_position` |
-| **Config** | `get_presets`, `get_edited_presets`, `select_preset`, `apply_config`, `clone_preset`, `save_preset`, `delete_preset`, `reset_preset`, `get_valid_config_keys` |
-| **Per-object** | `get_object_config`, `set_object_config`, `reset_object_config`, `get_object_layer_ranges`, `set_object_layer_range`, `delete_object_layer_range` |
-| **Filaments and color** | `get_filaments`, `set_object_filament`, `set_mixed_filament`, `delete_mixed_filament`, `get_flush_volumes`, `set_flush_volumes`, `auto_calc_flush_volumes`, `get_toolchanger_config`, `suggest_color_mix`, `get_color_palette` |
-| **Painting** | `paint_object`, `get_object_paint`, `clear_object_paint`, `set_brim_ears`, `get_object_components`, `pick_facet` |
-| **Slicing** | `slice_all`, `get_slicing_status`, `export_gcode`, `get_print_estimate`, `apply_adaptive_layer_height`, `clear_adaptive_layer_height` |
-| **Vision** | `render_plate_view`, `get_preview_base64`, `set_gcode_view_type` |
-| **Printers** | `get_printers`, `select_printer`, `add_physical_printer`, `discover_printers`, `send_to_printer`, `get_printer_status`, `printer_control`, `list_printer_files`, `print_printer_file`, `match_project_to_printer` |
-| **History and info** | `undo`, `redo`, `get_server_info` |
-| **Bridge only** | `start_orca`, `wait_for_slice`, `list_instances`, `select_instance` |
+| **Scene** | `export_3mf`, `export_stl`, `get_scene_info`, `load_project`, `new_project`, `save_project` |
+| **Models** | `add_volume`, `arrange_objects`, `assemble_objects`, `auto_orient`, `get_mesh_health`, `get_object_components`, `get_object_info`, `invalidate_cut_info`, `load_model`, `merge_parts`, `reload_from_disk`, `rename_object`, `repair_mesh`, `replace_volume_with_file`, `set_object_printable`, `set_volume_type`, `split_object` |
+| **Transforms** | `clone_object`, `cut_object`, `delete_object`, `fill_bed_with_instances`, `flatten_object`, `mirror_object`, `move_object`, `rotate_object`, `scale_object`, `set_instance_count`, `transform_objects` |
+| **Plates** | `add_plate`, `delete_plate`, `select_plate`, `set_plate_settings`, `set_prime_tower_position` |
+| **Config** | `apply_config`, `clone_preset`, `delete_preset`, `get_config_values`, `get_edited_presets`, `get_presets`, `get_valid_config_keys`, `install_presets`, `reset_preset`, `save_preset`, `select_preset` |
+| **Per-object** | `get_object_config`, `reset_object_config`, `set_object_config` |
+| **Layer ranges** | `delete_object_layer_range`, `get_object_layer_ranges`, `set_object_layer_range` |
+| **Filaments and color** | `add_filament_slot`, `auto_calc_flush_volumes`, `delete_filament_slot`, `delete_mixed_filament`, `get_color_palette`, `get_filaments`, `get_flush_volumes`, `get_toolchanger_config`, `set_filament_color`, `set_flush_volumes`, `set_mixed_filament`, `set_object_filament`, `suggest_color_mix` |
+| **Painting** | `clear_object_paint`, `get_object_paint`, `paint_object`, `pick_facet`, `remap_paint`, `set_brim_ears` |
+| **Slicing** | `add_layer_gcode`, `cancel_slice`, `delete_layer_gcode`, `export_gcode`, `get_print_estimate`, `get_slicing_status`, `slice_all` |
+| **Adaptive layers** | `apply_adaptive_layer_height`, `clear_adaptive_layer_height` |
+| **Vision** | `get_preview_base64`, `render_plate_view`, `set_gcode_view_type`, `show_view` |
+| **Printers** | `add_physical_printer`, `discover_printers`, `get_printer_status`, `get_printers`, `list_printer_files`, `match_project_to_printer`, `print_printer_file`, `printer_control`, `select_printer`, `send_to_printer` |
+| **History** | `redo`, `undo` |
+| **Info** | `get_server_info`, `quit_app` |
+| **Bridge only** | `list_instances`, `select_instance`, `start_orca`, `wait_for_slice` |
 
 ## Architecture
 
