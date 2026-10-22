@@ -27,15 +27,20 @@ compared by their strings; not by running them):
 - **The LAN API did not change.** Same routes (`checkCode`, `detail`, `product`, `uploadGcode`,
   `control`, `gcodeList`, `gcodeThumb`, `printGcode`, `getThum`, `notifyWanBind`), same upload headers,
   same `detail` keys, same error table (E0002-E0176, E0999), same `status` table.
-- **Multi-plate files: no plate parameter.** Neither `printGcode` nor `uploadGcode` reads one. The
-  printer's own pre-print page pages through a file's plates. Which plate a LAN start prints, and
-  whether a LAN start shows that page, is not known yet; nor what `gcodeListDetail` reports for such a
-  file (one entry per file, no plate field). FlashForge's own slicer sends one plate per file.
+- **Multi-plate files: a LAN start prints plate 1, without asking.** Neither `printGcode` nor
+  `uploadGcode` reads a plate parameter. Tested 2026-10-22: a two-plate `.gcode.3mf` (a 20 mm square on
+  plate 1, a 40 mm one on plate 2) uploaded with `printNow: false` and started with `printGcode` printed
+  the 20 mm square, with nobody at the screen, and ended `completed`. Its `gcodeListDetail` entry is
+  one per file and describes plate 1 alone (`printingTime` 66 s, `totalFilamentWeight` 0.33 g). The
+  printer's own pre-print page pages through a file's plates; a LAN start skips it. FlashForge's own
+  slicer sends one plate per file: so should anything that starts prints over LAN.
 - **Filament consistency check and the mixed-temperature warning** run on that pre-print page: the
   file's filament types against each extruder's ("The filament set in the model file does not match
   the current settings"), then a yes/no for high- and low-temperature filaments together. Nothing in
-  `detail` reports either, and no upload or `printGcode` field skips or pre-confirms them. Whether they
-  run for a LAN start, and what `status` says while one waits, is not known yet.
+  `detail` reports either, and no upload or `printGcode` field skips or pre-confirms them. **Neither
+  stops a LAN start**: tested 2026-10-22, a disc sliced for Flashforge PETG Pro, uploaded with
+  `printNow` and mapped onto a slot holding PLA, printed with no prompt at the file's PETG settings
+  (nozzle 255 °C, bed 85 °C). Matching the file's filaments to the loaded slots is the sender's job.
 - **"Fixed the extended print time issue" is the print itself, and it holds**: 2.0.0's Klipper
   `virtual_sdcard.py` is rewritten for G-code throughput (a fast path for G0/G1, batched yields, a
   shorter busy wait). Measured on 2026-10-22 (a 5 h single-filament plate of 857 layers at 0.12 mm,
@@ -394,6 +399,10 @@ target already at 40 °C untouched.
 ---
 
 ## 4. Files — `gcodeList`, `gcodeThumb` and `printGcode`
+
+A printer whose last job is `completed` refuses an upload with `{"code": 2, "message": "Printer is
+busy"}` until someone confirms the finished print on its screen (2.0.0, 2026-10-22); `status` is then
+`ready`.
 
 Not needed for a failure-detection bridge, but enough to build a file browser: the printer knows
 what each stored job costs and what it looks like.
