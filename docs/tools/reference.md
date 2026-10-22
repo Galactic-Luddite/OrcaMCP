@@ -2789,7 +2789,7 @@ against what was asked for.
   "extruder_changes": 128,
   "time_by_feature": {
     "outer_wall": 402.1, "inner_wall": 511.8, "overhang_wall": 12.4, "gap_fill": 20.3,
-    "infill": 716.0, "support": 188.2, "support_interface": 41.7, "brim": 18.9, "skirt": 0.0,
+    "infill": 716.0, "ironing": 0.0, "support": 188.2, "support_interface": 41.7, "brim": 18.9, "skirt": 0.0,
     "prime_tower": 96.5, "travel": 204.6, "tool_changes": 71.3, "other": 22.4, "unattributed": 0.2
   },
   "active_warnings": {"count": 0, "warnings": []}
@@ -2821,7 +2821,8 @@ per feature, to a tenth: the same per-move times the preview legend sums by line
 | Key | Time spent on |
 |-----|---------------|
 | `outer_wall`, `inner_wall`, `overhang_wall`, `gap_fill` | The walls; together, the layer plan's `perimeters` |
-| `infill` | Sparse and internal solid infill, top and bottom surfaces, bridges, ironing |
+| `infill` | Sparse and internal solid infill, top and bottom surfaces, bridges |
+| `ironing` | Ironing; the layer plan's `infill` draws it. Apart because it can be most of a layer's time on little of its G-code (an hour on one layer of a 5 h print, 2026-10-22) |
 | `support`, `support_interface` | Support (with its transition layers), and its interface |
 | `brim`, `skirt`, `prime_tower` | Those extrusions |
 | `travel` | Moves without extrusion |
@@ -3027,7 +3028,7 @@ call `slice_all` and `wait_for_slice` first.
 |-----|------|-------------|
 | `layer` | integer | Layer number from 1, as the Preview's layer slider numbers layers: `1..printed_layers` of `get_print_estimate`. |
 | `z` | number | A height in mm. The nearest printed layer is drawn; a height exactly between two goes to the lower. Give `layer` or `z`, not both. |
-| `features` | array | Draw only these: `perimeters` (walls and gap fill), `infill` (sparse, solid, top, bottom, bridges, ironing), `support`, `support_interface`, `brim`, `skirt`, `prime_tower` — the same names `get_print_estimate`'s `time_by_feature` uses. Default all. Start G-code purge lines are never drawn. |
+| `features` | array | Draw only these: `perimeters` (walls and gap fill), `infill` (sparse, solid, top, bottom, bridges, ironing), `support`, `support_interface`, `brim`, `skirt`, `prime_tower` — the same names `get_print_estimate`'s `time_by_feature` uses, which also counts `ironing` apart. Default all. Start G-code purge lines are never drawn. |
 | `filaments` | array | Draw only these filament slots, 1-based as `get_scene_info`'s `filaments_used`. Default all. |
 | `color_by` | `"feature"` / `"filament"` | `feature` (default): the Preview's feature colours. `filament`: each slot's colour, as the Preview's Filament view. |
 | `fit` | `"plate"` / `{"object_index": n}` | Frame the plate (default), or that object with everything of its own on this layer: its support lines (tree feet included) and, on the first layer, its brim and raft. |
@@ -3890,7 +3891,8 @@ Live status from the configured print host. Full detail for Flashforge hosts.
   "last_print_started_here": {
     "file_name": "vase.gcode.3mf", "age_s": 2400,
     "leveling": true, "flow_calibration": true, "time_lapse": false,
-    "fed_from": [{"tool_id": 0, "slot_id": 2, "material": "PLA", "color": "#FF0000"}]
+    "fed_from": [{"tool_id": 0, "slot_id": 2, "material": "PLA", "color": "#FF0000"}],
+    "obico_agent": {"took_slice_table": true, "detail": "handed to the Obico agent at http://10.0.0.2:8081: HTTP 200 ..."}
   }
 }
 ```
@@ -3905,6 +3907,9 @@ once the printer accepted the start, never for an upload with `start_print: fals
 when this instance has started none since it launched, and it never includes a print started on
 the printer's screen, from another computer or from another OrcaMCP instance. An agent uses it to
 decide whether a new print needs calibrating again (see `send_to_printer`'s print options).
+`obico_agent` says whether the flashforge-obico agent the preset's Obico names took the print's
+slice table, which it reads the printer's progress by (`took_slice_table`, and in `detail` its answer
+or why not); null without an Obico or a slice table. A failure is also logged as a warning.
 
 `printer.controls` names what `printer_control`'s `set_*` actions change, as the printer reports them:
 `print_speed_percent` (null while no job runs), `z_offset_mm`, `chamber_fan_percent`,
@@ -4088,6 +4093,7 @@ look at a dialog or to test a refusal.
 | `flow_calibration` | boolean | No | Calibrate the flow first. Omitted: as `leveling_before_print` |
 | `time_lapse` | boolean | No | Ask the printer to record a time-lapse (default `false`) |
 | `use_material_station`, `material_mappings` | | No | Direct sends to a Flashforge host with local-API credentials only (`true`, or a mapping, is refused anywhere else); see Material mapping below |
+| `allow_material_mismatch` | boolean | No | Send even when a mapped slot holds another material family than the filament it feeds (default `false`); see Material mismatch below. As `use_material_station`, a Flashforge with local-API credentials only |
 | `file_name` | string | No | Name to store the upload under. Direct sends only |
 | `all_plates` | boolean | No | Dialog sends only (`direct: false`): send every plate |
 
@@ -4147,6 +4153,19 @@ of an upload with `start_print: false`, so off) or `default` (time-lapse left ou
 `print_options` is there only for a Flashforge with local-API credentials. With `start_print:
 false` all three are sent off, whatever the plate's length: nothing starts, so none is asked for.
 
+**Material mismatch (Flashforge).** The printer does not check that a slot holds the material a file
+was sliced for: on firmware 2.0.0 a file sliced for PETG, mapped onto a slot of PLA, printed at
+255 °C with no prompt (2026-10-22). So a send whose mapping puts a filament on a slot of another
+material family (as the automatic mapping matches them: PLA+ is PLA, silk is its own) sends nothing:
+```json
+{"status": "error", "message": "Nothing was sent: tool 2 (PETG) from slot 2, which holds PLA. The printer does not check, ...", "material_mismatches": [{"tool_id": 2, "material": "PETG", "slot_id": 2, "slot_material": "PLA"}], "slots": [...]}
+```
+Load the right filament, map another slot, or pass `allow_material_mismatch: true` when it is meant.
+
+**A printer that cannot take the job.** Refused before anything is sent while the printer runs a job,
+or while its last print waits to be confirmed on its screen (`completed` or `cancelled`): until
+someone clears the bed and confirms it, the printer answers an upload with "Printer is busy".
+
 ---
 
 ### print_printer_file
@@ -4161,7 +4180,8 @@ starts a real print.
 | `flow_calibration` | boolean | No | Calibrate the flow first. Omitted: as `leveling_before_print` |
 | `time_lapse` | boolean | No | Ask the printer to record a time-lapse (default `false`) |
 | `material_mappings` | array | No | Explicit `{tool_id, slot_id}` pairs |
-| `auto_map` | boolean | No | Match the project's filaments to loaded slots when no mapping is given (default `true`) |
+| `auto_map` | boolean | No | Match the file's filaments to loaded slots when no mapping is given (default `true`) |
+| `allow_material_mismatch` | boolean | No | Start even when a mapped slot holds another material than the file's (default `false`), as in `send_to_printer` |
 
 Decide leveling and flow calibration as for `send_to_printer`, on the same models. The printer's
 status says which machine it is; the file's estimated time comes from the printer's file list
@@ -4169,8 +4189,14 @@ status says which machine it is; the file's estimated time comes from the printe
 out on a Creator 5 or 5 Pro. When the printer does not report a usable time (older firmware, 0,
 not a number) or the list cannot be read, the omitted ones stay off (`print_time_unknown`) and the
 print still starts. Returns `file_name`, `material_mappings` and `print_options`, shaped as in
-`send_to_printer` (`printer_model` is null when every option was given and no mapping was needed,
-so the status was not read).
+`send_to_printer`, and `filaments_from`: the tools are mapped by the file's own filaments, as the
+printer's file list gives them (`file`: the materials and tool ids it was sliced with), and only by
+the current project's when the printer lists none for it (`project`). The material check and the
+busy refusal are `send_to_printer`'s.
+
+**A file of several plates prints its first plate only.** Firmware 2.0.0 has no way to name a plate
+over its network: a two-plate `.gcode.3mf` started here printed plate 1 without asking, and the file
+list describes plate 1 alone (2026-10-22). Send such a project plate by plate.
 
 `time_lapse` on a stored file is not yet confirmed on the printer: `printGcode`'s documented body
 has no time-lapse key, so the request carries `timeLapseVideo` only when `time_lapse` is true, and a

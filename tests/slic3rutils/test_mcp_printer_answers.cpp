@@ -223,3 +223,22 @@ TEST_CASE("get_printer_status leaves out the numbers of a report it cannot trust
         CHECK(printer["controls"]["cooling_fan_percent"] == 0);
     }
 }
+
+TEST_CASE("a printer running a job or waiting for its last one to be confirmed takes no new one", "[McpPrinterAnswers]")
+{
+    FlashforgeApi::PrinterStatus status;
+    status.state = "ready";
+    CHECK_FALSE(printer_busy_refusal(status).has_value());
+    // 2.0.0 answers an upload with "Printer is busy" until the finished print is confirmed on its screen.
+    status.state      = "completed";
+    status.print_file = "box.gcode.3mf";
+    REQUIRE(printer_busy_refusal(status).has_value());
+    CHECK(printer_busy_refusal(status)->find("confirmed on the printer's screen") != std::string::npos);
+    status.state = "cancelled";
+    CHECK(printer_busy_refusal(status).has_value());
+    status.state = "printing";
+    CHECK(printer_busy_refusal(status)->find("running box.gcode.3mf") != std::string::npos);
+    status.state      = "loading"; // a filament load from the screen
+    status.print_file = "";
+    CHECK_FALSE(printer_busy_refusal(status).has_value());
+}

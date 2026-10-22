@@ -89,6 +89,9 @@ public:
     bool stored_file_printing_time(const std::string& file_name, std::optional<long>& seconds, wxString& msg) const;
     // A stored file's thumbnail, base64 PNG (FlashforgeApi::parse_gcode_thumbnail). `png_base64` is
     // nullopt when the printer has none for it; false with `msg` when it could not be asked.
+    // A stored file's filaments, as the printer's file list gives them (FlashforgeApi::stored_file_filaments):
+    // empty when it lists none; false with `msg` when the list could not be read.
+    bool stored_file_filaments(const std::string& file_name, nlohmann::json& filaments, wxString& msg) const;
     bool fetch_gcode_thumbnail(const std::string& file_name, std::optional<std::string>& png_base64, wxString& msg) const;
 
 private:

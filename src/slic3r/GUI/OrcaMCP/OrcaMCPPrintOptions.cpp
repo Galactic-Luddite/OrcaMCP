@@ -104,6 +104,8 @@ std::vector<std::string> requested_station_arguments(const nlohmann::json& param
         asked.push_back("use_material_station: true");
     if (const auto it = params.find("material_mappings"); it != params.end() && it->is_array() && !it->empty())
         asked.push_back("material_mappings");
+    if (const auto it = params.find("allow_material_mismatch"); it != params.end() && it->is_boolean() && it->get<bool>())
+        asked.push_back("allow_material_mismatch: true");
     return asked;
 }
 

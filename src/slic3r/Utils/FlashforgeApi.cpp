@@ -421,6 +421,11 @@ bool job_getting_ready(const std::string& state, const std::string& print_file, 
     return job_running(state, print_file) && state != "paused" && state != "pausing" && duration_s <= 0;
 }
 
+bool awaiting_confirmation(const std::string& state)
+{
+    return state == "completed" || state == "cancelled";
+}
+
 bool try_parse_json_int(const nlohmann::json& value, int& out)
 {
     try {
@@ -547,6 +552,29 @@ std::optional<long> parse_gcode_printing_time(const nlohmann::json& response, co
     if (const auto seconds = printing_time_in(response.value("gcodeListDetail", nlohmann::json()), file_name))
         return seconds;
     return printing_time_in(response.value("gcodeList", nlohmann::json()), file_name);
+}
+
+nlohmann::json stored_file_filaments(const nlohmann::json& response, const std::string& file_name)
+{
+    nlohmann::json filaments = nlohmann::json::array();
+    const nlohmann::json list = response.is_object() ? response.value("gcodeListDetail", nlohmann::json()) : nlohmann::json();
+    if (!list.is_array())
+        return filaments;
+    for (const auto& entry : list) {
+        if (!entry.is_object() || get_string(entry, "gcodeFileName") != file_name)
+            continue;
+        const nlohmann::json tools = entry.value("gcodeToolDatas", nlohmann::json());
+        if (!tools.is_array())
+            return filaments;
+        for (const auto& tool : tools) {
+            int tool_id = -1;
+            if (!tool.is_object() || !tool.contains("toolId") || !try_parse_json_int(tool["toolId"], tool_id) || tool_id < 0)
+                continue;
+            filaments.push_back({{"tool_id", tool_id}, {"type", get_string(tool, "materialName")}, {"color", get_string(tool, "materialColor")}});
+        }
+        return filaments;
+    }
+    return filaments;
 }
 
 std::optional<std::string> parse_gcode_thumbnail(const nlohmann::json& response)

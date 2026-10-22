@@ -3,6 +3,7 @@
 
 #include "slic3r/GUI/OrcaMCP/OrcaMCPPrinterUtils.hpp"
 
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
@@ -172,4 +173,30 @@ TEST_CASE("material_color_delta_e reports nothing rather than a wrong number", "
     // Perceptually distinct colours are far apart; a "just noticeable difference" is ~2.3.
     REQUIRE(material_color_delta_e("#0000FF", "#FF00FF").has_value());
     CHECK(*material_color_delta_e("#0000FF", "#FF00FF") > 10.0);
+}
+
+TEST_CASE("a slot holding another material refuses the send unless it is meant", "[orcamcp][material-mapping]")
+{
+    using Slic3r::GUI::OrcaMCP::material_mismatches;
+    using Slic3r::GUI::OrcaMCP::resolve_material_mappings;
+    using nlohmann::json;
+    // 2.0.0 printed this pair with no prompt: a PETG file on a slot of black PLA, at 255 °C.
+    const std::vector<MaterialSlot> slots = {empty_slot(1), loaded(2, "PLA", "#1B1B1B")};
+    const json petg_tool2 = json::array({{{"tool_id", 2}, {"type", "PETG"}, {"color", "#FA6173"}}});
+    const json to_slot2   = json::array({{{"tool_id", 2}, {"slot_id", 2}}});
+
+    json mappings, error, report;
+    CHECK_FALSE(resolve_material_mappings(to_slot2, slots, petg_tool2, mappings, error, &report));
+    CHECK(error["material_mismatches"] == json::array({{{"tool_id", 2}, {"material", "PETG"}, {"slot_id", 2}, {"slot_material", "PLA"}}}));
+    CHECK(error["message"].get<std::string>().find("allow_material_mismatch") != std::string::npos);
+
+    CHECK(resolve_material_mappings(to_slot2, slots, petg_tool2, mappings, error, &report, /*allow_material_mismatch=*/true));
+    CHECK(mappings.size() == 1);
+
+    // The family, as the automatic mapping matches it: PLA+ is PLA, silk is its own.
+    const std::vector<MaterialSlot> pla = {loaded(1, "PLA", "#000000")};
+    const json                      map = json::array({{{"toolId", 0}, {"slotId", 1}}});
+    CHECK(material_mismatches(map, pla, json::array({{{"tool_id", 0}, {"type", "PLA+"}}})).empty());
+    CHECK(material_mismatches(map, pla, json::array({{{"tool_id", 0}, {"type", "PLA Silk"}}})).size() == 1);
+    CHECK(material_mismatches(map, pla, json::array({{{"tool_id", 0}, {"type", ""}}})).empty()); // nothing to compare
 }

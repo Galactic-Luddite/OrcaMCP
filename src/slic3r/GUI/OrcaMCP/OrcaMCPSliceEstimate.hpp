@@ -92,7 +92,7 @@ std::optional<size_t> count_profile_layers(const SlicingParameters& params, cons
 // G-code, custom extrusions); and unattributed, what the processor adds to its total without a move.
 enum class TimeFeature : size_t
 {
-    outer_wall, inner_wall, overhang_wall, gap_fill, infill, support, support_interface, brim, skirt, prime_tower,
+    outer_wall, inner_wall, overhang_wall, gap_fill, infill, ironing, support, support_interface, brim, skirt, prime_tower,
     travel, tool_changes, other, unattributed,
     count
 };

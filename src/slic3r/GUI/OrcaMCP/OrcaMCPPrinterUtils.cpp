@@ -492,12 +492,43 @@ bool validate_material_mappings(const nlohmann::json&                           
     return true;
 }
 
+nlohmann::json material_mismatches(const nlohmann::json&                           mappings,
+                                   const std::vector<FlashforgeApi::MaterialSlot>& slots,
+                                   const nlohmann::json&                           filaments)
+{
+    nlohmann::json mismatches = nlohmann::json::array();
+    for (const auto& mapping : mappings) {
+        const int                          tool_id  = mapping.value("toolId", -1);
+        const FlashforgeApi::MaterialSlot* slot     = find_slot(slots, mapping.value("slotId", -1));
+        const nlohmann::json*              filament = find_project_filament(filaments, tool_id);
+        if (slot == nullptr || filament == nullptr)
+            continue; // validate_material_mappings' to refuse
+        const std::string material = filament->value("type", std::string());
+        if (material.empty() || flashforge_normalize_material(material) == flashforge_normalize_material(slot->material_name))
+            continue;
+        mismatches.push_back({{"tool_id", tool_id}, {"material", material}, {"slot_id", slot->slot_id}, {"slot_material", slot->material_name}});
+    }
+    return mismatches;
+}
+
+std::optional<std::string> printer_busy_refusal(const FlashforgeApi::PrinterStatus& status)
+{
+    if (FlashforgeApi::awaiting_confirmation(status.state))
+        return "Nothing was sent: the printer's last print (" + (status.print_file.empty() ? std::string("its last job") : status.print_file) +
+               ") is " + status.state + " and waits to be confirmed on the printer's screen, with the bed cleared; until then "
+               "the printer refuses new work as busy. Ask the user to clear the bed and confirm it, then try again.";
+    if (FlashforgeApi::job_running(status.state, status.print_file))
+        return "Nothing was sent: the printer is running " + status.print_file + " (" + status.state + ").";
+    return std::nullopt;
+}
+
 bool resolve_material_mappings(const nlohmann::json&                           requested,
                                const std::vector<FlashforgeApi::MaterialSlot>& slots,
                                const nlohmann::json&                           project_filaments,
                                nlohmann::json&                                 mappings_out,
                                nlohmann::json&                                 error_out,
-                               nlohmann::json*                                 report_out)
+                               nlohmann::json*                                 report_out,
+                               bool                                            allow_material_mismatch)
 {
     mappings_out = nlohmann::json::array();
     if (report_out != nullptr)
@@ -535,6 +566,22 @@ bool resolve_material_mappings(const nlohmann::json&                           r
             error_out["unmapped_tools"] = unmapped_tools;
             error_out["slots"]          = material_slots_json(slots);
         }
+        return false;
+    }
+
+    if (const nlohmann::json mismatches = material_mismatches(mappings_out, slots, project_filaments);
+        !allow_material_mismatch && !mismatches.empty()) {
+        std::string pairs;
+        for (const auto& m : mismatches)
+            pairs += (pairs.empty() ? "" : "; ") + std::string("tool ") + std::to_string(m["tool_id"].get<int>()) + " (" +
+                     m["material"].get<std::string>() + ") from slot " + std::to_string(m["slot_id"].get<int>()) + ", which holds " +
+                     (m["slot_material"].get<std::string>().empty() ? std::string("an unnamed material") : m["slot_material"].get<std::string>());
+        error_out = {{"status", "error"},
+                     {"message", "Nothing was sent: " + pairs + ". The printer does not check, and prints the file's material "
+                                 "settings on whatever the slot holds. Load the right filament, map another slot, or pass "
+                                 "allow_material_mismatch: true when it is meant."},
+                     {"material_mismatches", mismatches},
+                     {"slots", material_slots_json(slots)}};
         return false;
     }
 

@@ -707,6 +707,16 @@ bool Flashforge::stored_file_printing_time(const std::string& file_name, std::op
     return true;
 }
 
+bool Flashforge::stored_file_filaments(const std::string& file_name, json& filaments, wxString& msg) const
+{
+    filaments = json::array();
+    json response;
+    if (!fetch_gcode_list(response, msg))
+        return false;
+    filaments = FlashforgeApi::stored_file_filaments(response, file_name);
+    return true;
+}
+
 bool Flashforge::fetch_gcode_thumbnail(const std::string& file_name, std::optional<std::string>& png_base64, wxString& msg) const
 {
     png_base64.reset();

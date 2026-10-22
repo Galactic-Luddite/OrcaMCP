@@ -622,6 +622,22 @@ TEST_CASE("a stored file's thumbnail is taken only as base64 of a PNG", "[flashf
     CHECK_FALSE(parse_gcode_thumbnail(json::array()));
 }
 
+TEST_CASE("a stored file's filaments are its slicer's, as the printer lists them", "[flashforge]") {
+    using nlohmann::json;
+    // As 2.0.0 listed a two-plate test file (2026-10-22): one entry, plate 1's.
+    const json list = {{"gcodeList", {"multi.gcode.3mf"}},
+                       {"gcodeListDetail", {{{"gcodeFileName", "multi.gcode.3mf"}, {"gcodeToolCnt", 1},
+                                             {"gcodeToolDatas", {{{"filamentWeight", 0.33}, {"materialColor", "#1B1B1B"},
+                                                                  {"materialName", "PLA"}, {"slotId", 2}, {"toolId", 1}}}}}}}};
+    CHECK(stored_file_filaments(list, "multi.gcode.3mf") == json::array({{{"tool_id", 1}, {"type", "PLA"}, {"color", "#1B1B1B"}}}));
+    CHECK(stored_file_filaments(list, "other.gcode.3mf").empty());
+    CHECK(stored_file_filaments(json{{"gcodeList", {"multi.gcode.3mf"}}}, "multi.gcode.3mf").empty()); // names only
+    CHECK(stored_file_filaments(json::array(), "multi.gcode.3mf").empty());
+    CHECK(awaiting_confirmation("completed"));
+    CHECK(awaiting_confirmation("cancelled"));
+    CHECK_FALSE(awaiting_confirmation("ready"));
+}
+
 TEST_CASE("parse_gcode_printing_time finds a stored file's time", "[flashforge]") {
     const auto response = nlohmann::json::parse(R"({"code":0,
         "gcodeList":["a.gcode","b.gcode","c.gcode","d.gcode","f.gcode"],

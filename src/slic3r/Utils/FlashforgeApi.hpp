@@ -83,6 +83,11 @@ bool job_running(const std::string& state, const std::string& print_file);
 // as calibration ended).
 bool job_getting_ready(const std::string& state, const std::string& print_file, long duration_s);
 
+// Whether the printer waits for its last job to be confirmed on its screen (the bed cleared): a job
+// completed or cancelled. Until then it refuses new work as busy (2.0.0: an upload answered
+// {"code": 2, "message": "Printer is busy"}, 2026-10-22).
+bool awaiting_confirmation(const std::string& state);
+
 // Returns false with `error` set if the body is not a successful API response.
 bool parse_detail(const std::string& body, PrinterStatus& out, std::string& error);
 
@@ -133,6 +138,11 @@ std::optional<long> parse_gcode_printing_time(const nlohmann::json& response, co
 // when it is base64 throughout and decodes to a PNG. The field is the printer's word and the Device
 // page shows it as an image, so anything else is nullopt.
 std::optional<std::string> parse_gcode_thumbnail(const nlohmann::json& response);
+
+// A stored file's filaments as its gcodeListDetail entry lists them (its slicer's: `gcodeToolDatas`), in
+// the shape OrcaMCP's material mapping takes a project's: [{"tool_id", "type", "color"}]. Empty when the
+// printer lists none for it (older firmware, a plain name, a file not listed).
+nlohmann::json stored_file_filaments(const nlohmann::json& response, const std::string& file_name);
 
 nlohmann::json make_credentials_payload(const std::string& serial, const std::string& check_code);
 nlohmann::json make_control_payload(const std::string& serial, const std::string& check_code, const std::string& cmd, const nlohmann::json& args);

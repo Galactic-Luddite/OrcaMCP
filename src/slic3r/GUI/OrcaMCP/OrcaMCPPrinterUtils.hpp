@@ -122,12 +122,28 @@ std::vector<AutoMaterialMapping> auto_map_tools_to_slots(const std::vector<Proje
 // {"tool_id", "slot_id", "color_delta_e"}, the last null when the pair could not be scored. It is a
 // separate array and not extra keys on `mappings_out` because `mappings_out` goes over the wire to
 // the printer verbatim.
+// Unless `allow_material_mismatch`, it also fails when a mapped slot holds another material family
+// than the filament it feeds (material_mismatches), with `material_mismatches` in `error_out`.
 bool resolve_material_mappings(const nlohmann::json&                           requested,
                                const std::vector<FlashforgeApi::MaterialSlot>& slots,
                                const nlohmann::json&                           project_filaments,
                                nlohmann::json&                                 mappings_out,
                                nlohmann::json&                                 error_out,
-                               nlohmann::json*                                 report_out = nullptr);
+                               nlohmann::json*                                 report_out              = nullptr,
+                               bool                                            allow_material_mismatch = false);
+
+// Any thread; pure. The mapped pairs whose slot holds another material family
+// (flashforge_normalize_material, as the automatic mapping matches them) than the filament it feeds:
+// [{"tool_id", "material", "slot_id", "slot_material"}]. The printer does not check: on firmware 2.0.0
+// a file sliced for PETG, mapped onto a slot of PLA, printed at 255 °C with no prompt (2026-10-22).
+nlohmann::json material_mismatches(const nlohmann::json&                           mappings,
+                                   const std::vector<FlashforgeApi::MaterialSlot>& slots,
+                                   const nlohmann::json&                           filaments);
+
+// Any thread; pure. Why the printer cannot take a new job, from its status: a job of its own running,
+// or its last one waiting to be confirmed on its screen (FlashforgeApi::awaiting_confirmation), when
+// it refuses new work as busy. nullopt when it can.
+std::optional<std::string> printer_busy_refusal(const FlashforgeApi::PrinterStatus& status);
 
 // Main thread. The current plate's per-tool filament types/colours for material-mapping, mirroring how
 // Plater::send_gcode_legacy builds `project_filaments` (Plater.cpp ~19297-19311): a

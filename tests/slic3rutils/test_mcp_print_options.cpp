@@ -229,6 +229,8 @@ TEST_CASE("requested_station_arguments names an explicit station or mapping", "[
           std::vector<std::string>{"use_material_station: true", "material_mappings"});
     // What changes nothing asks for nothing: false, an empty list, or leaving them out.
     CHECK(requested_station_arguments({{"use_material_station", false}, {"material_mappings", nlohmann::json::array()}}).empty());
+    CHECK(requested_station_arguments({{"allow_material_mismatch", true}}) == std::vector<std::string>{"allow_material_mismatch: true"});
+    CHECK(requested_station_arguments({{"allow_material_mismatch", false}}).empty());
     CHECK(requested_station_arguments(nlohmann::json::object()).empty());
 }
 

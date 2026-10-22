@@ -178,6 +178,10 @@ TimeFeature time_feature_of(ExtrusionRole role)
     case WallKind::gap_fill: return TimeFeature::gap_fill;
     case WallKind::none: break;
     }
+    // Apart from the infill the shared table puts it in: an hour of ironing on one layer (2026-10-22) read
+    // as infill, where nobody would look for it.
+    if (role == erIroning)
+        return TimeFeature::ironing;
     switch (extrusion_feature_of(role)) {
     case ExtrusionFeature::infill: return TimeFeature::infill;
     case ExtrusionFeature::support: return TimeFeature::support;
@@ -225,6 +229,7 @@ const char* time_feature_key(TimeFeature feature)
     case TimeFeature::overhang_wall: return "overhang_wall";
     case TimeFeature::gap_fill: return "gap_fill";
     case TimeFeature::infill: return extrusion_feature_key(ExtrusionFeature::infill);
+    case TimeFeature::ironing: return "ironing";
     case TimeFeature::support: return extrusion_feature_key(ExtrusionFeature::support);
     case TimeFeature::support_interface: return extrusion_feature_key(ExtrusionFeature::support_interface);
     case TimeFeature::brim: return extrusion_feature_key(ExtrusionFeature::brim);

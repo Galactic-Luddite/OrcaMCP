@@ -478,6 +478,10 @@ void OrcaMCPServer::register_printer_tools()
                                     "the print on a Flashforge host with local-API credentials only; true is refused "
                                     "anywhere else."}
                 }},
+                {"allow_material_mismatch", {
+                    {"type", "boolean"},
+                    {"description", "A mapped slot must hold the material family of the filament it feeds, or nothing is sent: the printer does not check, and prints the file's settings on whatever the slot holds (firmware 2.0.0 printed a PETG file on PLA at 255 C). true sends anyway." " Direct sends to a Flashforge host with local-API credentials only; true is refused anywhere else."}
+                }},
                 {"use_material_station", {
                     {"type", "boolean"},
                     {"description", "Print from the material station (default: true when the printer reports "
@@ -509,7 +513,7 @@ void OrcaMCPServer::register_printer_tools()
             std::string        option_error;
             if (!read_print_option_request(params, option_request, option_error))
                 return error_response(option_error);
-            for (const char* flag : {"start_print", "use_material_station"})
+            for (const char* flag : {"start_print", "use_material_station", "allow_material_mismatch"})
                 if (params.contains(flag) && !params.at(flag).is_boolean())
                     return error_response(std::string(flag) + " must be a boolean");
             if (params.contains("file_name") && !params.at("file_name").is_string())
@@ -517,6 +521,7 @@ void OrcaMCPServer::register_printer_tools()
             const nlohmann::json requested_mappings = params.value("material_mappings", nlohmann::json::array());
             if (!requested_mappings.is_array())
                 return error_response("material_mappings must be an array");
+            const bool allow_material_mismatch = params.value("allow_material_mismatch", false);
 
             // What only a direct send to a Flashforge with local-API credentials carries: asked for anywhere
             // else, it is refused before anything is sent rather than dropped.
@@ -614,12 +619,14 @@ void OrcaMCPServer::register_printer_tools()
                 wxString                             msg;
                 if (!ff->fetch_status(status, msg))
                     return error_response(msg.empty() ? "Failed to read printer status" : to_std(msg));
+                if (const auto busy = printer_busy_refusal(status))
+                    return error_response(*busy);
 
                 const bool use_material_station = params.value("use_material_station", status.has_material_station);
                 if (use_material_station) {
                     nlohmann::json mapping_error;
                     if (!resolve_material_mappings(requested_mappings, status.slots, project_filaments,
-                                                   mappings_payload, mapping_error, &mappings_report))
+                                                   mappings_payload, mapping_error, &mappings_report, allow_material_mismatch))
                         return mapping_error;
                 }
 
@@ -1041,7 +1048,10 @@ void OrcaMCPServer::register_printer_tools()
         "send_to_printer. Omitted, each runs on a Creator 5 or 5 Pro when the file's estimated time, from the "
         "printer's file list, is ") + calibration_gate_text() + " or more, and not when the printer does not report "
         "one; other Flashforge models have not been checked, so there each stays off unless asked for. The "
-        "response's print_options says what was sent and why.",
+        "response's print_options says what was sent and why. The tools are mapped by the file's own filaments, "
+        "as the printer lists them (filaments_from: file), else the current project's (project). A file of "
+        "several plates prints its first plate only, without asking (firmware 2.0.0). Refused while the printer "
+        "runs a job or waits for its last one to be confirmed on its screen.",
         {
             {"type", "object"},
             {"properties", {
@@ -1071,11 +1081,15 @@ void OrcaMCPServer::register_printer_tools()
                     {"description", "Explicit tool-to-slot mapping. Overrides auto_map when provided."},
                     {"items", material_mapping_schema()}
                 }},
+                {"allow_material_mismatch", {
+                    {"type", "boolean"},
+                    {"description", "A mapped slot must hold the material family of the filament it feeds, or nothing is sent: the printer does not check, and prints the file's settings on whatever the slot holds (firmware 2.0.0 printed a PETG file on PLA at 255 C). true sends anyway."}
+                }},
                 {"auto_map", {
                     {"type", "boolean"},
                     {"description", "When true (default) and material_mappings is not given, build the mapping "
-                                    "from the current project's filament types matched against the material "
-                                    "station's loaded slots."}
+                                    "from the file's filament types (else the current project's) matched against "
+                                    "the material station's loaded slots."}
                 }}
             }},
             {"required", {"file_name"}}
@@ -1095,6 +1109,9 @@ void OrcaMCPServer::register_printer_tools()
             if (params.contains("auto_map") && !params.at("auto_map").is_boolean())
                 return error_response("auto_map must be a boolean");
             const bool auto_map = params.value("auto_map", true);
+            if (params.contains("allow_material_mismatch") && !params.at("allow_material_mismatch").is_boolean())
+                return error_response("allow_material_mismatch must be a boolean");
+            const bool allow_material_mismatch = params.value("allow_material_mismatch", false);
 
             const nlohmann::json requested_mappings = params.value("material_mappings", nlohmann::json::array());
             if (!requested_mappings.is_array())
@@ -1110,28 +1127,36 @@ void OrcaMCPServer::register_printer_tools()
             const bool                           needs_mapping = !requested_mappings.empty() || auto_map;
             const bool                           needs_gate    = needs_print_time(option_request);
             Slic3r::FlashforgeApi::PrinterStatus status;
-            if (needs_mapping || needs_gate) {
+            {
                 wxString msg;
                 if (!ff->fetch_status(status, msg))
                     return error_response(msg.empty() ? "Failed to read printer status" : to_std(msg));
+                if (const auto busy = printer_busy_refusal(status))
+                    return error_response(*busy);
             }
 
             nlohmann::json mappings_payload = nlohmann::json::array();
             nlohmann::json mappings_report  = nlohmann::json::array();
+            std::string    filaments_from;
             if (needs_mapping) {
-                // The project's own tool count/types, needed both to auto-map and to check an explicit
-                // mapping's tool_id is one of this project's actual tools.
-                std::string filaments_error;
-                const nlohmann::json project_filaments = run_on_main_thread([&]() -> nlohmann::json {
-                    return gather_project_filaments(filaments_error);
-                });
-                if (!filaments_error.empty())
-                    return error_response(filaments_error);
+                // The file's own filaments, as the printer lists them, are what it will print with: its tool
+                // ids and materials. Only a file the printer lists none for falls back to the project's.
+                nlohmann::json filaments;
+                wxString       list_msg;
+                if (ff->stored_file_filaments(file_name, filaments, list_msg) && !filaments.empty()) {
+                    filaments_from = "file";
+                } else {
+                    std::string filaments_error;
+                    filaments = run_on_main_thread([&]() -> nlohmann::json { return gather_project_filaments(filaments_error); });
+                    if (!filaments_error.empty())
+                        return error_response(filaments_error);
+                    filaments_from = "project";
+                }
 
                 // Build and validate the mapping the same way send_to_printer does.
                 nlohmann::json mapping_error;
-                if (!resolve_material_mappings(requested_mappings, status.slots, project_filaments,
-                                               mappings_payload, mapping_error, &mappings_report))
+                if (!resolve_material_mappings(requested_mappings, status.slots, filaments, mappings_payload, mapping_error,
+                                               &mappings_report, allow_material_mismatch))
                     return mapping_error;
             }
 
@@ -1155,10 +1180,13 @@ void OrcaMCPServer::register_printer_tools()
             if (!ff->print_gcode_file(file_name, to_print_options(print_options), mappings_payload, msg))
                 return error_response(msg.empty() ? "Failed to start print" : to_std(msg));
 
-            return {{"status", "success"},
-                    {"file_name", file_name},
-                    {"material_mappings", mappings_report},
-                    {"print_options", print_options_json(print_options, gate_facts)}};
+            nlohmann::json answer = {{"status", "success"},
+                                     {"file_name", file_name},
+                                     {"material_mappings", mappings_report},
+                                     {"print_options", print_options_json(print_options, gate_facts)}};
+            if (!filaments_from.empty())
+                answer["filaments_from"] = filaments_from;
+            return answer;
         }
     });
     // match_project_to_printer - Make the project's filament slots say what the machine actually holds

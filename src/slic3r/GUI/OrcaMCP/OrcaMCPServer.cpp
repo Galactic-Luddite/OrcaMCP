@@ -3527,7 +3527,9 @@ void OrcaMCPServer::register_builtin_tools()
                 {"all_plates", {
                     {"type", "boolean"},
                     {"description", "With a .gcode.3mf output_path: every plate with a printable object, each sliced, in one "
-                                    "file (default false: the selected plate). A .gcode holds one plate."}
+                                    "file (default false: the selected plate). A .gcode holds one plate. A Flashforge started "
+                                    "over its network prints such a file's first plate only, without asking: send it plate "
+                                    "by plate (send_to_printer) instead."}
                 }}
             }},
             {"required", {"output_path"}}
@@ -3935,7 +3937,7 @@ void OrcaMCPServer::register_builtin_tools()
         "extruder_changes (the printer switched physical extruder/tool head) and filament_changes (a "
         "nozzle was loaded with a different filament). A toolchanger reports the former, a "
         "single-nozzle AMS/MMU printer the latter. time_by_feature splits estimated_time_seconds (normal "
-        "mode) into seconds per feature: outer_wall, inner_wall, overhang_wall, gap_fill, infill, "
+        "mode) into seconds per feature: outer_wall, inner_wall, overhang_wall, gap_fill, infill, ironing, "
         "support, support_interface, brim, skirt, prime_tower, travel, tool_changes (the time the "
         "changes above cost), other (retracts, wipes, pauses, custom G-code) and unattributed; the parts "
         "add up to the total. To explain why two slices differ, read it after each and compare key by "

@@ -291,7 +291,7 @@ Move move(EMoveType type, Slic3r::ExtrusionRole role, float normal_s, float stea
 
 Move extrusion(Slic3r::ExtrusionRole role, float seconds) { return move(EMoveType::Extrude, role, seconds); }
 
-const std::vector<std::string> k_feature_keys = {"outer_wall", "inner_wall",   "overhang_wall", "gap_fill", "infill",
+const std::vector<std::string> k_feature_keys = {"outer_wall", "inner_wall",   "overhang_wall", "gap_fill", "infill", "ironing",
                                                  "support",    "support_interface", "brim",    "skirt",    "prime_tower",
                                                  "travel",     "tool_changes", "other",         "unattributed"};
 
@@ -321,13 +321,15 @@ TEST_CASE("the walls are split into outer, inner, overhang and gap fill", "[orca
     CHECK_THAT(times.at(TimeFeature::gap_fill), WithinRel(1.0, 1e-6));
 }
 
-TEST_CASE("sparse, solid, surface, bridge and ironing time all count as infill", "[orcamcp][estimate]")
+TEST_CASE("sparse, solid, surface and bridge time count as infill, ironing on its own", "[orcamcp][estimate]")
 {
     const std::vector<Move> moves = {extrusion(Slic3r::erInternalInfill, 1.0f), extrusion(Slic3r::erSolidInfill, 1.0f),
                                      extrusion(Slic3r::erTopSolidInfill, 1.0f), extrusion(Slic3r::erBottomSurface, 1.0f),
                                      extrusion(Slic3r::erBridgeInfill, 1.0f),   extrusion(Slic3r::erInternalBridgeInfill, 1.0f),
-                                     extrusion(Slic3r::erIroning, 1.0f)};
-    CHECK_THAT(compute_time_by_feature(moves, k_normal, 7.0).at(TimeFeature::infill), WithinRel(7.0, 1e-6));
+                                     extrusion(Slic3r::erIroning, 60.0f)};
+    const auto times = compute_time_by_feature(moves, k_normal, 66.0);
+    CHECK_THAT(times.at(TimeFeature::infill), WithinRel(6.0, 1e-6));
+    CHECK_THAT(times.at(TimeFeature::ironing), WithinRel(60.0, 1e-6));
 }
 
 TEST_CASE("support, its interface, the prime tower, brim and skirt each have their own time", "[orcamcp][estimate]")
