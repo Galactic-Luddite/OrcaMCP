@@ -701,10 +701,21 @@ TEST_CASE("A modifier below the parts does not change an instance's lowest point
     drop_after_volume_change(raised, before, VolumeChange::move);
     CHECK_THAT(volume_world_box(raised, 1).min.z(), WithinAbs(0., 1e-6));
 
-    const double modifier_min = volume_drop_min_z(object, 1);
-    translate_volume_in_plate_frame(object, 1, Vec3d(0., 0., -modifier_min));
-    CHECK_THAT(instances_lowest_z(object)[0], WithinAbs(0., 1e-6));
-    CHECK_THAT(volume_world_box(object, 1).min.z(), WithinAbs(0., 1e-6));
+    // A modifier dropped to Z=0 does not move the parts; the object's own drop that follows any volume move then
+    // brings a floating instance down, the modifier with it.
+    ModelObject& floating = two_part_object(model, Vec3d(100, 100, 3));
+    floating.volumes[1]->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    floating.volumes[1]->set_offset(Vec3d(0., 0., -6.));
+    CHECK_THAT(instances_lowest_z(floating)[0], WithinAbs(3., 1e-6));
+    const double modifier_min = volume_drop_min_z(floating, 1);
+    CHECK_THAT(modifier_min, WithinAbs(-3., 1e-6));
+    const std::vector<double> lowest_before = instances_lowest_z(floating);
+    translate_volume_in_plate_frame(floating, 1, Vec3d(0., 0., -modifier_min));
+    CHECK_THAT(volume_world_box(floating, 1).min.z(), WithinAbs(0., 1e-6));
+    CHECK_THAT(instances_lowest_z(floating)[0], WithinAbs(3., 1e-6)); // without the follow-up drop it floats
+    drop_after_volume_change(floating, lowest_before, VolumeChange::move);
+    CHECK_THAT(instances_lowest_z(floating)[0], WithinAbs(0., 1e-6));
+    CHECK_THAT(volume_world_box(floating, 1).min.z(), WithinAbs(-3., 1e-6));
 }
 
 TEST_CASE("A drop is refused for a volume with an instance, a one-volume object, a cut's part and a missing instance", "[PartEdits][orcamcp]")

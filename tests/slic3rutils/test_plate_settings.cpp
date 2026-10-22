@@ -267,3 +267,15 @@ TEST_CASE("Changed keys are those whose value differs or that one config lacks",
     after.set_key_value("top_shell_layers", new Slic3r::ConfigOptionInt(0));
     CHECK(changed_config_keys(before, after) == std::vector<std::string>{"top_shell_layers", "wall_loops"});
 }
+
+TEST_CASE("A bad plate_index error ends with what omitting it means for the calling tool", "[PlateSettings][orcamcp]")
+{
+    std::string error;
+    CHECK_FALSE(read_plate_index(json{{"plate_index", -1}}, error).has_value());
+    CHECK(error.find("omit it for the current plate") != std::string::npos);
+
+    error.clear();
+    CHECK_FALSE(read_plate_index(json{{"plate_index", "x"}}, error, "give object_id or all_plates instead").has_value());
+    CHECK(error.find("give object_id or all_plates instead") != std::string::npos);
+    CHECK(error.find("current plate") == std::string::npos);
+}

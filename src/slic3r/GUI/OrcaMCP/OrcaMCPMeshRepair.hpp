@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <optional>
 #include <string>
 #include <vector>
@@ -79,13 +80,22 @@ std::optional<std::string> repair_scope_error(bool object_given, bool volume_giv
 std::vector<int> repair_order(std::vector<int> object_indices);
 
 // How one object of several came out. timed_out: not planned within the call's wait (nothing was changed on it);
-// changed_meanwhile: no longer what was captured when its plan was to be applied (nothing was changed on it).
-enum class BatchRepairResult { repaired, nothing_to_repair, failed, changed_meanwhile, timed_out };
+// changed_meanwhile: no longer what was captured when its plan was to be applied (nothing was changed on it);
+// deleted_meanwhile: the object is gone from the app (nothing was changed; counted as failed, as the app does).
+enum class BatchRepairResult { repaired, nothing_to_repair, failed, changed_meanwhile, deleted_meanwhile, timed_out };
+
+// How long past the call's wait cap the applying of plans may go on: the bridge leaves 15 s past the cap before its
+// own timeout, and applying takes the main thread's time, so 10 s of it is spent and 5 s stay for the answer.
+constexpr std::chrono::seconds batch_apply_reserve{10};
+
+// Whether a plan may still be applied `elapsed` after the call began: within the wait cap plus the reserve.
+bool batch_apply_time_left(std::chrono::steady_clock::duration elapsed, std::chrono::steady_clock::duration wait_cap);
 
 // `plan` null: not planned. `planned_in_time`: the plan finished before the call's wait ran out.
 // `unchanged_in_app`: the object is still as it was captured. A plan with a volume that could not be repaired,
-// beside ones that could, is `failed` though the others are applied.
-BatchRepairResult batch_repair_result(const CgalRepairPlan* plan, bool planned_in_time, bool unchanged_in_app);
+// beside ones that could, is `failed` though the others are applied. `exists_in_app` false: the object was deleted.
+BatchRepairResult batch_repair_result(const CgalRepairPlan* plan, bool planned_in_time, bool unchanged_in_app,
+                                      bool exists_in_app = true);
 
 // One object of a repair of several, as the tool leaves it for the answer. `plan` outlives the item.
 struct BatchRepairItem

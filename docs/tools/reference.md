@@ -901,8 +901,9 @@ wait (`tool_wait_cap`), as the app's Cancel keeps the plans made so far: those f
 applied together under one undo step, "Repairing model object", and the rest are left as they are. The
 answer's `objects` gives each one's `result`: `repaired`, `nothing_to_repair`, `failed` (a volume no solid
 can be built from; the object's other volumes are still repaired, `changed: true`), `changed_meanwhile`
-(changed in the app during the repair, left as it is) or `timed_out` (not reached within the wait); `counts`
-are the app's notification counts (`failed` includes `changed_meanwhile`), `repair` is summed over what was
+(changed in the app during the repair, left as it is), `deleted_meanwhile` (deleted in the app during it) or
+`timed_out` (not reached within the wait, or not applied within 10 s past it); `counts`
+are the app's notification counts (`failed` includes `changed_meanwhile` and `deleted_meanwhile`), `repair` is summed over what was
 applied, and `next_steps` names `repair_mesh` with the first `timed_out` object. The same refusals apply as for one
 object; an open toolbar tool is closed only when there is a repair to apply.
 
@@ -1269,7 +1270,7 @@ Drop an object, one of its instances, or one of its volumes onto the bed, as the
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `object_id` | integer | Yes | Object index |
-| `instance_id` | integer | No | Drop only this instance, as `get_object_info`'s `instance_placement` lists them. Left out: every instance |
+| `instance_id` | integer | No | Drop this instance (then, as after any move, any other instance still above the bed comes down too unless the object's auto drop is off), as `get_object_info`'s `instance_placement` lists them. Left out: every instance |
 | `volume_id` | integer | No | Drop this volume within the object instead, on instance 0. Not with `instance_id` |
 | `include_preview` | boolean | No | Include preview |
 

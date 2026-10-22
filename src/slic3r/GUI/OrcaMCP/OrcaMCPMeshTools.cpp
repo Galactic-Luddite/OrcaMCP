@@ -267,6 +267,12 @@ bool object_unchanged(const Model& model, BatchRepairItem& item)
     return item.plan->applies_to(*model.objects[std::size_t(index)]);
 }
 
+// Whether the item's object is still in the model at all.
+bool object_exists(const Model& model, const BatchRepairItem& item)
+{
+    return Slic3r::cgal_repair_object_index(model, *item.plan) >= 0;
+}
+
 // Whether the item's plan is to be applied: a repair, or a partly failed one, whose other volumes are repaired.
 bool applies(const BatchRepairItem& item)
 {
@@ -295,7 +301,8 @@ void apply_batch_item(Plater& plater, BatchRepairItem& item, CgalRepairPlan& pla
 // Main thread, the last step: every plan made in time applied under one undo snapshot, if its object is still
 // as captured; the rest left as they are, each with its result.
 nlohmann::json finish_batch(BatchRepairRequest& request, std::vector<std::optional<CgalRepairPlan>>& plans,
-                            const std::vector<bool>& in_time, double wait_cap_s)
+                            const std::vector<bool>& in_time, std::chrono::steady_clock::time_point call_start,
+                            std::chrono::steady_clock::duration wait_cap)
 {
     Plater*                   plater = wxGetApp().plater();
     McpDialogSuppressionGuard guard;
@@ -306,7 +313,8 @@ nlohmann::json finish_batch(BatchRepairRequest& request, std::vector<std::option
     for (std::size_t i = 0; i < request.items.size(); ++i) {
         BatchRepairItem& item = request.items[i];
         item.plan             = plans[i] ? &*plans[i] : nullptr;
-        item.result = batch_repair_result(item.plan, in_time[i], item.plan != nullptr && object_unchanged(model, item));
+        const bool exists = item.plan == nullptr || object_exists(model, item);
+        item.result = batch_repair_result(item.plan, in_time[i], item.plan != nullptr && object_unchanged(model, item), exists);
     }
 
     std::string closed_tool;
@@ -319,19 +327,27 @@ nlohmann::json finish_batch(BatchRepairRequest& request, std::vector<std::option
         // Closing the tool may have changed an object: such a plan is no longer applied.
         for (BatchRepairItem& item : request.items)
             if (applies(item) && !object_unchanged(model, item))
-                item.result = BatchRepairResult::changed_meanwhile;
+                item.result = object_exists(model, item) ? BatchRepairResult::changed_meanwhile : BatchRepairResult::deleted_meanwhile;
     }
 
     bool painting_removed = false;
     if (std::any_of(request.items.begin(), request.items.end(), applies)) {
         Plater::TakeSnapshot snapshot(plater, _u8L("Repairing model object"));
-        for (std::size_t i = 0; i < request.items.size(); ++i)
-            if (applies(request.items[i]))
-                apply_batch_item(*plater, request.items[i], *plans[i], request.keep_painting, painting_removed);
+        for (std::size_t i = 0; i < request.items.size(); ++i) {
+            if (!applies(request.items[i]))
+                continue;
+            // Applying runs on the main thread, past the wait the plans were held to: stop before the bridge's timeout.
+            if (!batch_apply_time_left(std::chrono::steady_clock::now() - call_start, wait_cap)) {
+                request.items[i].result = BatchRepairResult::timed_out;
+                continue;
+            }
+            apply_batch_item(*plater, request.items[i], *plans[i], request.keep_painting, painting_removed);
+        }
     }
     if (painting_removed)
         plater->notify_painting_removed();
 
+    const double wait_cap_s = std::chrono::duration<double>(wait_cap).count();
     nlohmann::json answer = batch_repair_answer_json(request.scope, request.plate_index, request.keep_painting, request.keep_painting_given,
                                                      request.items, wait_cap_s);
     std::vector<int> timed_out;
@@ -347,6 +363,9 @@ nlohmann::json finish_batch(BatchRepairRequest& request, std::vector<std::option
 // plans made one after another within the call's one wait.
 nlohmann::json repair_objects_tool(const nlohmann::json& params, RepairScope scope, std::optional<int> plate_index)
 {
+    using Clock                    = std::chrono::steady_clock;
+    const auto                     call_start = Clock::now(); // before the capture: the wait cap counts from the call's start
+    const auto                     wait_cap   = tool_wait_cap();
     BatchRepairRequest request;
     request.scope       = scope;
     request.plate_index = plate_index;
@@ -354,14 +373,11 @@ nlohmann::json repair_objects_tool(const nlohmann::json& params, RepairScope sco
     if (!refusal.is_null())
         return refusal;
 
-    using Clock                                 = std::chrono::steady_clock;
-    const auto                                 wait_cap   = tool_wait_cap();
-    const auto                                 deadline   = Clock::now() + wait_cap;
+    const auto                                 deadline = call_start + wait_cap;
     std::vector<std::optional<CgalRepairPlan>> plans;
     std::vector<bool>                          in_time;
     plan_batch(request.inputs, deadline, plans, in_time);
-    const double wait_cap_s = std::chrono::duration<double>(wait_cap).count();
-    return run_on_main_thread([&]() -> nlohmann::json { return finish_batch(request, plans, in_time, wait_cap_s); });
+    return run_on_main_thread([&]() -> nlohmann::json { return finish_batch(request, plans, in_time, call_start, wait_cap); });
 }
 
 // repair_one_object_tool: capture on the main thread, the repair on this (the HTTP) thread, apply on the main
@@ -390,7 +406,7 @@ nlohmann::json repair_one_object_tool(const nlohmann::json& params)
 nlohmann::json repair_mesh_tool(const nlohmann::json& params)
 {
     std::string                  error;
-    const std::optional<int>     plate_index = read_plate_index(params, error);
+    const std::optional<int>     plate_index = read_plate_index(params, error, "give object_id or all_plates instead");
     const bool                   all_plates  = error.empty() && read_flag(params, "all_plates", error).value_or(false);
     if (!error.empty())
         return error_response(error);
@@ -476,7 +492,8 @@ void OrcaMCPServer::register_mesh_tools()
         "objects: they are repaired one after another within this call's one wait; those finished in time are applied "
         "together in one undo step, and the rest are left as they are. The answer's `objects` gives each one's result "
         "-- repaired, nothing_to_repair, failed (some volume no solid can be built from; the others are still "
-        "repaired), changed_meanwhile (changed in the app during the repair: left as it is) or timed_out (next_steps "
+        "repaired), changed_meanwhile (changed in the app during the repair: left as it is), deleted_meanwhile (deleted in "
+        "the app during it) or timed_out (not reached within the wait, or not applied within 10 s past it; next_steps "
         "names repair_mesh for it) -- `counts` as the app counts them, and `repair` summed.",
         {
             {"type", "object"},

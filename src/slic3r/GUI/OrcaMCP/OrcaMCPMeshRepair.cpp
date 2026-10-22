@@ -67,6 +67,12 @@ std::string changed_meanwhile_message(int object_id)
            "call repair_mesh with object_id " + std::to_string(object_id) + " again";
 }
 
+std::string deleted_meanwhile_message(const BatchRepairItem& item)
+{
+    return "Object " + std::to_string(item.object_id) + " (\"" + item.object_name +
+           "\") was deleted in the app while it was being repaired, so nothing was changed";
+}
+
 std::string timed_out_in_batch_message(int object_id, double wait_cap_s)
 {
     return "Object " + std::to_string(object_id) + " was not repaired within this call's wait (" +
@@ -82,6 +88,7 @@ const char* batch_result_name(BatchRepairResult result)
     case BatchRepairResult::nothing_to_repair: return "nothing_to_repair";
     case BatchRepairResult::failed: return "failed";
     case BatchRepairResult::changed_meanwhile: return "changed_meanwhile";
+    case BatchRepairResult::deleted_meanwhile: return "deleted_meanwhile";
     case BatchRepairResult::timed_out: return "timed_out";
     }
     return "timed_out";
@@ -98,6 +105,7 @@ std::string batch_repair_message(const BatchRepairItem& item, double wait_cap_s)
         return item.changed ? unrepaired_volumes_message(*item.plan)
                             : repair_step_message(RepairStep::failed, *item.plan, item.object_id, -1, wait_cap_s, item.before);
     case BatchRepairResult::changed_meanwhile: return changed_meanwhile_message(item.object_id);
+    case BatchRepairResult::deleted_meanwhile: return deleted_meanwhile_message(item);
     case BatchRepairResult::timed_out: return timed_out_in_batch_message(item.object_id, wait_cap_s);
     }
     return {};
@@ -123,7 +131,8 @@ std::string batch_repair_summary(const std::vector<BatchRepairItem>& items, doub
         add("Repaired " + std::string(repaired.size() == 1 ? "object " : "objects ") + listed_ids(repaired) + ".");
     std::string failed_text;
     for (const BatchRepairItem& item : items)
-        if (item.result == BatchRepairResult::failed || item.result == BatchRepairResult::changed_meanwhile)
+        if (item.result == BatchRepairResult::failed || item.result == BatchRepairResult::changed_meanwhile ||
+            item.result == BatchRepairResult::deleted_meanwhile)
             failed_text += (failed_text.empty() ? "" : "; ") + ("object " + std::to_string(item.object_id) + " (\"" + item.object_name +
                                                                   "\"): " + without_final_period(batch_repair_message(item, wait_cap_s)));
     if (!failed_text.empty())
@@ -269,10 +278,17 @@ std::vector<int> repair_order(std::vector<int> object_indices)
     return object_indices;
 }
 
-BatchRepairResult batch_repair_result(const CgalRepairPlan* plan, bool planned_in_time, bool unchanged_in_app)
+bool batch_apply_time_left(std::chrono::steady_clock::duration elapsed, std::chrono::steady_clock::duration wait_cap)
+{
+    return elapsed <= wait_cap + batch_apply_reserve;
+}
+
+BatchRepairResult batch_repair_result(const CgalRepairPlan* plan, bool planned_in_time, bool unchanged_in_app, bool exists_in_app)
 {
     if (plan == nullptr || !planned_in_time || plan->canceled)
         return BatchRepairResult::timed_out;
+    if (!exists_in_app)
+        return BatchRepairResult::deleted_meanwhile;
     if (!unchanged_in_app)
         return BatchRepairResult::changed_meanwhile;
     if (plan->changes_nothing())
@@ -320,7 +336,8 @@ nlohmann::json batch_repair_answer_json(RepairScope scope, std::optional<int> pl
     answer["keep_painting_from"] = keep_painting_given ? "argument" : "app_setting";
     answer["counts"]             = {{"repaired", object_ids_with(items, BatchRepairResult::repaired).size()},
                                     {"failed", object_ids_with(items, BatchRepairResult::failed).size() +
-                                                   object_ids_with(items, BatchRepairResult::changed_meanwhile).size()},
+                                                   object_ids_with(items, BatchRepairResult::changed_meanwhile).size() +
+                                                   object_ids_with(items, BatchRepairResult::deleted_meanwhile).size()},
                                     {"nothing_to_repair", object_ids_with(items, BatchRepairResult::nothing_to_repair).size()},
                                     {"timed_out", object_ids_with(items, BatchRepairResult::timed_out).size()}};
     answer["repair"]  = repair_stats_json(applied);

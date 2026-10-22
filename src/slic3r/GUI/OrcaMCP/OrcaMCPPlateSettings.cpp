@@ -283,14 +283,14 @@ PlateSettings plate_settings_of(PartPlate& plate)
     return settings;
 }
 
-std::optional<int> read_plate_index(const nlohmann::json& params, std::string& error)
+std::optional<int> read_plate_index(const nlohmann::json& params, std::string& error, const std::string& omit_advice)
 {
     if (!params.contains("plate_index"))
         return std::nullopt;
     int plate_index = -1;
     if (!parse_integer_param(params.at("plate_index"), plate_index) || plate_index < 0) {
         error = "plate_index must be a whole number 0 or more, as get_scene_info's plate_index; got " + params.at("plate_index").dump() +
-                ": omit it for the current plate";
+                ": " + omit_advice;
         return std::nullopt;
     }
     return plate_index;

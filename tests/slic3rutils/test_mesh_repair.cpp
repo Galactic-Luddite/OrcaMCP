@@ -620,6 +620,19 @@ TEST_CASE("Each object of a repair of several comes out as repaired, clean, fail
     CHECK(batch_repair_result(nullptr, false, false) == BatchRepairResult::timed_out);
     CHECK(batch_repair_result(&hole_plan, false, true) == BatchRepairResult::timed_out);
     CHECK(batch_repair_result(&hole_plan, true, false) == BatchRepairResult::changed_meanwhile);
+    CHECK(batch_repair_result(&hole_plan, true, false, false) == BatchRepairResult::deleted_meanwhile);
+    CHECK(batch_repair_result(&hole_plan, false, false, false) == BatchRepairResult::timed_out);
+}
+
+TEST_CASE("Plans are applied until the wait cap plus the reserve has passed", "[MeshRepair][orcamcp]")
+{
+    using std::chrono::seconds;
+    const seconds cap{105};
+    CHECK(batch_apply_time_left(seconds{0}, cap));
+    CHECK(batch_apply_time_left(cap, cap));
+    CHECK(batch_apply_time_left(cap + batch_apply_reserve, cap));
+    CHECK_FALSE(batch_apply_time_left(cap + batch_apply_reserve + seconds{1}, cap));
+    CHECK(batch_apply_reserve < seconds{15}); // the bridge's own margin past the cap
 }
 
 TEST_CASE("The answer to a repair of several objects counts them as the app does and sums what was repaired", "[MeshRepair][orcamcp]")
@@ -651,6 +664,7 @@ TEST_CASE("The answer to a repair of several objects counts them as the app does
     items.push_back(item(3, clean, clean_plan, BatchRepairResult::nothing_to_repair, false));
     items.push_back(item(4, other_hole, other_hole_plan, BatchRepairResult::repaired, true));
     items.push_back(item(5, clean, clean_plan, BatchRepairResult::changed_meanwhile, false));
+    items.push_back(item(7, clean, clean_plan, BatchRepairResult::deleted_meanwhile, false));
     BatchRepairItem late;
     late.object_id   = 6;
     late.object_name = "late";
@@ -662,9 +676,9 @@ TEST_CASE("The answer to a repair of several objects counts them as the app does
     CHECK(answer["scope"] == "plate");
     CHECK(answer["plate_index"] == 1);
     CHECK(answer["keep_painting_from"] == "argument");
-    CHECK(answer["counts"] == json{{"repaired", 2}, {"failed", 2}, {"nothing_to_repair", 1}, {"timed_out", 1}});
+    CHECK(answer["counts"] == json{{"repaired", 2}, {"failed", 3}, {"nothing_to_repair", 1}, {"timed_out", 1}});
     CHECK(answer["repair"]["volumes_repaired"] == 2);
-    REQUIRE(answer["objects"].size() == 6);
+    REQUIRE(answer["objects"].size() == 7);
     CHECK(answer["objects"][0]["object_id"] == 0);
     CHECK(answer["objects"][0]["result"] == "repaired");
     CHECK(answer["objects"][0]["changed"] == true);
@@ -675,8 +689,12 @@ TEST_CASE("The answer to a repair of several objects counts them as the app does
     CHECK(answer["objects"][2]["result"] == "nothing_to_repair");
     CHECK(answer["objects"][4]["result"] == "changed_meanwhile");
     CHECK(mentions(answer["objects"][4]["message"], "repair_mesh with object_id 5 again"));
-    CHECK(answer["objects"][5]["result"] == "timed_out");
-    const std::string late_message = answer["objects"][5]["message"];
+    CHECK(answer["objects"][5]["result"] == "deleted_meanwhile");
+    const std::string deleted_message = answer["objects"][5]["message"];
+    CHECK(mentions(deleted_message, "Object 7 (\"object 7\") was deleted in the app"));
+    CHECK_FALSE(mentions(deleted_message, "again"));
+    CHECK(answer["objects"][6]["result"] == "timed_out");
+    const std::string late_message = answer["objects"][6]["message"];
     CHECK(mentions(late_message, "105 s"));
     CHECK(mentions(late_message, "ORCAMCP_TIMEOUT"));
 

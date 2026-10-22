@@ -420,6 +420,15 @@ nlohmann::json drop_instances_on_main_thread(Plater& plater, int object_id, Mode
     return answer;
 }
 
+// The no-op answer of drop_to_bed: what already rests on the bed, and how far its lowest point is from it.
+std::string already_on_bed_message(int object_id, std::optional<int> volume_id, double lowest_z_mm)
+{
+    const std::string subject = volume_id ? "Volume " + std::to_string(*volume_id) + " of object " + std::to_string(object_id)
+                                          : "Object " + std::to_string(object_id);
+    return subject + " already rests on the bed (its lowest point is " + float_to_string_decimal_point(lowest_z_mm, 3) +
+           " mm from it), so nothing was moved";
+}
+
 nlohmann::json drop_to_bed_on_main_thread(const nlohmann::json& params)
 {
     Plater*      plater    = wxGetApp().plater();
@@ -448,8 +457,7 @@ nlohmann::json drop_to_bed_on_main_thread(const nlohmann::json& params)
     if (!can_drop_to_bed(min_z)) {
         answer["changed"]      = false;
         answer["lowest_z_mm"]  = min_z;
-        answer["message"]      = "Object " + std::to_string(object_id) + " already rests on the bed (its lowest point is " +
-                                 std::to_string(min_z) + " mm from it), so nothing was moved";
+        answer["message"]      = already_on_bed_message(object_id, volume_id, min_z);
         report_placement(answer, object_id);
         return answer;
     }
@@ -1214,8 +1222,9 @@ void Slic3r::GUI::OrcaMCPServer::register_part_tools()
         "point goes to Z=0 along the plate's Z, down from above the bed or up from below it. An object's lowest point is "
         "its parts' (modifiers, negative volumes, support blockers and enforcers do not count). The whole object (the "
         "default) moves every instance together, by the lowest one's distance; then, as after any move, an instance "
-        "still above the bed comes down too, unless the object's auto drop setting is off. With instance_id only that "
-        "instance moves. With volume_id that volume (a part or modifier) moves within the object, on instance 0, until "
+        "still above the bed comes down too, unless the object's auto drop setting is off. With instance_id that "
+        "instance is dropped; then, as after any move, any other instance still above the bed comes down too unless the "
+        "object's auto drop setting is off. With volume_id that volume (a part or modifier) moves within the object, on instance 0, until "
         "its own lowest point is at Z=0; then the object drops as the app drops it after a part moves (dropped_to_bed_mm). "
         "One undo step; an object already resting on the bed (within 0.001 mm) is changed: false, with no undo step. "
         "Answers previous_position, position, moved_z_mm and the placement fields (instance_placement, plate_index, "

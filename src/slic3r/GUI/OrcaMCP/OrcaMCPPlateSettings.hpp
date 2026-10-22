@@ -53,7 +53,9 @@ PlateSettings plate_settings_of(PartPlate& plate);
 
 // plate_index as a call gives it: nothing when left out (the current plate), else a whole number 0 or
 // more; given as anything else, `error` says so.
-std::optional<int> read_plate_index(const nlohmann::json& params, std::string& error);
+// `omit_advice` ends the error: what leaving plate_index out means for the calling tool.
+std::optional<int> read_plate_index(const nlohmann::json& params, std::string& error,
+                                    const std::string& omit_advice = "omit it for the current plate");
 // What is wrong with `plate_index` among `plate_count` plates, or nothing.
 std::optional<std::string> plate_index_error(int plate_index, int plate_count);
 
