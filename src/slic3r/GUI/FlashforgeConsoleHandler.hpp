@@ -33,6 +33,10 @@ class PrinterWebViewHandler;
 // same blocking HTTP call the poller makes - and a successful one wakes the poller so the page
 // settles on what the printer reports rather than on what the click hoped for.
 //
+// The page's third method, `thumbnail` with `{"file": <stored file name>}`, is read-only: it answers
+// {"id": <n>, "method": "thumbnail", "ok": true, "result": {"file": ..., "png_base64": <string|null>}},
+// the file's own picture from the printer (`gcodeThumb`), for the job card.
+//
 // The one exception is `{"name": "match_project_to_printer"}`, which never reaches the printer: it
 // reads the material station out of the snapshot the poller already has and rewrites the *project*
 // to agree with it, through the same helper the match_project_to_printer MCP tool calls. It answers

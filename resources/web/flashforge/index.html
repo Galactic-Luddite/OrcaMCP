@@ -189,6 +189,8 @@ body{
 /* ── Job ────────────────────────────────────────────────────────────── */
 .job{padding:16px 18px 18px;display:flex;flex-direction:column;gap:14px}
 .job-head{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap}
+.job-thumb{width:56px;height:56px;border-radius:8px;object-fit:contain;flex:none;align-self:center;
+  background:var(--panel-2);border:1px solid var(--edge-soft)}
 .job-title{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
 .job-title .n{font-family:"Bricolage Grotesque",sans-serif;font-weight:600;font-size:17px;letter-spacing:-.012em;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -786,13 +788,20 @@ body[data-ready="1"] .tool[data-state="empty"]{opacity:.66}
   /* ══ Vocabulary the printer speaks ═══════════════════════════════════
      stateStep / stateAction come straight from matlStationInfo; the
      step names are the vendor's own (heating, push, purge, cut, retract,
-     complete) and stateAction 1/2 are the only two that mean filament is
+     complete) and stateAction 1-3 are the only ones that mean filament is
      actually moving.                                                    */
   var STEPS   = ["Heating","Pushing filament","Purging old filament","Cutting filament","Retracting filament","Complete"];
-  var ACTIONS = { 1:"Loading", 2:"Unloading" };
+  /* stateAction by Flashforge's FlashNetwork.h: 1 load, 2 unload, 3 cancel a load or unload; 4 printing,
+     5 busy and 6 paused move no filament of their own. */
+  var ACTIONS = { 1:"Loading", 2:"Unloading", 3:"Cancelling filament move" };
   var STATES  = {
     printing:["printing","Printing"], heating:["printing","Heating"], busy:["printing","Busy"],
     downloading:["printing","Downloading"], unzipping:["printing","Unzipping"],
+    /* Firmware 2.0.0 says "loading" while the material station moves filament (2026-10-22); a job
+       may be waiting on it, or nothing at all (a load from the printer's screen). */
+    loading:["printing","Loading filament","The material station is moving filament."],
+    calibrate_doing:["printing","Calibrating"], pausing:["paused","Pausing"], canceling:["printing","Cancelling"],
+    sending:["printing","Sending"], cloud_slicing:["printing","Cloud slicing"],
     paused:["paused","Paused"], ready:["idle","Ready"], completed:["idle","Completed"],
     cancelled:["idle","Cancelled"], error:["offline","Error"], unknown:["idle","Unknown"]
   };
@@ -1020,7 +1029,7 @@ body[data-ready="1"] .tool[data-state="empty"]{opacity:.66}
     var byId    = slotsById(p);
     var nozzles = (p.temperatures || {}).nozzles || [];
     var action  = num(ms.stateAction);
-    var moving  = action === 1 || action === 2;
+    var moving  = !!ACTIONS[action];
     var step    = num(ms.stateStep);
     var moveOn  = num(ms.currentLoadSlot) || num(ms.currentSlot) || 0;
     var feeding = num(ms.currentLoadSlot);
@@ -1464,12 +1473,16 @@ body[data-ready="1"] .tool[data-state="empty"]{opacity:.66}
   var JOB_ONLY    = "The printer applies this only while a job is running.";
   var NO_JOB      = "Nothing is printing.";
 
+  /* The states a job starts or ends through, which come with no job too (a preheat, a filament load or
+     a calibration from the printer's screen): a job's only with a file named. As job_running in C++. */
+  var JOB_PHASES = ["heating","busy","loading","calibrate_doing","downloading","unzipping","pausing","canceling"];
+
   function jobPhase(s){
     if (!s || !s.connected) return "none";
     var p = s.printer || {}, st = String(p.state || "").toLowerCase();
     if (st === "paused") return "paused";
     if (st === "printing") return "running";
-    if ((st === "heating" || st === "busy") && p.print_file) return "running";
+    if (JOB_PHASES.indexOf(st) >= 0 && p.print_file) return "running";
     return "none";
   }
 
@@ -1865,6 +1878,24 @@ body[data-ready="1"] .tool[data-state="empty"]{opacity:.66}
 
   function stat(label, value){ return '<div class="stat"><dt>'+esc(label)+'</dt><dd>'+esc(value)+'</dd></div>'; }
 
+  /* The job's picture, from the printer's stored copy of the file: asked for once per file, and
+     nothing shown when the printer has none (a print from a USB drive is not stored). The host checks
+     the image is a PNG in base64 before it gets here. */
+  var jobThumb = { file:"", uri:null, asked:false };
+  function jobThumbUri(file){
+    if (jobThumb.file !== file) jobThumb = { file:file, uri:null, asked:false };
+    if (!jobThumb.asked && bridge && !suspended){
+      jobThumb.asked = true;
+      var wanted = jobThumb;
+      bridge.call("thumbnail", { file:file }).then(function(r){
+        if (jobThumb !== wanted || !r || !r.png_base64) return;
+        wanted.uri = "data:image/png;base64," + r.png_base64;
+        if (lastState) render(lastState);
+      }, function(){});
+    }
+    return jobThumb.uri;
+  }
+
   function renderJob(s, p, raw, ms, printing){
     if (!s.connected){
       setHTML(el("jobCard"), '<h2 class="eyebrow" style="margin:0" id="jobHead">Current job</h2>'+
@@ -1890,8 +1921,8 @@ body[data-ready="1"] .tool[data-state="empty"]{opacity:.66}
         '<h2 class="eyebrow" style="margin:0" id="jobHead">Current job</h2>'+
         '<div class="job-head"><div class="job-title">'+
           '<span class="idle-big">'+esc(st[1] === "Ready" ? "Idle — ready to print" : st[1])+'</span>'+
-          '<span class="s">'+(st[0] === "printing" ? "The printer is getting a job ready to print."
-                                                   : "Nothing is printing. Slice a plate and send it from the Prepare tab.")+'</span>'+
+          '<span class="s">'+(st[2] || (st[0] === "printing" ? "The printer is getting a job ready to print."
+                                                             : "Nothing is printing. Slice a plate and send it from the Prepare tab."))+'</span>'+
         '</div></div>'+
         '<dl class="job-stats">'+stats+'</dl>');
       return;
@@ -1923,8 +1954,9 @@ body[data-ready="1"] .tool[data-state="empty"]{opacity:.66}
     if (known && num(raw.printSpeedAdjust)) sub.push(Math.round(num(raw.printSpeedAdjust)) + " % speed");
     if (!known) sub.push(UNREADABLE);
 
+    var thumb = p.print_file ? jobThumbUri(p.print_file) : null;
     setHTML(el("jobCard"),
-      '<div class="job-head"><div class="job-title">'+
+      '<div class="job-head">'+(thumb ? '<img class="job-thumb" alt="" src="'+thumb+'">' : '')+'<div class="job-title">'+
         '<h2 class="eyebrow" style="margin:0 0 4px" id="jobHead">Current job</h2>'+
         '<span class="n">'+esc(p.print_file || "Untitled job")+'</span>'+
         '<span class="s">'+esc(sub.join(" · "))+'</span></div>'+
@@ -2001,9 +2033,7 @@ body[data-ready="1"] .tool[data-state="empty"]{opacity:.66}
     var raw = p.raw || {};
     var ms  = raw.matlStationInfo || {};
     var pro = isPro(p);
-    var state = String(p.state || "").toLowerCase();
-    var printing = s.connected && (state === "printing" || state === "paused" ||
-                                   (state === "heating" && !!p.print_file));
+    var printing = jobPhase(s) !== "none";
 
     applyTheme(s);
     /* Set before anything paints: the host marks a snapshot stale when it answered from a cache it

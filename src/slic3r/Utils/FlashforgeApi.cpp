@@ -1,6 +1,7 @@
 #include "FlashforgeApi.hpp"
 
 #include <boost/algorithm/string/trim.hpp>
+#include <boost/beast/core/detail/base64.hpp>
 
 #include <algorithm>
 #include <array>
@@ -405,6 +406,16 @@ long project_remaining_s(const std::string& state, long duration_s, double progr
     return std::lround(duration_s * (1.0 - progress) / progress);
 }
 
+bool job_running(const std::string& state, const std::string& print_file)
+{
+    if (state == "printing" || state == "paused")
+        return true;
+    static const char* const job_phases[] = {"heating",     "busy",      "loading", "calibrate_doing",
+                                             "downloading", "unzipping", "pausing", "canceling"};
+    return !print_file.empty() &&
+           std::any_of(std::begin(job_phases), std::end(job_phases), [&state](const char* phase) { return state == phase; });
+}
+
 bool try_parse_json_int(const nlohmann::json& value, int& out)
 {
     try {
@@ -531,6 +542,28 @@ std::optional<long> parse_gcode_printing_time(const nlohmann::json& response, co
     if (const auto seconds = printing_time_in(response.value("gcodeListDetail", nlohmann::json()), file_name))
         return seconds;
     return printing_time_in(response.value("gcodeList", nlohmann::json()), file_name);
+}
+
+std::optional<std::string> parse_gcode_thumbnail(const nlohmann::json& response)
+{
+    if (!response.is_object() || !response.contains("imageData") || !response["imageData"].is_string())
+        return std::nullopt;
+    const std::string data = response["imageData"].get<std::string>();
+    if (data.empty() || data.size() % 4 != 0)
+        return std::nullopt;
+
+    // beast's decoder stops at the first character outside the alphabet: all of it must be read,
+    // but for the padding.
+    const size_t padding = data.size() - data.find_last_not_of('=') - 1;
+    std::string  decoded(boost::beast::detail::base64::decoded_size(data.size()), '\0');
+    const auto   used = boost::beast::detail::base64::decode(decoded.data(), data.data(), data.size());
+    if (padding > 2 || used.second != data.size() - padding)
+        return std::nullopt;
+
+    static const char png_magic[] = "\x89PNG\r\n\x1a\n";
+    if (used.first < 8 || decoded.compare(0, 8, png_magic, 8) != 0)
+        return std::nullopt;
+    return data;
 }
 
 std::vector<MaterialSlot> parse_material_slots(const nlohmann::json& slot_infos)

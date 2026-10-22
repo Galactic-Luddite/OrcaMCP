@@ -45,7 +45,9 @@ constexpr std::chrono::milliseconds POLL_PRINTING{2000};
 constexpr std::chrono::milliseconds POLL_IDLE{5000};
 
 // matlStationInfo.stateAction: 0 free, 1 supply wire (loading), 2 withdraw wire (unloading).
-constexpr int ACTION_LOADING = 1, ACTION_UNLOADING = 2;
+// matlStationInfo.stateAction, by Flashforge's own FlashNetwork.h: 0 idle, 1 load, 2 unload, 3 cancel a
+// load or unload, 4 printing, 5 busy, 6 paused.
+constexpr int ACTION_LOADING = 1, ACTION_UNLOADING = 2, ACTION_CANCELLING_MOVE = 3;
 
 /// As tolerant as FlashforgeApi's own try_parse_json_int: this firmware is loose about types, and a
 /// stateAction that arrives as "1" rather than 1 must not silently read as 0 - that would take the
@@ -80,7 +82,7 @@ std::chrono::milliseconds cadence_for(const FlashforgeApi::PrinterStatus& status
         const auto station = status.raw.find("matlStationInfo");
         if (station != status.raw.end() && station->is_object()) {
             const int action = json_int(*station, "stateAction");
-            if (action == ACTION_LOADING || action == ACTION_UNLOADING)
+            if (action == ACTION_LOADING || action == ACTION_UNLOADING || action == ACTION_CANCELLING_MOVE)
                 return POLL_LOADING;
         }
     }
@@ -221,17 +223,13 @@ bool caller_sets(const json& params, const char* key)
     return it != params.end() && !it->is_null();
 }
 
-/// The page's own test for a job the printer is running (jobPhase in index.html): printing or paused,
-/// or heating or busy with a file.
+/// The page's own test for a job the printer is running (jobPhase in index.html), read off a snapshot.
 bool job_running(const json& snapshot)
 {
     if (!snapshot.is_object() || !snapshot.contains("printer") || !snapshot["printer"].is_object())
         return false;
-    const json&       printer = snapshot["printer"];
-    const std::string state   = printer.value("state", std::string());
-    if (state == "printing" || state == "paused")
-        return true;
-    return (state == "heating" || state == "busy") && !printer.value("print_file", std::string()).empty();
+    const json& printer = snapshot["printer"];
+    return FlashforgeApi::job_running(printer.value("state", std::string()), printer.value("print_file", std::string()));
 }
 
 /// One run of the poll loop, and everything that outlives the thread it runs on.
@@ -375,6 +373,11 @@ public:
             return;
         }
 
+        if (method == "thumbnail") {
+            handle_thumbnail(id, request.value("params", json::object()));
+            return;
+        }
+
         answer_error(id, method, "Unknown method '" + method + "'");
     }
 
@@ -480,6 +483,24 @@ private:
         std::thread(&FlashforgeConsoleHandler::run_command, m_session, m_alive, this, std::move(config),
                     std::move(operation), id)
             .detach();
+    }
+
+    /// A stored file's thumbnail, for the job card: read-only, so a parked page may ask too. The host
+    /// is resolved here, the printer asked on a worker.
+    void handle_thumbnail(int id, const json& params)
+    {
+        const std::string file = params.value("file", std::string());
+        if (file.empty()) {
+            answer_error(id, "thumbnail", "No file named.");
+            return;
+        }
+        DynamicPrintConfig config;
+        std::string        host_type, error;
+        if (!OrcaMCP::resolve_print_host_config(config, host_type, error)) {
+            answer_error(id, "thumbnail", error);
+            return;
+        }
+        std::thread(&FlashforgeConsoleHandler::run_thumbnail, m_alive, this, std::move(config), file, id).detach();
     }
 
     /// Reads the printer's material station out of the last snapshot and matches the project to it.
@@ -693,6 +714,29 @@ private:
         wxGetApp().CallAfter([alive, self, id, ok, error]() {
             if (*alive)
                 self->answer_command(id, ok, error);
+        });
+    }
+
+    /// One thumbnail request, on its own thread like a command. `png_base64` is null when the printer
+    /// has none for the file (a print from a USB drive is not stored).
+    static void run_thumbnail(std::shared_ptr<std::atomic_bool> alive,
+                              FlashforgeConsoleHandler*         self,
+                              DynamicPrintConfig                config,
+                              std::string                       file,
+                              int                               id)
+    {
+        const Flashforge           host(&config);
+        std::optional<std::string> png;
+        wxString                   msg;
+        const bool                 ok = host.fetch_gcode_thumbnail(file, png, msg);
+        if (!*alive)
+            return;
+        json reply = ok ? json{{"id", id}, {"method", "thumbnail"}, {"ok", true},
+                               {"result", {{"file", file}, {"png_base64", png ? json(*png) : json()}}}}
+                        : json{{"id", id}, {"method", "thumbnail"}, {"ok", false}, {"error", std::string(msg.ToUTF8().data())}};
+        wxGetApp().CallAfter([alive, self, reply = std::move(reply)]() {
+            if (*alive)
+                self->run_in_page(reply);
         });
     }
 

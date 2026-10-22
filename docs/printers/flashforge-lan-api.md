@@ -6,7 +6,39 @@ network, with no access to this codebase. The motivating case is a bridge that l
 since Obico ships agents for OctoPrint and Klipper/Moonraker and none for FlashForge.
 
 Everything here was verified against a physical Creator 5 Pro on firmware **1.9.9** in LAN-only
-mode. Where something is inferred rather than observed, it says so.
+mode, and rechecked on **2.0.0** (see "Firmware 2.0.0" below). Where something is inferred rather
+than observed, it says so.
+
+### Firmware 2.0.0
+
+Installed on the same machine by 2026-10-22. Its on-screen changelog: multi-plate print files, a
+filament consistency check, a warning for mixing high- and low-temperature materials, firmware
+rollback, historical calibration records, faster factory reset, better automatic material
+continuation, MCU upgrade and serial-number-loss fixes, and "fixed the extended print time issue".
+None of it is in FlashForge's published release notes yet.
+
+On an idle machine, `detail` has every field 1.9.9 had, with the same types, plus
+`printFileThumbUrl` (empty while idle; see §5). `gcodeList` and `gcodeListDetail` have the same shape.
+
+Read from the firmware itself (2026-10-22: the 2.0.0 and 1.9.8 `firmwareExe` from
+[Parallel-7/FlashForge-Firmware-Updates](https://github.com/Parallel-7/FlashForge-Firmware-Updates),
+compared by their strings; not by running them):
+
+- **The LAN API did not change.** Same routes (`checkCode`, `detail`, `product`, `uploadGcode`,
+  `control`, `gcodeList`, `gcodeThumb`, `printGcode`, `getThum`, `notifyWanBind`), same upload headers,
+  same `detail` keys, same error table (E0002-E0176, E0999), same `status` table.
+- **Multi-plate files: no plate parameter.** Neither `printGcode` nor `uploadGcode` reads one. The
+  printer's own pre-print page pages through a file's plates. Which plate a LAN start prints, and
+  whether a LAN start shows that page, is not known yet; nor what `gcodeListDetail` reports for such a
+  file (one entry per file, no plate field). FlashForge's own slicer sends one plate per file.
+- **Filament consistency check and the mixed-temperature warning** run on that pre-print page: the
+  file's filament types against each extruder's ("The filament set in the model file does not match
+  the current settings"), then a yes/no for high- and low-temperature filaments together. Nothing in
+  `detail` reports either, and no upload or `printGcode` field skips or pre-confirms them. Whether they
+  run for a LAN start, and what `status` says while one waits, is not known yet.
+- **"Fixed the extended print time issue"** reads as the print itself running long: 2.0.0's Klipper
+  `virtual_sdcard.py` is rewritten for G-code throughput (a fast path for G0/G1, batched yields, a
+  shorter busy wait). Whether `estimatedTime` changed meaning is not visible in the strings.
 
 ---
 
@@ -141,12 +173,26 @@ strings — note the **short forms** for pause and cancel:
 | `cancel` | Cancelled. **Not** `cancelled`. |
 | `downloading` | A print just sent, while the printer takes the file in (observed 2026-09-30, about a second). |
 | `unzipping` | Then, a print from a `.gcode.3mf`, for a second or so before `printing` (observed 2026-09-30). **From the end of `downloading` through `unzipping`, the job and control numbers are not readings**: see below. |
+| `loading` | Firmware 2.0.0: a filament load started from the printer's screen, with no job (observed 2026-10-22, for over a minute, while `matlStationInfo.stateAction` was 1; `ready` again once the load ended, `stateAction` 0). Whether a job's own filament moves report it is not known yet, so read it with `printFileName`: a file named means a job is running. |
 
 Map `pause` → `paused` and `cancel` → `cancelled` if the rest of your code speaks the long forms,
-and keep accepting the long forms in case a future firmware changes. `completed`, `error`, `busy`
-and `heating` were anticipated by this implementation but have **not** been observed; treat any
-value you do not recognise as unknown and keep going — do not assume an unfamiliar state means
-"not printing".
+and keep accepting the long forms in case a future firmware changes.
+
+The firmware's whole table, read from its strings (identical in 1.9.8 and 2.0.0): `ready`, `printing`,
+`pause`, `pausing`, `busy`, `completed`, `cancel`, `canceling`, `calibrate_doing`, `heating`,
+`downloading`, `loading`, `cloud_slicing`, `sending`, `unzipping`, `error`. Only those in the table
+above have been observed. Several of them come both with a job and without one (a preheat, a filament
+load or a calibration from the printer's screen), so read them with `printFileName`: OrcaMCP and
+flashforge-obico count `heating`, `busy`, `loading`, `calibrate_doing`, `downloading`, `unzipping`,
+`pausing` and `canceling` as a job's only with a file named. A printer that says `pausing` or
+`canceling` has taken the command: do not send it again. Treat any value you do not recognise as
+unknown and keep going — do not assume an unfamiliar state means "not printing".
+
+`matlStationInfo.stateAction` and `stateStep`, by FlashForge's own `FlashNetwork.h` (in
+[Orca-Flashforge](https://github.com/FlashForge/Orca-Flashforge)): `stateAction` 0 idle, 1 load
+filament, 2 unload, 3 cancel a load or unload, 4 printing, 5 busy, 6 paused (the 5 seen from
+`downloading` through leveling is busy); `stateStep` 0 undefined, 1 heating, 2 push filament, 3 purge
+old filament, 4 cut filament, 5 retract, 6 complete.
 
 ### Job and control numbers that are memory
 
@@ -415,6 +461,16 @@ the **sole consumer** of this URL and re-serve frames onward to anything else th
 reference implementation is the [flashforge-obico](https://github.com/okets/flashforge-obico)
 agent, which exposes `/cameras/<i>/stream` and `/cameras/<i>/snapshot` on port 8081 and advertises
 those URLs to Obico in the printer's webcam list.
+
+### The job's picture
+
+Two ways, both on port 8898. `gcodeThumb` (section 4) gives a stored file's PNG, base64, for the
+credentials and a `fileName`: OrcaMCP's Device page and the flashforge-obico console show the job
+printing that way, by its `printFileName`, and check the PNG signature first. `detail.printFileThumbUrl`,
+present on 2.0.0 and empty while idle, is by third-party reports `http://<ip>:8898/getThum` during a
+print: a plain GET with **no credentials**, so it would cover a print from a USB drive too. Its image
+format is unconfirmed (a BMP by one report, a PNG file name in its header by the firmware's strings);
+not used here until it has been seen on this machine.
 
 ---
 

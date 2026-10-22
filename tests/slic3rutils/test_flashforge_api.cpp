@@ -112,6 +112,22 @@ TEST_CASE("parse_detail normalises the firmware's short state names", "[flashfor
     }
 }
 
+TEST_CASE("a job runs while printing or paused, or getting ready with a file named", "[flashforge]") {
+    CHECK(job_running("printing", ""));
+    CHECK(job_running("paused", ""));
+    // A job's start and end phases come with no job too: a preheat, a filament load from the screen
+    // (firmware 2.0.0 says "loading" for one, 2026-10-22), a calibration. Only a file makes them a job's.
+    for (const char* state : {"heating", "busy", "loading", "calibrate_doing", "downloading", "unzipping", "pausing", "canceling"}) {
+        CAPTURE(state);
+        CHECK(job_running(state, "benchy.gcode.3mf"));
+        CHECK_FALSE(job_running(state, ""));
+    }
+    for (const char* state : {"ready", "completed", "cancelled", "error", "sending", "cloud_slicing", "unknown"}) {
+        CAPTURE(state);
+        CHECK_FALSE(job_running(state, "benchy.gcode.3mf"));
+    }
+}
+
 TEST_CASE("parse_detail falls back to rightTemp for single nozzle printers", "[flashforge]") {
     PrinterStatus s; std::string err;
     REQUIRE(parse_detail(R"({"code":0,"detail":{"status":"ready","rightTemp":25,"rightTargetTemp":0,"platTemp":24,"platTargetTemp":0}})", s, err));
@@ -577,6 +593,22 @@ TEST_CASE("upload extended_info round-trips the print options", "[flashforge]") 
 TEST_CASE("an extended_info without the option keys reads as all off", "[flashforge]") {
     CHECK(read_upload_print_options({}) == PrintOptions{});
     CHECK(read_upload_print_options({{"flowCalibration", "yes"}}) == PrintOptions{}); // only "1" is on
+}
+
+TEST_CASE("a stored file's thumbnail is taken only as base64 of a PNG", "[flashforge]") {
+    using nlohmann::json;
+    // A PNG's signature and IHDR, padded and unpadded.
+    CHECK(parse_gcode_thumbnail(json{{"code", 0}, {"imageData", "iVBORw0KGgoAAAANSUhEUg=="}}) == "iVBORw0KGgoAAAANSUhEUg==");
+    CHECK(parse_gcode_thumbnail(json{{"imageData", "iVBORw0KGgoAAAANSUhE"}}) == "iVBORw0KGgoAAAANSUhE");
+    // A JPEG, text the page would put in an attribute, a cut-off string, nothing at all.
+    CHECK_FALSE(parse_gcode_thumbnail(json{{"imageData", "/9j/4AAQSkZJRgA="}}));
+    CHECK_FALSE(parse_gcode_thumbnail(json{{"imageData", "iVBORw0KGgoAAAANSUhE\"><x"}}));
+    CHECK_FALSE(parse_gcode_thumbnail(json{{"imageData", "iVBORw0KGgoAAAANSUh"}}));
+    CHECK_FALSE(parse_gcode_thumbnail(json{{"imageData", "iVBORw0KGgoAAAANSU==="}}));
+    CHECK_FALSE(parse_gcode_thumbnail(json{{"imageData", ""}}));
+    CHECK_FALSE(parse_gcode_thumbnail(json{{"imageData", 7}}));
+    CHECK_FALSE(parse_gcode_thumbnail(json{{"code", 1}}));
+    CHECK_FALSE(parse_gcode_thumbnail(json::array()));
 }
 
 TEST_CASE("parse_gcode_printing_time finds a stored file's time", "[flashforge]") {

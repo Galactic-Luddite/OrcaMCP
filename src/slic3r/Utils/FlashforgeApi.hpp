@@ -13,7 +13,11 @@ namespace Slic3r { namespace FlashforgeApi {
 struct NozzleTemp { double current{0}; double target{0}; };
 struct MaterialSlot { int slot_id{0}; bool has_filament{false}; std::string material_name, material_color; };
 struct PrinterStatus {
-    std::string state;                 // normalized: ready|busy|heating|printing|paused|completed|error|cancelled|unknown, or the printer's own (downloading, unzipping)
+    // Normalized: "pause" and "cancel" read as paused and cancelled; every other status as the printer
+    // sends it, lowercased. The firmware's own table (2.0.0, as 1.9.8): ready, printing, pause, pausing,
+    // busy, completed, cancel, canceling, calibrate_doing, heating, downloading, unzipping, loading,
+    // sending, cloud_slicing, error.
+    std::string state;
     std::string print_file; double progress{0}; long duration_s{0};
     // Seconds left, PROJECTED from elapsed time and progress: duration_s * (1 - p) / p. The firmware's
     // own `estimatedTime` is not usable for this -- on 1.9.9 it tracked printDuration exactly on one
@@ -67,6 +71,12 @@ bool try_parse_json_int(const nlohmann::json& value, int& out);
 // done: the printer's file progress, or the slicer's time done (FlashforgeJobProgress).
 long project_remaining_s(const std::string& state, long duration_s, double progress);
 
+// Whether the printer is running a job: printing or paused, or in a state a job starts or ends
+// through (heating, busy, loading filament, calibrating, taking the file in, pausing, cancelling).
+// Those come with no job too -- a preheat, a filament load or a calibration from the printer's screen
+// (`loading` seen on 2.0.0) -- so they count only with a file named.
+bool job_running(const std::string& state, const std::string& print_file);
+
 // Returns false with `error` set if the body is not a successful API response.
 bool parse_detail(const std::string& body, PrinterStatus& out, std::string& error);
 
@@ -112,6 +122,11 @@ PrintOptions read_upload_print_options(const std::map<std::string, std::string>&
 // positive, finite number (older firmware, a plain name, 0, a flag, text that is not a number) or
 // the file is not listed.
 std::optional<long> parse_gcode_printing_time(const nlohmann::json& response, const std::string& file_name);
+
+// A stored file's thumbnail from a gcodeThumb response: its `imageData`, base64, returned as sent only
+// when it is base64 throughout and decodes to a PNG. The field is the printer's word and the Device
+// page shows it as an image, so anything else is nullopt.
+std::optional<std::string> parse_gcode_thumbnail(const nlohmann::json& response);
 
 nlohmann::json make_credentials_payload(const std::string& serial, const std::string& check_code);
 nlohmann::json make_control_payload(const std::string& serial, const std::string& check_code, const std::string& cmd, const nlohmann::json& args);

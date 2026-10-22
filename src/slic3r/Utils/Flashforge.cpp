@@ -679,6 +679,21 @@ bool Flashforge::stored_file_printing_time(const std::string& file_name, std::op
     return true;
 }
 
+bool Flashforge::fetch_gcode_thumbnail(const std::string& file_name, std::optional<std::string>& png_base64, wxString& msg) const
+{
+    png_base64.reset();
+    if (!require_local_api_credentials(msg))
+        return false;
+
+    json payload        = FlashforgeApi::make_credentials_payload(m_serial_number, m_check_code);
+    payload["fileName"] = file_name;
+    std::string body;
+    if (!request_local_api_json("gcodeThumb", payload.dump(), body, msg))
+        return false;
+    png_base64 = FlashforgeApi::parse_gcode_thumbnail(json::parse(body, nullptr, false, true));
+    return true;
+}
+
 bool Flashforge::print_gcode_file(const std::string& file_name, const FlashforgeApi::PrintOptions& options, const nlohmann::json& material_mappings, wxString& msg) const
 {
     if (!require_local_api_credentials(msg))

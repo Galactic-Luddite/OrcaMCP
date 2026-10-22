@@ -78,6 +78,9 @@ public:
     // A stored file's estimated print time, from the printer's file list. `seconds` is nullopt when
     // the printer does not report one; false with `msg` when the list could not be read.
     bool stored_file_printing_time(const std::string& file_name, std::optional<long>& seconds, wxString& msg) const;
+    // A stored file's thumbnail, base64 PNG (FlashforgeApi::parse_gcode_thumbnail). `png_base64` is
+    // nullopt when the printer has none for it; false with `msg` when it could not be asked.
+    bool fetch_gcode_thumbnail(const std::string& file_name, std::optional<std::string>& png_base64, wxString& msg) const;
 
 private:
     std::string m_host;

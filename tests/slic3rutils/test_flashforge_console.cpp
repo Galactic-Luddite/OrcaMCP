@@ -314,6 +314,13 @@ TEST_CASE("a print speed is sent only while the printer runs a job", "[flashforg
     heating["printer"]["print_file"]   = "";
     CHECK(build({{"name", "printer_ctl"}, {"speed", 166}}, heating, error).is_null());
 
+    // So does loading filament for a job; a filament load from the screen, with no file, does not.
+    json loading                       = printing_snapshot();
+    loading["printer"]["state"]        = "loading";
+    CHECK_FALSE(build({{"name", "printer_ctl"}, {"speed", 125}}, loading, error).is_null());
+    loading["printer"]["print_file"]   = "";
+    CHECK(build({{"name", "printer_ctl"}, {"speed", 125}}, loading, error).is_null());
+
     // The Z offset and the fans work on an idle printer, as the page offers them there.
     CHECK_FALSE(build({{"name", "printer_ctl"}, {"zAxisCompensation", 0.05}}, idle_snapshot(), error).is_null());
     CHECK_FALSE(build({{"name", "printer_ctl"}, {"coolingFan", 20}}, idle_snapshot(), error).is_null());
