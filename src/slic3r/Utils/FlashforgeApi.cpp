@@ -589,7 +589,9 @@ std::vector<MaterialSlot> parse_material_slots(const nlohmann::json& slot_infos)
                                                     : static_cast<int>(slots.size()) + 1;
         ms.has_filament   = get_bool(slot, "hasFilament");
         ms.material_name  = get_string(slot, "materialName");
-        ms.material_color = get_string(slot, "materialColor");
+        // A colour is text ("#RRGGBB"): a number in its place is no colour, and is not made one.
+        if (const auto it = slot.find("materialColor"); it != slot.end() && it->is_string())
+            ms.material_color = it->get<std::string>();
         slots.push_back(std::move(ms));
     }
     return slots;

@@ -1596,6 +1596,9 @@ TEST_CASE("A layer slider tool change counts as a color in a parallel mode", "[M
     REQUIRE(print.validate(&warnings).string.empty());
 
     // Filament 5 routes to head 1, which copies the primary in this mode.
+    // Orca: in the mode the layer slider records for a plate printing with one filament on a
+    // multi-filament printer: in no other does the slicer apply the change (CustomGCode::tool_changes_off).
+    model.plates_custom_gcodes[model.curr_plate_index].mode = CustomGCode::MultiAsSingle;
     model.plates_custom_gcodes[model.curr_plate_index].gcodes.push_back(
         { 5.0, CustomGCode::Type::ToolChange, 5, "", "" });
     print.apply(model, print.full_print_config());

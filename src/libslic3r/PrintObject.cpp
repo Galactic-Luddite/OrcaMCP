@@ -12,7 +12,6 @@
 
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
-#include "Clipper2Utils.hpp"
 #include "ElephantFootCompensation.hpp"
 #include "PrintableHeightLimit.hpp"
 #include "ConnectedBodies.hpp"

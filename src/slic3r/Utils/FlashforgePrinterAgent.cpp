@@ -89,10 +89,10 @@ int FlashforgePrinterAgent::send_message_to_printer(std::string dev_id, std::str
 
 int FlashforgePrinterAgent::connect_printer(const PrinterConnectionParams& params)
 {
-    // The username, password and SSL go unused: the local API is plain HTTP on its own port, and its
-    // credentials are in the printer preset.
-    const std::string& dev_id = params.dev_id;
-    const std::string& dev_ip = params.host;
+    // The username and SSL go unused: the local API is plain HTTP on its own port.
+    const std::string& dev_id   = params.dev_id;
+    const std::string& dev_ip   = params.host;
+    const std::string& password = params.password;
 
     if (dev_id.empty()) {
         BOOST_LOG_TRIVIAL(error) << "FlashforgePrinterAgent: connect_printer missing dev_id";

@@ -142,8 +142,8 @@ std::string mesh_warning_advice(const MeshHealth& health)
     // layer's open outlines across gaps of up to 2 mm (chain_open_polylines_close_gaps, max_gap); an
     // outline it cannot close is left out of that layer. Never a GUI button: an agent must not send the
     // user to one.
-    return "repair_mesh repairs it with the app's own repair, on every platform: it splits the mesh into its parts, "
-           "drops parts with no volume and closes each part's holes; painting is cleared unless keep_painting keeps it. "
+    return "repair_mesh repairs it with the app's own repair, on every platform: it fills the holes and welds the "
+           "cracks of each volume in place; painting is cleared unless keep_painting keeps it. "
            "Slicing also closes each layer's outline across gaps of up to 2 mm, so a hole that small usually prints "
            "closed; a wider one can leave that outline out of a layer, so check the sliced preview there.";
 }

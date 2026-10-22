@@ -167,11 +167,11 @@ nlohmann::json finish_repair(RepairRequest& request, CgalRepairPlan& plan, bool 
     return guard.report(with_closed_tool(std::move(answer), closed_tool));
 }
 
-// repair_mesh: capture on the main thread, the repair on this (the HTTP) thread, apply on the main
+// repair_mesh_tool: capture on the main thread, the repair on this (the HTTP) thread, apply on the main
 // thread. The main thread never waits for the repair, and only it changes the model. The work stops,
 // within a volume too, when the app quits (the gate closes, and the next run_on_main_thread refuses with
 // -32002, nothing applied) or when this call's wait runs out.
-nlohmann::json repair_mesh(const nlohmann::json& params)
+nlohmann::json repair_mesh_tool(const nlohmann::json& params)
 {
     RepairRequest        request;
     const nlohmann::json refusal = run_on_main_thread([&params, &request]() -> nlohmann::json { return start_repair(params, request); });
@@ -274,6 +274,6 @@ void OrcaMCPServer::register_mesh_tools()
             }},
             {"required", {"object_id"}}
         },
-        [](const nlohmann::json& params) -> nlohmann::json { return repair_mesh(params); }
+        [](const nlohmann::json& params) -> nlohmann::json { return repair_mesh_tool(params); }
     });
 }
