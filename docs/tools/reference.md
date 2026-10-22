@@ -31,7 +31,7 @@ into a call that reports success and changes nothing. See [Error Handling](#erro
 |----------|-------|
 | **Scene** | `get_scene_info`, `new_project`, `load_project`, `save_project`, `export_3mf`, `export_stl` |
 | **Models** | `load_model`, `auto_orient`, `arrange_objects`, `get_object_info`, `get_mesh_health`, `repair_mesh`, `get_object_components`, `rename_object`, `set_object_printable`, `split_object`, `add_volume`, `set_volume_type`, `assemble_objects`, `merge_parts`, `invalidate_cut_info`, `reload_from_disk`, `replace_volume_with_file` |
-| **Transforms** | `move_object`, `rotate_object`, `scale_object`, `mirror_object`, `flatten_object`, `clone_object`, `set_instance_count`, `fill_bed_with_instances`, `cut_object`, `delete_object`, `transform_objects` |
+| **Transforms** | `move_object`, `drop_to_bed`, `rotate_object`, `scale_object`, `mirror_object`, `flatten_object`, `clone_object`, `set_instance_count`, `fill_bed_with_instances`, `cut_object`, `delete_object`, `transform_objects` |
 | **Plates** | `add_plate`, `select_plate`, `delete_plate`, `set_prime_tower_position`, `set_plate_settings` |
 | **Config** | `get_presets`, `install_presets`, `get_edited_presets`, `get_config_values`, `select_preset`, `apply_config`, `clone_preset`, `save_preset`, `delete_preset`, `reset_preset`, `get_valid_config_keys` |
 | **Per-Object** | `get_object_config`, `set_object_config`, `reset_object_config` |
@@ -1199,6 +1199,49 @@ plate 0".
 Before v2.3.2 `on_bed` was measured against whichever plate happened to be *selected*, so a correct
 move into another plate's area was reported as "outside printable area"; `move_object` also left the
 object registered on its old plate, which sliced it onto the wrong plate with no error.
+
+---
+
+### drop_to_bed
+Drop an object, one of its instances, or one of its volumes onto the bed, as the app's Drop does.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `object_id` | integer | Yes | Object index |
+| `instance_id` | integer | No | Drop only this instance, as `get_object_info`'s `instance_placement` lists them. Left out: every instance |
+| `volume_id` | integer | No | Drop this volume within the object instead, on instance 0. Not with `instance_id` |
+| `include_preview` | boolean | No | Include preview |
+
+The lowest point goes to Z=0 along the plate's Z, down from above the bed or up from below it
+(`Selection::drop`). An object's lowest point is its model parts': modifiers, negative volumes and
+support volumes do not count. The whole object moves every instance together, by the lowest one's
+distance; then, as after any move (`GLCanvas3D::do_move`), an instance still above the bed comes down
+too, unless the object's auto drop setting is off. Only the target object's instances are dropped
+afterwards, where the GUI's move drops every floating object in the scene. A sinking object is lifted
+whatever its auto drop. With `volume_id` the volume (a part or modifier) moves within the object, on
+instance 0, until its own lowest point is at Z=0; then the object drops as after a part moves
+(`dropped_to_bed_mm`).
+
+One undo step ("Move object"). An object resting on the bed already (within 0.001 mm) answers
+`changed: false` and `lowest_z_mm`, with no undo step. Refused: `volume_id` with `instance_id`, a
+one-volume object's `volume_id`, a cut object's solid parts (`invalidate_cut_info` first), a missing
+instance, and any call while an arrange, orient or bed fill runs. An open toolbar tool is closed first
+for the volume form (`closed_toolbar_tool`).
+
+**Examples:**
+```json
+// A floating object: its lowest point to Z=0
+{"name": "drop_to_bed", "arguments": {"object_id": 0}}
+// -> {"status": "success", "object_id": 0, "previous_position": {"x": 128, "y": 128, "z": 27},
+//     "position": {"x": 128, "y": 128, "z": 20}, "lowest_z_mm": 7, "moved_z_mm": -7,
+//     "instances_moved": [{"instance_id": 0, "z_change_mm": -7}], "plate_index": 0, "on_bed": true, ...}
+
+// A raised part, within its object
+{"name": "drop_to_bed", "arguments": {"object_id": 0, "volume_id": 1}}
+// -> {"status": "success", "object_id": 0, "volume_id": 1, "previous_position": {...},
+//     "position": {...}, "moved_z_mm": -5, "dropped_to_bed_mm": 0, ...}
+```
 
 ---
 
@@ -4278,7 +4321,7 @@ Many tools return an `active_warnings` section in their response, providing visi
 - Scene: `get_scene_info`
 - Slicing: `slice_all`, `get_slicing_status`, `get_print_estimate`
 - Model ops: `load_model`, `arrange_objects`, `auto_orient`
-- Transforms: `move_object`, `rotate_object`, `scale_object`, `transform_objects`, `mirror_object`, `clone_object`, `flatten_object`, `cut_object`, `delete_object`
+- Transforms: `move_object`, `drop_to_bed`, `rotate_object`, `scale_object`, `transform_objects`, `mirror_object`, `clone_object`, `flatten_object`, `cut_object`, `delete_object`
 - History: `undo`, `redo`
 
 **Response format:**

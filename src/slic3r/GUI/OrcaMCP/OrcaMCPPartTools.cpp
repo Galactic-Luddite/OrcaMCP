@@ -357,6 +357,111 @@ nlohmann::json transform_volume_on_main_thread(const nlohmann::json& params, Vol
     return with_closed_tool(std::move(answer), closed_tool);
 }
 
+// ---- drop_to_bed ----
+
+// The instances a drop of object `object` moves: the one named, else every instance.
+std::vector<std::size_t> instances_to_drop(const ModelObject& object, const std::optional<int>& instance_id)
+{
+    std::vector<std::size_t> instances;
+    if (instance_id)
+        instances.push_back(std::size_t(*instance_id));
+    else
+        for (std::size_t i = 0; i < object.instances.size(); ++i)
+            instances.push_back(i);
+    return instances;
+}
+
+// Selection::drop's volume form: the volume to Z=0 within the object on instance 0, then the object's own drop.
+nlohmann::json drop_volume_to_bed(Plater& plater, int object_id, ModelObject& object, int volume_id, double min_z, nlohmann::json answer)
+{
+    const std::size_t volume = std::size_t(volume_id);
+    std::string       closed_tool;
+    if (const auto refusal = close_toolbar_tool_before_change(plater, object_id, object.volumes.size(), closed_tool))
+        return *refusal;
+    const Vec3d               previous      = volume_world_box(object, volume).center();
+    const std::vector<double> lowest_before = instances_lowest_z(object);
+    plater.take_snapshot(_u8L("Move object"));
+    translate_volume_in_plate_frame(object, volume, Vec3d(0., 0., -min_z));
+    const std::vector<double> dropped = drop_after_volume_change(object, lowest_before, VolumeChange::move);
+    answer.update(volume_row_json(object, volume));
+    answer["previous_position"] = vec_json(previous);
+    answer["moved_z_mm"]        = -min_z;
+    answer["dropped_to_bed_mm"] = dropped.empty() ? 0. : dropped.front();
+    after_volume_change(plater, object_id, answer);
+    return with_closed_tool(std::move(answer), closed_tool);
+}
+
+// Selection::drop's object and instance forms, as move_object moves an object: no tool closed.
+nlohmann::json drop_instances_on_main_thread(Plater& plater, int object_id, ModelObject& object,
+                                             const std::vector<std::size_t>& instances, double min_z, nlohmann::json answer)
+{
+    const Vec3d previous = object_world_box(object).center();
+    plater.take_snapshot(_u8L("Move object"));
+    const std::vector<double> changes = drop_instances_to_bed(object, instances, min_z);
+    plater.update();
+
+    const Vec3d    centre   = object_world_box(object).center();
+    const Vec3d    rotation = object.instances[0]->get_rotation();
+    nlohmann::json moved    = nlohmann::json::array();
+    for (std::size_t i = 0; i < changes.size(); ++i)
+        if (changes[i] != 0.)
+            moved.push_back({{"instance_id", i}, {"z_change_mm", changes[i]}});
+    answer["previous_position"] = vec_json(previous);
+    answer["position"]          = vec_json(centre);
+    answer["rotation_degrees"]  = vec_json(Vec3d(Geometry::rad2deg(rotation.x()), Geometry::rad2deg(rotation.y()), Geometry::rad2deg(rotation.z())));
+    answer["scale"]             = vec_json(object.instances[0]->get_scaling_factor());
+    answer["lowest_z_before_mm"] = min_z;
+    answer["moved_z_mm"]        = -min_z;
+    answer["instances_moved"]   = std::move(moved);
+    rehome_and_report_placement(answer, object_id, /*moved=*/true);
+    ObjectList* list = wxGetApp().obj_list();
+    list->update_info_items(std::size_t(object_id));
+    list->update_plate_values_for_items();
+    return answer;
+}
+
+nlohmann::json drop_to_bed_on_main_thread(const nlohmann::json& params)
+{
+    Plater*      plater    = wxGetApp().plater();
+    int          object_id = -1;
+    std::string  error;
+    ModelObject* object = resolve_object_id(params, plater->model(), object_id, error);
+    if (object == nullptr)
+        return error_response(error);
+    const std::optional<int> volume_id   = read_volume_id(params, error);
+    const std::optional<int> instance_id = error.empty() ? read_instance_id(params, error) : std::nullopt;
+    const bool               preview     = error.empty() ? read_flag(params, "include_preview", error).value_or(false) : false;
+    if (!error.empty())
+        return error_response(error);
+    if (const auto refusal = drop_refusal(object_id, *object, volume_id, instance_id, cut_siblings(plater->model(), object_id)))
+        return error_response(*refusal);
+    if (const auto refusal = ui_job_refusal(*plater, "drop_to_bed"))
+        return error_response(*refusal);
+
+    const std::vector<std::size_t> instances = instances_to_drop(*object, instance_id);
+    const double min_z = volume_id ? volume_drop_min_z(*object, std::size_t(*volume_id)) : instances_drop_min_z(*object, instances);
+    nlohmann::json answer = {{"status", "success"}, {"object_id", object_id}};
+    if (volume_id)
+        answer["volume_id"] = *volume_id;
+    if (instance_id)
+        answer["instance_id"] = *instance_id;
+    if (!can_drop_to_bed(min_z)) {
+        answer["changed"]      = false;
+        answer["lowest_z_mm"]  = min_z;
+        answer["message"]      = "Object " + std::to_string(object_id) + " already rests on the bed (its lowest point is " +
+                                 std::to_string(min_z) + " mm from it), so nothing was moved";
+        report_placement(answer, object_id);
+        return answer;
+    }
+    answer = volume_id ? drop_volume_to_bed(*plater, object_id, *object, *volume_id, min_z, std::move(answer))
+                       : drop_instances_on_main_thread(*plater, object_id, *object, instances, min_z, std::move(answer));
+    if (answer.value("status", "") != "success")
+        return answer;
+    answer["active_warnings"] = get_active_warnings_json(plater);
+    add_turntable_preview_if_requested(answer, preview);
+    return answer;
+}
+
 // ---- delete ----
 
 nlohmann::json delete_volume_on_main_thread(Plater& plater, int object_id, ModelObject& object, int volume_id)
@@ -1101,6 +1206,40 @@ nlohmann::json keep_painting_schema()
 
 void Slic3r::GUI::OrcaMCPServer::register_part_tools()
 {
+    register_tool({
+        "drop_to_bed",
+        ToolCategory::Transforms,
+        "Drop an object or part onto the bed",
+        "Drop an object, one of its instances, or one of its volumes onto the bed, as the app's Drop does: the lowest "
+        "point goes to Z=0 along the plate's Z, down from above the bed or up from below it. An object's lowest point is "
+        "its parts' (modifiers, negative volumes, support blockers and enforcers do not count). The whole object (the "
+        "default) moves every instance together, by the lowest one's distance; then, as after any move, an instance "
+        "still above the bed comes down too, unless the object's auto drop setting is off. With instance_id only that "
+        "instance moves. With volume_id that volume (a part or modifier) moves within the object, on instance 0, until "
+        "its own lowest point is at Z=0; then the object drops as the app drops it after a part moves (dropped_to_bed_mm). "
+        "One undo step; an object already resting on the bed (within 0.001 mm) is changed: false, with no undo step. "
+        "Answers previous_position, position, moved_z_mm and the placement fields (instance_placement, plate_index, "
+        "plate_indices, on_bed). A one-volume object has no part to drop on its own (leave volume_id out), and a cut "
+        "object's solid parts wait for invalidate_cut_info. Refused while an arrange, orient or bed fill runs.",
+        {
+            {"type", "object"},
+            {"properties", {
+                {"object_id", {{"type", "integer"}, {"minimum", 0}, {"description", "Object index (0-based)"}}},
+                {"instance_id", {{"type", "integer"}, {"minimum", 0},
+                                 {"description", "Drop only this instance, as get_object_info's instance_placement lists them. "
+                                                 "Left out: every instance"}}},
+                {"volume_id", {{"type", "integer"}, {"minimum", 0},
+                               {"description", "Drop this volume (as get_object_info lists them) within the object instead, on "
+                                               "instance 0. Not with instance_id"}}},
+                {"include_preview", {{"type", "boolean"}, {"description", "Return turntable preview path"}}}
+            }},
+            {"required", {"object_id"}}
+        },
+        [](const nlohmann::json& params) -> nlohmann::json {
+            return run_on_main_thread([&params]() -> nlohmann::json { return drop_to_bed_on_main_thread(params); });
+        }
+    });
+
     register_tool({
         "split_object",
         ToolCategory::Models,

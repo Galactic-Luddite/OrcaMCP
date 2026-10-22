@@ -618,3 +618,106 @@ TEST_CASE("A model file add_volume cannot read is refused before anything change
     CHECK(mentions(model_file_load_error(text.string(), {}), "could not read"));
     boost::filesystem::remove(text);
 }
+
+// ---- drop_to_bed ----
+
+TEST_CASE("Drop takes a lowest point off the bed by more than a thousandth of a millimetre, above or below", "[PartEdits][orcamcp]")
+{
+    CHECK(can_drop_to_bed(5.));
+    CHECK(can_drop_to_bed(-5.));
+    CHECK_FALSE(can_drop_to_bed(0.));
+    CHECK_FALSE(can_drop_to_bed(0.0005));
+    CHECK_FALSE(can_drop_to_bed(-0.0005));
+}
+
+TEST_CASE("A floating object drops to Z=0 and a sinking one is lifted, whatever its auto drop", "[PartEdits][orcamcp]")
+{
+    Model        model;
+    ModelObject& floating = two_part_object(model, Vec3d(100, 100, 7));
+    const double min_z    = instances_drop_min_z(floating, {0});
+    CHECK_THAT(min_z, WithinAbs(7., 1e-6));
+    drop_instances_to_bed(floating, {0}, min_z);
+    CHECK_THAT(instances_lowest_z(floating)[0], WithinAbs(0., 1e-6));
+
+    ModelObject& sinking = two_part_object(model, Vec3d(100, 100, -3));
+    sinking.auto_drop    = false;
+    const double sunk    = instances_drop_min_z(sinking, {0});
+    CHECK_THAT(sunk, WithinAbs(-3., 1e-6));
+    drop_instances_to_bed(sinking, {0}, sunk);
+    CHECK_THAT(instances_lowest_z(sinking)[0], WithinAbs(0., 1e-6));
+
+    ModelObject& resting = two_part_object(model, Vec3d(100, 100, 0.0005));
+    CHECK_FALSE(can_drop_to_bed(instances_drop_min_z(resting, {0})));
+}
+
+TEST_CASE("The whole object drops by its lowest instance, then a floating instance comes down unless auto drop is off", "[PartEdits][orcamcp]")
+{
+    Model        model;
+    ModelObject& object = two_part_object(model, Vec3d(100, 100, -2));
+    object.add_instance()->set_offset(Vec3d(200, 100, 4));
+    const double min_z = instances_drop_min_z(object, {0, 1});
+    CHECK_THAT(min_z, WithinAbs(-2., 1e-6));
+    const std::vector<double> changes = drop_instances_to_bed(object, {0, 1}, min_z);
+    CHECK_THAT(instances_lowest_z(object)[0], WithinAbs(0., 1e-6));
+    CHECK_THAT(instances_lowest_z(object)[1], WithinAbs(0., 1e-6));
+    CHECK_THAT(changes[0], WithinAbs(2., 1e-6));
+    CHECK_THAT(changes[1], WithinAbs(-4., 1e-6));
+
+    ModelObject& held = two_part_object(model, Vec3d(100, 100, -2));
+    held.add_instance()->set_offset(Vec3d(200, 100, 4));
+    held.auto_drop = false;
+    drop_instances_to_bed(held, {0, 1}, instances_drop_min_z(held, {0, 1}));
+    CHECK_THAT(instances_lowest_z(held)[0], WithinAbs(0., 1e-6));
+    CHECK_THAT(instances_lowest_z(held)[1], WithinAbs(6., 1e-6));
+}
+
+TEST_CASE("A drop of one instance moves that instance only", "[PartEdits][orcamcp]")
+{
+    Model        model;
+    ModelObject& object = two_part_object(model, Vec3d(100, 100, 5));
+    object.add_instance()->set_offset(Vec3d(200, 100, 8));
+    object.auto_drop = false;
+    drop_instances_to_bed(object, {1}, instances_drop_min_z(object, {1}));
+    CHECK_THAT(instances_lowest_z(object)[0], WithinAbs(5., 1e-6));
+    CHECK_THAT(instances_lowest_z(object)[1], WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("A modifier below the parts does not change an instance's lowest point, and a volume's drop reads its own", "[PartEdits][orcamcp]")
+{
+    Model        model;
+    ModelObject& object = two_part_object(model);
+    object.volumes[1]->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    object.volumes[1]->set_offset(Vec3d(0., 0., -6.));
+    CHECK_THAT(instances_drop_min_z(object, {0}), WithinAbs(0., 1e-6));
+    CHECK_THAT(volume_drop_min_z(object, 1), WithinAbs(-6., 1e-6));
+
+    // A raised part drops within the object; a modifier's drop leaves the object where it is.
+    ModelObject& raised = two_part_object(model);
+    raised.volumes[1]->set_offset(Vec3d(0., 0., 5.));
+    const double part_min = volume_drop_min_z(raised, 1);
+    CHECK_THAT(part_min, WithinAbs(5., 1e-6));
+    const std::vector<double> before = instances_lowest_z(raised);
+    translate_volume_in_plate_frame(raised, 1, Vec3d(0., 0., -part_min));
+    drop_after_volume_change(raised, before, VolumeChange::move);
+    CHECK_THAT(volume_world_box(raised, 1).min.z(), WithinAbs(0., 1e-6));
+
+    const double modifier_min = volume_drop_min_z(object, 1);
+    translate_volume_in_plate_frame(object, 1, Vec3d(0., 0., -modifier_min));
+    CHECK_THAT(instances_lowest_z(object)[0], WithinAbs(0., 1e-6));
+    CHECK_THAT(volume_world_box(object, 1).min.z(), WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("A drop is refused for a volume with an instance, a one-volume object, a cut's part and a missing instance", "[PartEdits][orcamcp]")
+{
+    Model        model;
+    ModelObject& pair = two_part_object(model);
+    CHECK(mentions(drop_refusal(0, pair, 1, 0, {}), "not both"));
+    CHECK_FALSE(drop_refusal(0, pair, 1, std::nullopt, {}));
+    CHECK_FALSE(drop_refusal(0, pair, std::nullopt, 0, {}));
+    CHECK_FALSE(drop_refusal(0, pair, std::nullopt, std::nullopt, {}));
+    CHECK(drop_refusal(0, pair, std::nullopt, 3, {}).has_value());
+
+    ModelObject& one = one_part_object(model, its_make_cube(10., 10., 10.));
+    CHECK(mentions(drop_refusal(1, one, 0, std::nullopt, {}), "one volume"));
+    CHECK(mentions(drop_refusal(0, pair, 0, std::nullopt, {0, 5}), "cut"));
+}

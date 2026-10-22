@@ -223,6 +223,10 @@ json tool_examples()
             {"response_includes", "position, rotation_degrees, scale, on_bed, instance_placement, warnings"},
             {"tip", "Unspecified axes are preserved. Use on_bed to verify valid placement."}
         }},
+        {"drop_to_bed", {
+            {"example", R"({"object_id": 0})"},
+            {"when_to_use", "An object left floating or sunk: its lowest point to Z=0"}
+        }},
         {"rotate_object", {
             {"example", R"({"object_id": 0, "z": 90})"},
             {"when_to_use", "Orienting objects for better print quality or bed adhesion"},
@@ -423,7 +427,7 @@ json warnings_and_best_practices()
             {"description", "Many tools support include_preview=true to return a turntable preview image path alongside results."},
             {"supported_tools", {
                 "get_scene_info", "load_model", "load_project",
-                "move_object", "rotate_object", "scale_object", "mirror_object",
+                "move_object", "drop_to_bed", "rotate_object", "scale_object", "mirror_object",
                 "flatten_object", "clone_object", "delete_object", "cut_object",
                 "arrange_objects", "auto_orient", "undo", "redo",
                 "set_instance_count", "fill_bed_with_instances",

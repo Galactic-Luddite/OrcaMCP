@@ -163,6 +163,28 @@ enum class VolumeChange { move, reshape };
 // setting, shared by its instances); how far each instance went down (0 for one that stayed).
 std::vector<double> drop_after_volume_change(ModelObject& object, const std::vector<double>& lowest_before, VolumeChange change);
 
+// ---- drop_to_bed ----
+
+// Selection::can_drop: a lowest point off the bed by more than 0.001 mm (SINKING_Z_THRESHOLD), above or below.
+bool can_drop_to_bed(double lowest_z);
+
+// Selection::get_drop_min_z for `instances`: their lowest point, from the model parts (instance_min_z); 0 when
+// none has a part.
+double instances_drop_min_z(const ModelObject& object, const std::vector<std::size_t>& instances);
+
+// The same for volume `volume_idx` on instance 0: its own lowest point, a modifier's too.
+double volume_drop_min_z(const ModelObject& object, std::size_t volume_idx);
+
+// Why drop_to_bed cannot drop what it is asked, or nothing: volume_id with instance_id (a volume drops on
+// instance 0, as the volume transforms move it), then volume_transform_refusal for volume_id, then
+// instance_id_error for instance_id.
+std::optional<std::string> drop_refusal(int object_id, const ModelObject& object, std::optional<int> volume_id,
+                                        std::optional<int> instance_id, const std::vector<int>& cut_siblings);
+
+// Selection::drop then GLCanvas3D::do_move: `instances` moved by -min_z along Z, then every instance of the
+// object left floating dropped, unless its auto drop is off (drop_after_volume_change). Each instance's Z change.
+std::vector<double> drop_instances_to_bed(ModelObject& object, const std::vector<std::size_t>& instances, double min_z);
+
 // ---- Settings on objects and parts ----
 
 enum class SettingsHolder { object, part };

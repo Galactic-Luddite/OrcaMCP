@@ -3,6 +3,7 @@
 
 #include "OrcaMCPCommon.hpp"
 #include "OrcaMCPFilamentModel.hpp"
+#include "OrcaMCPInstanceEdits.hpp"
 #include "OrcaMCPNextSteps.hpp"
 #include "OrcaMCPPaintSelect.hpp"
 #include "OrcaMCPUiJob.hpp"
@@ -15,6 +16,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <set>
 
@@ -411,6 +413,53 @@ std::vector<double> drop_after_volume_change(ModelObject& object, const std::vec
     }
     object.invalidate_bounding_box();
     return dropped;
+}
+
+// ---- drop_to_bed ----
+
+bool can_drop_to_bed(double lowest_z)
+{
+    return std::abs(lowest_z) > -SINKING_Z_THRESHOLD;
+}
+
+double instances_drop_min_z(const ModelObject& object, const std::vector<std::size_t>& instances)
+{
+    double lowest = std::numeric_limits<double>::max();
+    for (std::size_t instance : instances)
+        lowest = std::min(lowest, instance_min_z(object, instance));
+    return lowest == std::numeric_limits<double>::max() ? 0. : lowest;
+}
+
+double volume_drop_min_z(const ModelObject& object, std::size_t volume_idx)
+{
+    return volume_world_box(object, volume_idx).min.z();
+}
+
+std::optional<std::string> drop_refusal(int object_id, const ModelObject& object, std::optional<int> volume_id,
+                                        std::optional<int> instance_id, const std::vector<int>& cut_siblings)
+{
+    if (volume_id && instance_id)
+        return std::string("give instance_id or volume_id, not both: a volume drops on instance 0, within the object");
+    if (volume_id)
+        return volume_transform_refusal(object_id, object, *volume_id, cut_siblings);
+    if (instance_id)
+        return instance_id_error(object_id, object, *instance_id);
+    return std::nullopt;
+}
+
+std::vector<double> drop_instances_to_bed(ModelObject& object, const std::vector<std::size_t>& instances, double min_z)
+{
+    std::vector<double> before;
+    for (const auto& instance : object.instances)
+        before.push_back(instance->get_offset().z());
+    for (std::size_t i : instances)
+        object.instances[i]->set_offset(object.instances[i]->get_offset() - Vec3d(0., 0., min_z));
+    object.invalidate_bounding_box();
+    drop_after_volume_change(object, {}, VolumeChange::move);
+    std::vector<double> changes;
+    for (std::size_t i = 0; i < object.instances.size(); ++i)
+        changes.push_back(object.instances[i]->get_offset().z() - before[i]);
+    return changes;
 }
 
 // ---- Settings on objects and parts ----
