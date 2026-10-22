@@ -5,6 +5,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "FlashforgeApi.hpp"
@@ -30,13 +31,26 @@ struct SliceTable
     std::vector<std::uint64_t> layer_start_bytes; // ascending; layer i (1-based i + 1) starts here
     std::vector<double>        layer_start_s;     // the slicer's seconds before layer i starts
     double                     total_s{0};        // the slicer's seconds for the whole file
+    // Time points inside layers: a layer's time is not spread evenly over its bytes (2026-10-22, an hour
+    // of ironing on one layer was 124 KB of a 6.6 MB file, and the work done read 2.5 h ahead within it).
+    // One wherever kMarkEvery_s of the slicer's time has passed since the last point, at a move's line.
+    // Bytes ascending; with the layer starts, every point's byte differs and time never goes back.
+    std::vector<std::uint64_t> mark_bytes;
+    std::vector<double>        mark_s;
 
     bool valid() const;
 };
 
+// How much of the slicer's time may pass between two time points of a table.
+constexpr double kMarkEvery_s = 30.0;
+
+// The table's time points, layer starts and marks together, in file order: (byte, seconds before it).
+std::vector<std::pair<std::uint64_t, double>> time_points(const SliceTable& table);
+
 // The table of a sliced plate, from its G-code processor result: each layer's first move, its line's
-// byte offset in the file (`lines_ends`) and the move times before it (normal mode). Empty (not valid)
-// when the result has no layers or no line offsets.
+// byte offset in the file (`lines_ends`) and the move times before it (normal mode), and a mark at the
+// first move after every kMarkEvery_s since the last point. Empty (not valid) when the result has no
+// layers or no line offsets.
 SliceTable slice_table(const GCodeProcessorResult& result);
 
 // The table travels with an upload in its extended info, under this key, as JSON.

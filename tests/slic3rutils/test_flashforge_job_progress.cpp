@@ -64,6 +64,45 @@ TEST_CASE("A slice table is read off a slice: each layer's first line and the ti
     CHECK_THAT(table.total_s, Catch::Matchers::WithinAbs(10.5, 1e-9));
 }
 
+TEST_CASE("A layer that takes long gets time points inside it", "[flashforge][FlashforgeJobProgress]")
+{
+    GCodeProcessorResult result;
+    result.lines_ends = {10, 20, 30, 40, 50, 60, 70};
+    // Layer 1 from line 2: 10 s, then three 25 s moves (an hour of ironing, scaled down); layer 2 from line 7.
+    result.moves = {move(2, 0, 10.0f), move(3, 0, 25.0f), move(4, 0, 25.0f), move(5, 0, 25.0f), move(0, 0, 1.0f),
+                    move(6, 0, 1.0f), move(7, 1, 2.0f)};
+
+    const SliceTable table = slice_table(result);
+    REQUIRE(table.valid());
+    CHECK(table.layer_start_bytes == std::vector<std::uint64_t>{10, 60});
+    CHECK(table.layer_start_s == std::vector<double>{0.0, 87.0});
+    // A point at the first move with a line once 30 s have passed since the last point: at line 4 (35 s);
+    // not at line 5 (60 s, 25 s on), nor on the move with no line, but at line 6 (86 s).
+    CHECK(table.mark_bytes == std::vector<std::uint64_t>{30, 50});
+    CHECK(table.mark_s == std::vector<double>{35.0, 86.0});
+}
+
+TEST_CASE("The work done inside a layer follows its time points", "[flashforge][FlashforgeJobProgress]")
+{
+    // three_layers' layer 2 runs from byte 200 (70 s) to 600 (80 s). Its first 40 bytes take 9 of its 10 s.
+    SliceTable table   = three_layers();
+    table.mark_bytes   = {240};
+    table.mark_s       = {79};
+    REQUIRE(table.valid());
+    CHECK_THAT(read(table, 0.22).time_fraction, Catch::Matchers::WithinAbs(0.745, 1e-9)); // halfway to the mark
+    CHECK_THAT(read(table, 0.42).time_fraction, Catch::Matchers::WithinAbs(0.795, 1e-9)); // halfway from it to layer 3
+    CHECK(read(table, 0.42).layer == 2); // a time point is no layer
+    CHECK(read(table, 0.42).layers == 3);
+
+    // A point that sits on a layer start, goes back in time or past the end voids the table.
+    table.mark_bytes = {200};
+    CHECK_FALSE(table.valid());
+    table.mark_bytes = {240}, table.mark_s = {60};
+    CHECK_FALSE(table.valid());
+    table.mark_bytes = {1200}, table.mark_s = {90};
+    CHECK_FALSE(table.valid());
+}
+
 TEST_CASE("A slice with no lines or no moves gives no table", "[flashforge][FlashforgeJobProgress]")
 {
     GCodeProcessorResult empty;
@@ -170,6 +209,23 @@ TEST_CASE("A slice table travels with an upload as JSON and comes back the same"
     CHECK_FALSE(from_json(R"({"bytes":1000,"total_s":100,"layers":[[600,80],[200,70]]})").has_value()); // not ascending
     CHECK_FALSE(from_json(R"({"bytes":100,"total_s":100,"layers":[[200,70]]})").has_value());            // past the end
     CHECK_FALSE(from_json(R"({"bytes":1000,"total_s":100,"layers":[["a",70]]})").has_value());
+
+    // Time points travel as "marks", only when there are any.
+    SliceTable marked = three_layers();
+    marked.mark_bytes = {240}, marked.mark_s = {79.04};
+    CHECK(to_json(marked) == R"({"bytes":1000,"layers":[[100,10.0],[200,70.0],[600,80.0]],"marks":[[240,79.0]],"total_s":100.0})");
+    const auto marked_back = from_json(to_json(marked));
+    REQUIRE(marked_back.has_value());
+    CHECK(marked_back->mark_bytes == std::vector<std::uint64_t>{240});
+    CHECK_FALSE(from_json(R"({"bytes":1000,"total_s":100,"layers":[[100,10]],"marks":[[50,5]]})").has_value()); // before layer 1
+    CHECK_FALSE(from_json(R"({"bytes":1000,"total_s":100,"layers":[[100,10]],"marks":{}})").has_value());
+
+    // Rounded to tenths, a point never passes the total.
+    SliceTable late = three_layers();
+    late.total_s     = 80.04;
+    late.mark_bytes  = {900}, late.mark_s = {80.04};
+    REQUIRE(late.valid());
+    CHECK(from_json(to_json(late)).has_value());
 }
 
 TEST_CASE("An upload's table is kept only when it describes the file sent", "[flashforge][FlashforgeJobProgress]")
