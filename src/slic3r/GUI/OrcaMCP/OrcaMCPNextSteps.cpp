@@ -301,9 +301,12 @@ std::vector<NextStep> bake_next_steps(int object_id, bool needs_bake)
              {{"object_id", object_id}}}};
 }
 
-std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added)
+std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added, std::optional<int> plate_index)
 {
-    std::vector<NextStep> steps = {{"slice_all", "object " + std::to_string(object_id) + "'s mesh changed, so every plate lost its slice: slice_all slices again, with the relief in the G-code", nullptr}};
+    const std::string lost = slots_added > 0 ? "object " + std::to_string(object_id) + "'s mesh changed and mixed filament slots were added, so every plate lost its slice" :
+                             plate_index     ? "object " + std::to_string(object_id) + "'s mesh changed, so plate " + std::to_string(*plate_index) + " lost its slice" :
+                                               "object " + std::to_string(object_id) + "'s mesh changed, so its plate lost its slice";
+    std::vector<NextStep> steps = {{"slice_all", lost + ": slice_all slices again, with the relief in the G-code", nullptr}};
     if (slots_added > 0)
         steps.push_back({"get_filaments",
                          "the bake added " + std::to_string(slots_added) + " mixed filament slot" + (slots_added == 1 ? "" : "s") + ": get_filaments lists them",

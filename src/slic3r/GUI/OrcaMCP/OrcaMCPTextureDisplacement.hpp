@@ -459,8 +459,17 @@ float default_subdivide_edge_mm(const indexed_triangle_set&);
 // The stored options with a smooth's strength, passes and ignore_outer_ring applied.
 TextureDisplacementOptions smooth_options(const TextureDisplacementOptions& stored, const SmoothRequest&);
 // A uniform subdivision of `facets` triangles by `steps` is refused above this many triangles (each step quadruples).
-constexpr std::size_t UNIFORM_SUBDIVISION_MAX_FACETS = 4000000;
+// The limit is low because the paint of the four standard channels is remapped onto the new triangles on the app's main
+// thread (the panel's Subdivide does the same), which takes seconds per million.
+constexpr std::size_t UNIFORM_SUBDIVISION_MAX_FACETS = 1000000;
 std::optional<std::string> uniform_subdivision_refusal(std::size_t facets, int steps);
+// A smooth of a part of more than this many triangles is refused: it runs on the main thread (the vertices to relax come
+// from the live volume), where the app cannot be held for long.
+constexpr std::size_t SMOOTH_MAX_FACETS = 1000000;
+std::optional<std::string> smooth_refusal(std::size_t facets);
+// {setting: why} for the bake's arguments the pipeline does not use: classic_budget_k on the default pipeline,
+// resolution_mm and budget_k on the classic one. Stored or reported, never applied.
+nlohmann::json bake_inactive_settings(const BakeRequest&, bool classic);
 
 // The words of the bake's and the preparation's answers, one place.
 std::string bake_nothing_painted_message(int object_id);

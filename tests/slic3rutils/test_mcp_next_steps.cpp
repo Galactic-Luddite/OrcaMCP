@@ -360,15 +360,18 @@ TEST_CASE("Painted texture layers point at baking them, after the layer still to
 
 TEST_CASE("A bake points at slicing, at the mixed slots it added and at paint it left", "[McpNextSteps][orcamcp]")
 {
-    const std::vector<NextStep> plain = baked_texture_next_steps(1, false, 0);
+    const std::vector<NextStep> plain = baked_texture_next_steps(1, false, 0, 2);
     REQUIRE(plain.size() == 1);
     CHECK(plain[0].tool == "slice_all");
+    CHECK(mentions(plain[0].why, "plate 2 lost its slice"));
+    CHECK(baked_texture_next_steps(1, false, 0, std::nullopt)[0].why.find("its plate lost") != std::string::npos);
     CHECK(unusable(plain[0]) == std::nullopt);
 
-    const std::vector<NextStep> all = baked_texture_next_steps(1, true, 2);
+    const std::vector<NextStep> all = baked_texture_next_steps(1, true, 2, 2);
     REQUIRE(all.size() == 3);
     CHECK(all[1].tool == "get_filaments");
     CHECK(mentions(all[1].why, "2 mixed filament slots"));
+    CHECK(mentions(all[0].why, "every plate lost its slice"));
     CHECK(all[2].tool == "bake_texture_displacement");
     for (const NextStep& step : all)
         CHECK(unusable(step) == std::nullopt);
@@ -567,7 +570,7 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
         steps.push_back(std::move(step));
     for (NextStep& step : texture_paint_next_steps(0, 1, false, true))
         steps.push_back(std::move(step));
-    for (NextStep& step : baked_texture_next_steps(0, true, 1))
+    for (NextStep& step : baked_texture_next_steps(0, true, 1, std::nullopt))
         steps.push_back(std::move(step));
     for (NextStep& step : new_volume_next_steps(0, 1, "modifier", true))
         steps.push_back(std::move(step));

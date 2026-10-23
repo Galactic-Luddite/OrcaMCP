@@ -8,6 +8,7 @@
 #include "OrcaMCPServer.hpp"
 #include "OrcaMCPCommon.hpp"
 #include "OrcaMCPNextSteps.hpp"
+#include "OrcaMCPMeshRepair.hpp"
 #include "OrcaMCPPartEdits.hpp"
 #include "OrcaMCPPartTools.hpp"
 #include "OrcaMCPSliceProgress.hpp"
@@ -76,9 +77,21 @@ const ModelVolume* volume_by_id(const ModelObject& object, const ObjectID& id)
     return index < 0 ? nullptr : object.volumes[std::size_t(index)];
 }
 
-bool object_still_in_model(const Slic3r::Model& model, const ModelObject* object)
+// The captured object's index now (an object deleted meanwhile may have moved it); false when it is gone.
+template<class Run> bool rebind_object(Plater& plater, Run& run)
 {
-    return std::find(model.objects.begin(), model.objects.end(), object) != model.objects.end();
+    const Slic3r::ModelObjectPtrs& objects = plater.model().objects;
+    const auto                     it      = std::find(objects.begin(), objects.end(), run.object);
+    if (it == objects.end())
+        return false;
+    run.object_id = int(it - objects.begin());
+    return true;
+}
+
+// A plan that ended past the call's wait, or an apply that comes later than the reserve past it, is not applied.
+bool past_apply_window(Clock::time_point deadline)
+{
+    return Clock::now() > deadline + batch_apply_reserve;
 }
 
 // What the object list and the plates are owed after a mesh changed under `object`.
@@ -102,6 +115,21 @@ std::optional<nlohmann::json> close_tool_before(Plater& plater, int object_id, s
     return close_toolbar_tool_for_change(plater, object_id, volumes, closed_tool);
 }
 
+// Paint an open toolbar tool (the texture panel) has not written into the model yet: when no part is painted and a tool is
+// open, closes it (its own undo step, `closed_tool` names it) and looks again. Null to go on, else the error answer.
+std::optional<nlohmann::json> close_when_unpainted(Plater& plater, ModelObject& object, int object_id, std::string& closed_tool,
+                                                   const std::string& nothing_painted)
+{
+    if (!Slic3r::GUI::painted_texture_parts(object).empty())
+        return std::nullopt;
+    if (toolbar_tool_open(plater))
+        if (const auto failed = close_tool_before(plater, object_id, object.volumes.size(), closed_tool))
+            return failed;
+    if (Slic3r::GUI::painted_texture_parts(object).empty())
+        return with_closed_tool(error_response(nothing_painted), closed_tool);
+    return std::nullopt;
+}
+
 // The undo step's name in the app's language (the strings the panel's own steps use).
 std::string translated_snapshot_name(const PrepareRequest& request)
 {
@@ -115,29 +143,20 @@ std::string translated_snapshot_name(const PrepareRequest& request)
 
 // ---- bake_texture_displacement ----
 
-// The geometry of one model part, for the resting plane a classic bake recomputes from the prepared meshes.
-struct PartGeometry
-{
-    ObjectID                    id;
-    Transform3d                 to_world = Transform3d::Identity();
-    indexed_triangle_set its; // empty for a painted part: its mesh is in the bake input
-    std::size_t                 painted_index = std::size_t(-1); // the part's place among the bake's volumes
-};
-
 // A bake_texture_displacement call, as its capture leaves it for the plan and the apply.
 struct BakeRun
 {
     BakeRequest                        request;
-    int                                object_id = -1;
+    int                                object_id = -1; // the object's index when captured; finish finds it again
     const ModelObject*                 object    = nullptr;
     Slic3r::TextureDisplacementOptions stored, used; // the stack's options now, and with the call applied
     TextureDisplacementBakeInput       captured;     // the model as it was: what applies_to compares with
-    TextureDisplacementBakeInput       work;         // what the bake runs on: the used options; classic: the prepared meshes
-    TextureDisplacementPrepareInput    prepare;      // classic: the preparation that comes first
-    std::vector<PartGeometry>          geometry;     // classic: every model part
+    TextureDisplacementBakeInput       work;         // what the bake runs on: the captured input with the used options
+    TextureDisplacementPrepareInput    prepare;      // classic, first phase: the preparation that comes first
     std::vector<int>                   volume_ids;   // the painted parts' place in the object
     std::vector<std::string>           names;
     std::vector<std::size_t>           facets_before;
+    Clock::time_point                  deadline;
     bool                               classic() const { return !used.pipeline_v2; }
 };
 
@@ -150,24 +169,10 @@ struct BakePlanned
     bool                           paint_lost = false;
 };
 
-void capture_geometry(const ModelObject& object, BakeRun& run)
-{
-    for (ModelVolume* part : Slic3r::GUI::texture_parts(const_cast<ModelObject&>(object))) {
-        PartGeometry geometry;
-        geometry.id       = part->id();
-        geometry.to_world = Slic3r::texture_displacement_volume_to_world(*part);
-        const auto painted = std::find_if(run.captured.volumes.begin(), run.captured.volumes.end(),
-                                          [&](const TextureDisplacementBakeVolume& v) { return v.volume_id == geometry.id; });
-        if (painted != run.captured.volumes.end())
-            geometry.painted_index = std::size_t(painted - run.captured.volumes.begin());
-        else
-            geometry.its = part->mesh().its;
-        run.geometry.push_back(std::move(geometry));
-    }
-}
-
 // Main thread, the first step: the call checked and what the bake reads captured. Null to go on, else the answer.
-nlohmann::json capture_bake(const nlohmann::json& params, BakeRun& run)
+// A classic bake runs in two phases, as the panel's Standard Bake does: the preparation (`bake_phase` false) is
+// planned and applied first, then the bake reads the model as the preparation left it (`bake_phase` true).
+nlohmann::json capture_bake(const nlohmann::json& params, BakeRun& run, bool bake_phase, std::string& closed_tool)
 {
     Plater*     plater = wxGetApp().plater();
     std::string error;
@@ -184,8 +189,9 @@ nlohmann::json capture_bake(const nlohmann::json& params, BakeRun& run)
     if (!has_image)
         return error_response("Object " + std::to_string(run.object_id) + " has no texture layer with an image, so there is nothing to bake: "
                               "set_texture_displacement adds a layer");
-    if (Slic3r::GUI::painted_texture_parts(*object).empty())
-        return error_response(bake_nothing_painted_message(run.object_id));
+    // Paint an open panel has not written into the model yet: close it, then look again.
+    if (const auto failed = close_when_unpainted(*plater, *object, run.object_id, closed_tool, bake_nothing_painted_message(run.object_id)))
+        return *failed;
 
     run.object = object;
     run.stored = owner->texture_displacement_options;
@@ -195,75 +201,47 @@ nlohmann::json capture_bake(const nlohmann::json& params, BakeRun& run)
     const Slic3r::TextureColorSettings color = Slic3r::GUI::GLGizmoTextureDisplacement::color_settings(
         owner->texture_displacement_layers, run.used,
         Slic3r::GUI::GLGizmoTextureDisplacement::palette_inputs(run.used, bundle, plater->get_extruders_colors()), bundle.project_config);
-    run.captured = capture_texture_bake(*object, color, /*take_snapshot=*/false);
-    if (run.captured.volumes.empty())
+    TextureDisplacementBakeInput captured = capture_texture_bake(*object, color, /*take_snapshot=*/false);
+    if (captured.volumes.empty())
         return error_response(bake_nothing_painted_message(run.object_id));
-    run.work = run.captured;
-    for (TextureDisplacementBakeVolume& volume : run.work.volumes)
-        volume.options = run.used;
-
-    for (const TextureDisplacementBakeVolume& volume : run.captured.volumes) {
+    run.volume_ids.clear();
+    run.names.clear();
+    run.facets_before.clear();
+    for (const TextureDisplacementBakeVolume& volume : captured.volumes) {
         const int index = volume_index_of(*object, volume.volume_id);
         run.volume_ids.push_back(index);
         run.names.push_back(index >= 0 ? object->volumes[std::size_t(index)]->name : std::string());
         run.facets_before.push_back(volume.base_mesh.indices.size());
     }
-    if (run.classic()) {
-        // The classic bake prepares the mesh first (remesh, adaptive subdivision, step cut), as the panel's Standard Bake does.
+    if (run.classic() && !bake_phase) {
+        // The preparation first (remesh, adaptive subdivision, step cut). Only it is planned now: the bake is captured
+        // afterwards, from the model as the preparation leaves it (it re-homes the object on the bed).
         run.prepare = capture_texture_prepare(*object, Slic3r::GUI::GLGizmoTextureDisplacement::standard_prepare_params(classic_bake_budget_k(run.request)),
                                               TexturePrepareScope::PaintedParts, color, std::string());
-        capture_geometry(*object, run);
+        return nullptr;
     }
+    run.captured = std::move(captured);
+    run.work     = run.captured;
+    for (TextureDisplacementBakeVolume& volume : run.work.volumes)
+        volume.options = run.used;
     return nullptr;
 }
 
-// The bake input after a classic preparation: the prepared meshes, masks and UV channels, and the resting plane
-// measured on them.
-void rebuild_work_after_prepare(BakeRun& run, const TextureDisplacementPreparePlan& prepared)
-{
-    for (std::size_t i = 0; i < run.work.volumes.size(); ++i) {
-        const Slic3r::TextureDisplacementPrepareResult& result = prepared.results[i];
-        if (result.mesh.indices.empty())
-            continue;
-        run.work.volumes[i].base_mesh   = result.mesh;
-        run.work.volumes[i].facets_data = result.masks;
-        run.work.volumes[i].model_uv    = result.uv;
-    }
-    std::vector<std::pair<const indexed_triangle_set*, Transform3d>> measured;
-    std::vector<std::size_t>                                                 painted;
-    for (std::size_t j = 0; j < run.geometry.size(); ++j) {
-        const PartGeometry& part = run.geometry[j];
-        measured.emplace_back(part.painted_index == std::size_t(-1) ? &part.its : &run.work.volumes[part.painted_index].base_mesh, part.to_world);
-        if (part.painted_index != std::size_t(-1))
-            painted.push_back(j);
-    }
-    const std::vector<float> drops = Slic3r::GUI::resting_drops(measured, painted);
-    for (std::size_t i = 0; i < painted.size(); ++i)
-        run.work.volumes[run.geometry[painted[i]].painted_index].resting_drop = drops[i];
-}
-
-// HTTP thread: the displacement of every part, from copies only. Classic: the preparation first.
-BakePlanned plan_bake(BakeRun& run, const std::function<bool()>& stop)
+// HTTP thread: the preparation of a classic bake, or the displacement of every part, from copies only.
+BakePlanned plan_bake(BakeRun& run, bool bake_phase, const std::function<bool()>& stop)
 {
     BakePlanned planned;
     const auto  progress = [&stop](int) { return !stop(); };
-    if (!run.classic()) {
+    if (run.classic() && !bake_phase) {
+        planned.prepare = plan_texture_prepare(run.prepare, progress);
+        planned.timed_out = planned.prepare.canceled;
+        for (const Slic3r::TextureDisplacementPrepareResult& result : planned.prepare.results)
+            planned.paint_lost |= result.paint_lost;
+    } else {
         planned.bake      = plan_texture_bake(run.work, progress);
         planned.timed_out = planned.bake.canceled;
-        return planned;
     }
-    planned.prepare = plan_texture_prepare(run.prepare, progress);
-    if (planned.prepare.canceled) {
-        planned.timed_out = true;
-        return planned;
-    }
-    for (const Slic3r::TextureDisplacementPrepareResult& result : planned.prepare.results)
-        planned.paint_lost |= result.paint_lost;
-    if (planned.paint_lost)
-        return planned;
-    rebuild_work_after_prepare(run, planned.prepare);
-    planned.bake      = plan_texture_bake(run.work, progress);
-    planned.timed_out = planned.bake.canceled;
+    planned.timed_out |= Clock::now() > run.deadline;
     return planned;
 }
 
@@ -276,28 +254,89 @@ std::vector<std::size_t> parts_to_commit(const BakeRun& run, const BakePlanned& 
     return out;
 }
 
-// Main thread: the plan applied when the object is still as captured, under one undo step. `may_close` lets an open
-// toolbar tool close first (only now that the call changes something); closing flushes its paint into the model, so when
-// that changed what was planned `replan` is set and nothing is applied.
-nlohmann::json finish_bake(BakeRun& run, BakePlanned& planned, double wait_s, bool may_close, std::string& closed_tool, bool& replan)
+// What both phases check first on the main thread. Null to go on, else the answer (closed_tool carried by the caller).
+std::optional<nlohmann::json> bake_apply_refusal(BakeRun& run, bool timed_out, double wait_s)
+{
+    Plater* plater = wxGetApp().plater();
+    if (timed_out || past_apply_window(run.deadline)) {
+        nlohmann::json answer = error_response(bake_timed_out_message(wait_s, run.classic()));
+        answer["timed_out"]   = true;
+        return answer;
+    }
+    if (const auto refusal = texture_job_refusal(*plater, "bake_texture_displacement"))
+        return error_response(*refusal);
+    if (!rebind_object(*plater, run))
+        return error_response("Object " + std::to_string(run.object_id) + " was deleted in the app during the bake, so nothing was changed");
+    return std::nullopt;
+}
+
+std::string bake_changed_meanwhile(const BakeRun& run)
+{
+    return "Object " + std::to_string(run.object_id) + " changed in the app during the bake, so nothing was changed: call bake_texture_displacement again";
+}
+
+// Main thread, a classic bake's first phase: the preparation applied when the object is still as captured. The undo step
+// of the whole bake opens here (the bake that follows commits into it, as the panel's does). `proceed` is set when the
+// bake may follow; `applied` says the preparation changed the model. Otherwise the answer; `replan` asks for a new plan.
+nlohmann::json finish_bake_prepare(BakeRun& run, BakePlanned& planned, double wait_s, bool may_close, std::string& closed_tool, bool& replan,
+                                   bool& proceed, bool& applied)
 {
     Plater*                   plater = wxGetApp().plater();
     McpDialogSuppressionGuard guard;
     const auto                finish = [&](nlohmann::json result) { return guard.report(with_closed_tool(std::move(result), closed_tool)); };
-
-    if (planned.timed_out) {
-        nlohmann::json answer = error_response(bake_timed_out_message(wait_s, run.classic()));
-        answer["timed_out"]   = true;
-        return finish(std::move(answer));
-    }
-    if (const auto refusal = texture_job_refusal(*plater, "bake_texture_displacement"))
-        return finish(error_response(*refusal));
-    const std::string meanwhile = "Object " + std::to_string(run.object_id) + " changed in the app during the bake, so nothing was changed: call "
-                                  "bake_texture_displacement again";
-    if (!object_still_in_model(plater->model(), run.object) || !texture_bake_applies_to(plater->model(), run.captured))
-        return finish(error_response(meanwhile));
+    if (const auto refusal = bake_apply_refusal(run, planned.timed_out, wait_s))
+        return finish(*refusal);
+    ModelObject& object = *const_cast<ModelObject*>(run.object);
+    if (!texture_prepare_applies_to(object, run.prepare, TexturePrepareScope::PaintedParts))
+        return finish(error_response(bake_changed_meanwhile(run)));
     if (planned.paint_lost)
         return finish(error_response(prepare_paint_lost_message()));
+    const bool any = std::any_of(planned.prepare.results.begin(), planned.prepare.results.end(),
+                                 [](const Slic3r::TextureDisplacementPrepareResult& r) { return !r.mesh.indices.empty(); });
+    if (!any) {
+        proceed = true; // the mesh is fine as it is: the bake alone
+        return nlohmann::json();
+    }
+    if (may_close) {
+        if (const auto failed = close_tool_before(*plater, run.object_id, object.volumes.size(), closed_tool))
+            return guard.report(with_closed_tool(*failed, closed_tool));
+        if (!closed_tool.empty() && !texture_prepare_applies_to(object, run.prepare, TexturePrepareScope::PaintedParts)) {
+            replan = true;
+            return nlohmann::json();
+        }
+    }
+    plater->take_snapshot(_u8L("Bake texture displacement"));
+    // The options the bake uses are the stack's from now on, as the panel's controls leave them.
+    Slic3r::GUI::texture_stack_owner(object)->texture_displacement_options = run.used;
+    const TextureDisplacementPrepareApplied result = apply_texture_prepare(*plater, run.prepare, planned.prepare);
+    if (result.outcome != TextureDisplacementPrepareOutcome::Committed)
+        return finish(error_response("The app did not apply the preparation, so nothing was changed"));
+    applied = proceed = true;
+    return nlohmann::json();
+}
+
+// Main thread: the bake applied when the object is still as captured, under one undo step (the one a classic bake's
+// preparation opened, `snapshot_taken`, else its own). `may_close` lets an open toolbar tool close first (only now that the
+// call changes something); closing flushes its paint into the model, so when that changed what was planned `replan` is set
+// and nothing is applied.
+nlohmann::json finish_bake(BakeRun& run, BakePlanned& planned, double wait_s, bool may_close, std::string& closed_tool, bool& replan,
+                           bool snapshot_taken)
+{
+    Plater*                   plater = wxGetApp().plater();
+    McpDialogSuppressionGuard guard;
+    const auto                finish = [&](nlohmann::json result) {
+        if (snapshot_taken && result.value("status", "") == "error") {
+            // The classic preparation was applied by the first phase: say what is still true.
+            result["preparation_applied"] = true;
+            result["message"]             = result.value("message", std::string()) +
+                                            " The classic preparation (remesh and refinement) was already applied; undo reverts it.";
+        }
+        return guard.report(with_closed_tool(std::move(result), closed_tool));
+    };
+    if (const auto refusal = bake_apply_refusal(run, planned.timed_out, wait_s))
+        return finish(*refusal);
+    if (!texture_bake_applies_to(plater->model(), run.captured))
+        return finish(error_response(bake_changed_meanwhile(run)));
 
     std::vector<std::size_t> commit = parts_to_commit(run, planned);
     if (commit.empty()) {
@@ -321,25 +360,22 @@ nlohmann::json finish_bake(BakeRun& run, BakePlanned& planned, double wait_s, bo
         colored[i] = !planned.bake.results[i].triangle_color.empty();
 
     TextureBakeOutcome outcome;
-    {
-        // One undo step for the options, the classic preparation and the bake.
+    if (snapshot_taken) {
+        outcome = apply_texture_bake(*plater, run.work, planned.bake);
+    } else {
         Plater::TakeSnapshot snapshot(plater, _u8L("Bake texture displacement"));
         // The options the bake used are the stack's from now on, as the panel's controls leave them.
         Slic3r::GUI::texture_stack_owner(object)->texture_displacement_options = run.used;
-        if (run.classic()) {
-            // The preparation names no undo step (capture_bake passed none) and gives each part it changed a new id, which the bake names.
-            const TextureDisplacementPrepareApplied applied = apply_texture_prepare(*plater, run.prepare, planned.prepare);
-            std::size_t next = 0;
-            for (std::size_t i = 0; i < planned.prepare.results.size(); ++i)
-                if (!planned.prepare.results[i].mesh.indices.empty() && next < applied.committed.size())
-                    run.work.volumes[i].volume_id = applied.committed[next++];
-        }
         outcome = apply_texture_bake(*plater, run.work, planned.bake);
     }
 
-    // The answer.
-    nlohmann::json answer = {{"status", "success"}, {"changed", !outcome.committed.empty()}, {"object_id", run.object_id},
-                             {"pipeline", run.used.pipeline_v2 ? "default" : "classic"}, {"options", stack_options_json(run.used)}};
+    // The answer, from what the bake committed.
+    const bool changed = !outcome.committed.empty();
+    nlohmann::json answer = {{"status", "success"}, {"object_id", run.object_id}, {"pipeline", run.used.pipeline_v2 ? "default" : "classic"},
+                             {"options", stack_options_json(run.used)}};
+    const nlohmann::json inactive = bake_inactive_settings(run.request, run.classic());
+    if (!inactive.empty())
+        answer["inactive_settings"] = inactive;
     nlohmann::json parts = nlohmann::json::array(), unmoved = nlohmann::json::array();
     std::size_t    committed_next = 0;
     for (std::size_t i = 0; i < run.work.volumes.size(); ++i) {
@@ -348,13 +384,14 @@ nlohmann::json finish_bake(BakeRun& run, BakePlanned& planned, double wait_s, bo
         report.name          = run.names[i];
         report.facets_before = run.facets_before[i];
         report.facets_after  = run.work.volumes[i].base_mesh.indices.size();
-        report.baked         = std::find(commit.begin(), commit.end(), i) != commit.end();
-        report.colored       = report.baked && colored[i];
-        if (report.baked && committed_next < outcome.committed.size()) {
+        const bool moved     = std::find(commit.begin(), commit.end(), i) != commit.end();
+        if (moved && committed_next < outcome.committed.size()) {
+            report.baked   = true;
+            report.colored = colored[i];
             if (const ModelVolume* volume = volume_by_id(object, outcome.committed[committed_next]))
                 report.facets_after = volume->mesh().its.indices.size();
             ++committed_next;
-        } else if (!report.baked) {
+        } else {
             unmoved.push_back(report.volume_id);
         }
         parts.push_back(bake_part_json(report));
@@ -371,10 +408,37 @@ nlohmann::json finish_bake(BakeRun& run, BakePlanned& planned, double wait_s, bo
     const bool needs_bake = needs_bake_fast(object, Slic3r::GUI::texture_stack_owner(object));
     answer["needs_bake"]  = needs_bake;
     rehome_and_report_placement(answer, run.object_id, /*moved=*/true);
+    answer["changed"]         = changed; // what the bake committed, not the re-homing's flag
     answer["active_warnings"] = get_active_warnings_json(plater);
-    add_next_steps(answer, baked_texture_next_steps(run.object_id, needs_bake, slots_added));
+    add_next_steps(answer, baked_texture_next_steps(run.object_id, needs_bake, slots_added, answer.contains("plate_index") && answer["plate_index"].is_number_integer() ?
+                                                                                                std::optional<int>(answer["plate_index"].get<int>()) : std::nullopt));
     add_turntable_preview_if_requested(answer, run.request.include_preview);
     return finish(std::move(answer));
+}
+
+// A classic bake's bake phase: capture again after the preparation, plan, apply. Up to two rounds, the second only when
+// closing an open toolbar tool changed what the first read.
+nlohmann::json bake_after_prepare(const nlohmann::json& params, const BakeRequest& request, Clock::time_point deadline, double wait_s,
+                                  std::string& closed_tool, bool snapshot_taken, const std::vector<std::size_t>& facets_before)
+{
+    for (int round = 0; round < 2; ++round) {
+        BakeRun run;
+        run.request  = request;
+        run.deadline = deadline;
+        const nlohmann::json refusal = run_on_main_thread([&]() { return capture_bake(params, run, /*bake_phase=*/true, closed_tool); });
+        if (!refusal.is_null())
+            return with_closed_tool(refusal, closed_tool);
+        if (facets_before.size() == run.facets_before.size())
+            run.facets_before = facets_before; // before the preparation
+        BakePlanned planned = plan_bake(run, /*bake_phase=*/true, stop_at(deadline));
+        bool        replan  = false;
+        nlohmann::json answer = run_on_main_thread([&]() {
+            return finish_bake(run, planned, wait_s, /*may_close=*/round == 0, closed_tool, replan, snapshot_taken);
+        });
+        if (!replan)
+            return answer;
+    }
+    return error_response("The model changed twice while the bake was planned, so nothing more was changed: call bake_texture_displacement again");
 }
 
 nlohmann::json bake_texture_displacement(const nlohmann::json& params)
@@ -391,17 +455,29 @@ nlohmann::json bake_texture_displacement(const nlohmann::json& params)
 
     for (int round = 0; round < 2; ++round) {
         BakeRun run;
-        run.request = *request;
-        const nlohmann::json refusal = run_on_main_thread([&]() { return capture_bake(params, run); });
+        run.request  = *request;
+        run.deadline = deadline;
+        const nlohmann::json refusal = run_on_main_thread([&]() { return capture_bake(params, run, /*bake_phase=*/false, closed_tool); });
         if (!refusal.is_null())
             return with_closed_tool(refusal, closed_tool);
 
-        BakePlanned planned = plan_bake(run, stop_at(deadline));
+        BakePlanned planned = plan_bake(run, /*bake_phase=*/false, stop_at(deadline));
         bool        replan  = false;
-        nlohmann::json answer = run_on_main_thread([&]() { return finish_bake(run, planned, wait_s, /*may_close=*/round == 0, closed_tool, replan); });
-        if (!replan)
+        if (!run.classic()) {
+            nlohmann::json answer = run_on_main_thread([&]() { return finish_bake(run, planned, wait_s, /*may_close=*/round == 0, closed_tool, replan, false); });
+            if (!replan)
+                return answer;
+            continue;
+        }
+        bool proceed = false, applied = false;
+        nlohmann::json answer = run_on_main_thread([&]() {
+            return finish_bake_prepare(run, planned, wait_s, /*may_close=*/round == 0, closed_tool, replan, proceed, applied);
+        });
+        if (replan)
+            continue;
+        if (!proceed)
             return answer;
-        // The panel was open, and closing it flushed paint the plan did not read: plan once more on the model as it is now.
+        return bake_after_prepare(params, *request, deadline, wait_s, closed_tool, applied, run.facets_before);
     }
     return error_response("The model changed twice while the bake was planned, so nothing was changed: call bake_texture_displacement again");
 }
@@ -430,9 +506,10 @@ struct PrepareRun
     std::vector<std::string>        names;
     std::vector<std::size_t>        facets_before;
     bool                            had_texture_paint = false;
+    Clock::time_point               deadline;
 };
 
-nlohmann::json capture_prepare(const nlohmann::json& params, PrepareRun& run)
+nlohmann::json capture_prepare(const nlohmann::json& params, PrepareRun& run, std::string& closed_tool)
 {
     Plater*      plater = wxGetApp().plater();
     std::string  error;
@@ -444,14 +521,15 @@ nlohmann::json capture_prepare(const nlohmann::json& params, PrepareRun& run)
     const ModelVolume* owner = Slic3r::GUI::texture_stack_owner(*object);
     if (owner == nullptr)
         return error_response("Object " + std::to_string(run.object_id) + " has no model part");
-    run.object            = object;
-    run.had_texture_paint = needs_bake_fast(*object, owner);
+    run.object = object;
 
     const PrepareRequest& request = run.request;
-    if (request.operation == PrepareOperation::subdivide && request.adaptive.value_or(true) &&
-        Slic3r::GUI::painted_texture_parts(*object).empty())
-        return error_response("Object " + std::to_string(run.object_id) + " has no texture paint, and adaptive subdivision only refines where it is "
-                              "painted: paint_object mode texture paints a layer (adaptive: false subdivides every part)");
+    if (request.operation == PrepareOperation::subdivide && request.adaptive.value_or(true))
+        if (const auto failed = close_when_unpainted(*plater, *object, run.object_id, closed_tool,
+                                                     "Object " + std::to_string(run.object_id) + " has no texture paint, and adaptive subdivision only refines where it is "
+                                                     "painted: paint_object mode texture paints a layer (adaptive: false subdivides every part)"))
+            return *failed;
+    run.had_texture_paint = needs_bake_fast(*object, owner);
 
     const Slic3r::PresetBundle& bundle = *wxGetApp().preset_bundle;
     const auto color_for = [&](const Slic3r::TextureDisplacementOptions& options) {
@@ -542,12 +620,31 @@ nlohmann::json prepare_answer_base(const PrepareRun& run, bool changed)
 nlohmann::json prepare_answer_end(nlohmann::json answer, const PrepareRun& run, Plater& plater)
 {
     const ModelObject& object = *run.object;
+    const bool         changed = answer.value("changed", true);
     rehome_and_report_placement(answer, run.object_id, /*moved=*/true);
+    answer["changed"] = changed;
     const bool needs_bake = needs_bake_fast(object, Slic3r::GUI::texture_stack_owner(object));
     answer["needs_bake"]  = needs_bake;
     answer["active_warnings"] = get_active_warnings_json(&plater);
     add_next_steps(answer, bake_next_steps(run.object_id, needs_bake));
     return answer;
+}
+
+// What both finishers check first on the main thread: a plan that ran out of time, a busy app, an object deleted meanwhile
+// (otherwise its index is found again). Null to go on.
+std::optional<nlohmann::json> prepare_apply_refusal(PrepareRun& run, bool timed_out, double wait_s)
+{
+    Plater* plater = wxGetApp().plater();
+    if (timed_out || past_apply_window(run.deadline)) {
+        nlohmann::json answer = error_response(prepare_timed_out_message(wait_s));
+        answer["timed_out"]   = true;
+        return answer;
+    }
+    if (const auto refusal = texture_job_refusal(*plater, "prepare_texture_mesh"))
+        return error_response(*refusal);
+    if (!rebind_object(*plater, run))
+        return error_response("Object " + std::to_string(run.object_id) + " was deleted in the app during the preparation, so nothing was changed");
+    return std::nullopt;
 }
 
 // Remesh and adaptive subdivide on the main thread: the plan applied when the object is still as captured.
@@ -557,17 +654,12 @@ nlohmann::json finish_job_prepare(PrepareRun& run, PreparePlanned& planned, doub
     McpDialogSuppressionGuard guard;
     const auto                finish = [&](nlohmann::json result) { return guard.report(with_closed_tool(std::move(result), closed_tool)); };
 
-    if (planned.timed_out) {
-        nlohmann::json answer = error_response(prepare_timed_out_message(wait_s));
-        answer["timed_out"]   = true;
-        return finish(std::move(answer));
-    }
-    if (const auto refusal = texture_job_refusal(*plater, "prepare_texture_mesh"))
-        return finish(error_response(*refusal));
+    if (const auto refusal = prepare_apply_refusal(run, planned.timed_out, wait_s))
+        return finish(*refusal);
     ModelObject& object = *const_cast<ModelObject*>(run.object);
     const std::string meanwhile = "Object " + std::to_string(run.object_id) + " changed in the app during the preparation, so nothing was changed: "
                                   "call prepare_texture_mesh again";
-    if (!object_still_in_model(plater->model(), &object) || !texture_prepare_applies_to(object, run.input, run.scope))
+    if (!texture_prepare_applies_to(object, run.input, run.scope))
         return finish(error_response(meanwhile));
     for (const Slic3r::TextureDisplacementPrepareResult& result : planned.prepare.results)
         if (result.paint_lost)
@@ -617,17 +709,10 @@ nlohmann::json finish_uniform_prepare(PrepareRun& run, PreparePlanned& planned, 
     McpDialogSuppressionGuard guard;
     const auto                finish = [&](nlohmann::json result) { return guard.report(with_closed_tool(std::move(result), closed_tool)); };
 
-    if (planned.timed_out) {
-        nlohmann::json answer = error_response(prepare_timed_out_message(wait_s));
-        answer["timed_out"]   = true;
-        return finish(std::move(answer));
-    }
-    if (const auto refusal = texture_job_refusal(*plater, "prepare_texture_mesh"))
-        return finish(error_response(*refusal));
+    if (const auto refusal = prepare_apply_refusal(run, planned.timed_out, wait_s))
+        return finish(*refusal);
     ModelObject& object = *const_cast<ModelObject*>(run.object);
     const auto   unchanged = [&]() {
-        if (!object_still_in_model(plater->model(), &object))
-            return false;
         for (const UniformPart& part : run.uniform) {
             const ModelVolume* volume = volume_by_id(object, part.id);
             if (volume == nullptr || volume->mesh().its.indices != part.its.indices || volume->mesh().its.vertices != part.its.vertices)
@@ -670,7 +755,8 @@ nlohmann::json finish_uniform_prepare(PrepareRun& run, PreparePlanned& planned, 
     return finish(prepare_answer_end(std::move(answer), run, *plater));
 }
 
-// Smooth, entirely on the main thread as the panel runs it: relaxing the painted vertices is linear work.
+// Smooth, entirely on the main thread as the panel runs it: the relaxation is linear in the facets, and capped
+// (SMOOTH_MAX_FACETS) so the app is not held for long.
 nlohmann::json smooth_texture_mesh(const nlohmann::json& params, const PrepareRequest& request)
 {
     Plater*                   plater = wxGetApp().plater();
@@ -688,32 +774,34 @@ nlohmann::json smooth_texture_mesh(const nlohmann::json& params, const PrepareRe
         return guard.report(error_response("Object " + std::to_string(run.object_id) + " has no model part"));
     run.object = object;
 
-    const Slic3r::TextureDisplacementOptions used = smooth_options(owner->texture_displacement_options, request.smooth);
-    Slic3r::GUI::TextureSmoothSkip           why  = Slic3r::GUI::TextureSmoothSkip::None;
+    const std::size_t                        facets = owner->mesh().its.indices.size();
+    const Slic3r::TextureDisplacementOptions used   = smooth_options(owner->texture_displacement_options, request.smooth);
+    if (const auto refusal = smooth_refusal(facets))
+        return guard.report(error_response(*refusal));
+    if (used.smooth_strength <= 0.f || used.smooth_iterations <= 0) {
+        nlohmann::json answer = prepare_answer_base(run, false);
+        answer["message"]     = "Nothing to smooth: the stack's smoothing strength or pass count is 0; give strength and passes";
+        return guard.report(std::move(answer));
+    }
+
+    // Paint an open panel holds is read first: it is closed (its own undo step) before the vertices to relax are worked out, once.
+    std::string closed_tool;
+    if (toolbar_tool_open(*plater))
+        if (const auto failed = close_tool_before(*plater, run.object_id, object->volumes.size(), closed_tool))
+            return guard.report(with_closed_tool(*failed, closed_tool));
+    Slic3r::GUI::TextureSmoothSkip              why      = Slic3r::GUI::TextureSmoothSkip::None;
     std::optional<indexed_triangle_set> smoothed = Slic3r::GUI::smoothed_baked_mesh(*owner, used, &why);
     if (!smoothed && why == Slic3r::GUI::TextureSmoothSkip::NothingPainted)
-        return guard.report(error_response("Object " + std::to_string(run.object_id) + " has no texture paint, and smoothing only touches the painted "
-                                           "part of the model: paint_object mode texture paints a layer"));
+        return guard.report(with_closed_tool(error_response("Object " + std::to_string(run.object_id) + " has no texture paint, and smoothing only touches the painted "
+                                                            "part of the model: paint_object mode texture paints a layer"),
+                                             closed_tool));
     if (!smoothed) {
         nlohmann::json answer = prepare_answer_base(run, false);
         answer["message"]     = "Nothing to smooth - the painted area is only one triangle deep, so with ignore_outer_ring on there are no interior "
                                 "vertices to relax.";
-        return guard.report(std::move(answer));
+        return guard.report(with_closed_tool(std::move(answer), closed_tool));
     }
 
-    std::string closed_tool;
-    if (const auto failed = close_tool_before(*plater, run.object_id, object->volumes.size(), closed_tool))
-        return guard.report(with_closed_tool(*failed, closed_tool));
-    if (!closed_tool.empty()) {
-        // Closing the tool flushed its paint into the model: the painted vertices are read again.
-        smoothed = Slic3r::GUI::smoothed_baked_mesh(*owner, used, &why);
-        if (!smoothed)
-            return guard.report(with_closed_tool(error_response("Closing the toolbar tool " + closed_tool + " changed object " + std::to_string(run.object_id) +
-                                                                ", so nothing was changed: call prepare_texture_mesh again"),
-                                                 closed_tool));
-    }
-
-    const std::size_t facets = owner->mesh().its.indices.size();
     {
         Plater::TakeSnapshot snapshot(plater, translated_snapshot_name(request), Slic3r::UndoRedo::SnapshotType::GizmoAction);
         owner->texture_displacement_options = used;
@@ -757,12 +845,14 @@ nlohmann::json prepare_texture_mesh(const nlohmann::json& params)
 
     for (int round = 0; round < 2; ++round) {
         PrepareRun run;
-        run.request = *request;
-        const nlohmann::json refusal = run_on_main_thread([&]() { return capture_prepare(params, run); });
+        run.request  = *request;
+        run.deadline = deadline;
+        const nlohmann::json refusal = run_on_main_thread([&]() { return capture_prepare(params, run, closed_tool); });
         if (!refusal.is_null())
             return with_closed_tool(refusal, closed_tool);
 
         PreparePlanned planned = plan_prepare(run, stop_at(deadline));
+        planned.timed_out |= Clock::now() > deadline;
         bool           replan  = false;
         nlohmann::json answer  = run_on_main_thread([&]() {
             return run.request.uniform() ? finish_uniform_prepare(run, planned, wait_s, /*may_close=*/true, closed_tool) :
@@ -870,7 +960,7 @@ void OrcaMCPServer::register_texture_bake_tools()
         "delete_mixed_filament removes one). Answers each part's facets before and after, the options used, the mixed slots, "
         "budget_limited when the triangle budget cut detail, unmoved_parts (a part the bake did not move keeps its paint) and the "
         "object's placement; the next step is slice_all. Runs in the call's wait (a little under the bridge's ORCAMCP_TIMEOUT): past it "
-        "nothing changes. A bake that moves nothing changes nothing. Refused while a slice, an export, an arrange or orient, or the "
+        "nothing changes. A classic bake applies its preparation first and then bakes the result into the same undo step: if the bake then fails the preparation stays (preparation_applied). A bake that moves nothing changes nothing. A plan that ends past the wait is never applied. Refused while a slice, an export, an arrange or orient, or the "
         "app's own bake or repair runs, or when nothing is painted; an open toolbar tool is closed first, only when the bake will change something.",
         bake_schema(),
         [](const nlohmann::json& params) -> nlohmann::json {
@@ -885,9 +975,9 @@ void OrcaMCPServer::register_texture_bake_tools()
         "Get an object's mesh ready for texture displacement, as the texture panel's Pro mode tools do. remesh rebuilds every model part "
         "with triangles near target_edge_mm (the painted area is carried onto the new triangles). subdivide with adaptive (default) "
         "refines the painted area only, to max_edge_mm and, with follow_texture, to the texture's detail within the budget_k; with "
-        "adaptive false it splits every triangle of every part in four, steps times (more than 4 million triangles is refused), "
+        "adaptive false it splits every triangle of every part in four, steps times (more than 1 million triangles after the split is refused: the paint is remapped on the main thread), "
         "which drops the texture paint (texture_paint says so). smooth relaxes the baked vertices of the painted area with the "
-        "stack's smoothing (strength, passes, ignore_outer_ring, stored when given). Runs in the call's wait (a little under the "
+        "stack's smoothing (strength, passes, ignore_outer_ring, stored when given); it runs on the app's main thread, so a part of more than 1 million triangles is refused, and an open panel is closed first. Runs in the call's wait (a little under the "
         "bridge's ORCAMCP_TIMEOUT): past it nothing changes. Answers each part's facets before and after. One undo step named as "
         "the panel names it; nothing to change is changed: false with the panel's words. Refused while a slice, an export, an "
         "arrange or orient, or the app's own bake or repair runs; an open toolbar tool is closed first, only when the call will change something.",

@@ -2398,6 +2398,28 @@ std::optional<std::string> uniform_subdivision_refusal(std::size_t facets, int s
            std::to_string(UNIFORM_SUBDIVISION_MAX_FACETS) + " one call allows: use fewer steps, or adaptive subdivision, which refines the painted area only";
 }
 
+std::optional<std::string> smooth_refusal(std::size_t facets)
+{
+    if (facets <= SMOOTH_MAX_FACETS)
+        return std::nullopt;
+    return "The part has " + std::to_string(facets) + " triangles, more than the " + std::to_string(SMOOTH_MAX_FACETS) +
+           " a smooth is run on: it runs on the app's main thread, where it would hold the app too long";
+}
+
+json bake_inactive_settings(const BakeRequest& req, bool classic)
+{
+    json out = json::object();
+    if (classic) {
+        if (req.resolution_mm || req.resolution_auto)
+            out["resolution_mm"] = "the classic pipeline's refinement is classic_budget_k's, so the default pipeline's resolution is stored but not used";
+        if (req.budget_k || req.budget_auto)
+            out["budget_k"] = "the classic pipeline's budget is classic_budget_k, so the default pipeline's budget is stored but not used";
+    } else if (req.classic_budget_k) {
+        out["classic_budget_k"] = "the default pipeline refines to resolution_mm and budget_k; classic_budget_k is the classic pipeline's";
+    }
+    return out;
+}
+
 std::string bake_nothing_painted_message(int object_id)
 {
     return "Object " + std::to_string(object_id) + " has no texture paint, so there is nothing to bake: paint_object mode texture paints a layer";

@@ -782,7 +782,9 @@ that call in flight waited forever: on 2026-09-26 `quit_app`, with a script poll
   blocking call on that thread must honour `this_thread_cancelled()` or go through `Http`/`TCPConsole`.
   What cannot be cancelled -- the Bambu network plugin's calls inside a login callback, and a step of
   `repair_mesh`'s repair between two of its progress reports (its plan uses only its own copies of the
-  meshes) -- is bounded:
+  meshes), and the texture tools' `plan_remesh` (CGAL's isotropic remesh, in `prepare_texture_mesh` and a classic
+  `bake_texture_displacement`) and `subdivide_mesh_uniform` (a uniform `prepare_texture_mesh` subdivide), which report
+  no progress inside one part and so stop only between parts, on copies -- is bounded:
   `GUI_App::stop_http_server` gives `HttpServer::stop` 5 s, and when a request still holds the thread
   then, the server is left alone and the process ends at once (`end_process_under_running_server_thread`:
   config saved, logs flushed, `std::_Exit(0)`), without the teardown the stuck call could be using.
@@ -2096,7 +2098,7 @@ functions the job and MCP both call: `capture_texture_bake` / `plan_texture_bake
 `apply_texture_prepare`, with `queue_texture_displacement_bake` taking the captured input. The apply steps show no dialog and
 push no notification (`finalize()` still does both, from the outcome); a prepare applied with an empty `snapshot_name` takes no
 undo step, so a bake can share the step of the prepare before it; `TexturePrepareScope` moves out of the gizmo into the prepare
-job's header. On a 1, upstream still has the inline code and ours stands; on a 0, upstream changed that code: redo the move on its version and re-run `slic3rutils_tests "[TextureObject],[TextureDisplacement]"`.
+job's header. Three small additions stand beside the move: `same_texture_layers` (the bake's layer comparison, which `texture_bake_applies_to` kept local, exported so `texture_prepare_applies_to` -- the prepare's "input still describes the model" check, which the panel never needed -- compares layers the same way) and the static `GLGizmoTextureDisplacement::standard_prepare_params(budget_k)` (the Standard bake's remesh and subdivision recipe from the `STD_*` constants, called by the panel's Bake and its stage debug and by MCP's classic bake, so the recipe has one copy). On a 1, upstream still has the inline code and ours stands; on a 0, upstream changed that code: redo the move on its version and re-run `slic3rutils_tests "[TextureObject],[TextureDisplacement]"`.
 
 Item BX is a move: the texture panel's bake inputs and layer logic were members of the gizmo over its selection
 (`texture_volume()`, `texture_parts()`, `painted_parts()`, `layers_for_part()`, `texture_anchor()`, `resting_drops()`,

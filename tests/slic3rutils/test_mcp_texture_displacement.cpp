@@ -1770,8 +1770,8 @@ TEST_CASE("the panel's seeds for the edge lengths come from the mesh's mean edge
 
 TEST_CASE("a uniform subdivision is refused above the facet cap", "[McpTexture][orcamcp]")
 {
-    CHECK_FALSE(uniform_subdivision_refusal(100000, 2).has_value()); // 1.6 million
-    const auto refusal = uniform_subdivision_refusal(100000, 3);     // 6.4 million
+    CHECK_FALSE(uniform_subdivision_refusal(100000, 1).has_value()); // 400 thousand
+    const auto refusal = uniform_subdivision_refusal(100000, 2);     // 1.6 million
     REQUIRE(refusal.has_value());
     CHECK(refusal->find("adaptive") != std::string::npos);
 }
@@ -1799,4 +1799,24 @@ TEST_CASE("the bake's answers: parts, budget and mixed slots", "[McpTexture][orc
     CHECK(bake_timed_out_message(105., true).find("classic_budget_k") != std::string::npos);
     CHECK(bake_timed_out_message(105., false).find("classic_budget_k") == std::string::npos);
     CHECK(bake_no_displacement_message().find("paint was kept") != std::string::npos);
+}
+
+TEST_CASE("a smooth is refused above the facet cap, and unused bake settings are reported", "[McpTexture][orcamcp]")
+{
+    CHECK_FALSE(smooth_refusal(SMOOTH_MAX_FACETS).has_value());
+    CHECK(smooth_refusal(SMOOTH_MAX_FACETS + 1).has_value());
+
+    std::string error;
+    const auto  classic_with_default_settings = read_bake_request({{"pipeline", "classic"}, {"resolution_mm", 0.3}, {"budget_k", nullptr}}, error);
+    REQUIRE(classic_with_default_settings.has_value());
+    const json inactive = bake_inactive_settings(*classic_with_default_settings, true);
+    CHECK(inactive.contains("resolution_mm"));
+    CHECK(inactive.contains("budget_k"));
+    CHECK_FALSE(inactive.contains("classic_budget_k"));
+    CHECK(bake_inactive_settings(*classic_with_default_settings, false).empty());
+
+    const auto budget = read_bake_request({{"classic_budget_k", 400}}, error);
+    REQUIRE(budget.has_value());
+    CHECK(bake_inactive_settings(*budget, false).contains("classic_budget_k"));
+    CHECK(bake_inactive_settings(*budget, true).empty());
 }

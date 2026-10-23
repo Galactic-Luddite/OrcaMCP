@@ -4162,6 +4162,8 @@ paint, adding mixed filament slots when its mixes need them; the baked layers' p
 the object is dropped onto the bed. One undo step. The mixed filament slots a colour bake adds are not undone with it
 (slot changes are no undo step): `undo_warning` says so, and `delete_mixed_filament` removes one.
 
+The classic pipeline runs as the panel's Standard Bake does: the preparation is planned and applied first (opening the one undo step), then the bake is read from the model as the preparation left it, planned and applied into that step. A bake that then fails or moves nothing leaves the preparation applied (`preparation_applied: true`; undo reverts it). A plan that ends past the call's wait is never applied.
+
 It follows `repair_mesh`: the model is read on the main thread, the bake runs on copies on the HTTP thread, and the
 result is applied on the main thread only if the object is still as it was read (otherwise: "changed in the app during
 the bake, so nothing was changed: call again"). It runs in the call's wait (a little under the bridge's
@@ -4174,7 +4176,7 @@ has no layer with an image, or nothing is painted. A bake that moves no vertex c
 | Argument | Type | Description |
 |----------|------|-------------|
 | `object_id` | integer | Object index (required) |
-| `pipeline` | `default` / `classic` | `default` refines, displaces and simplifies in one run; `classic` remeshes (1 mm) and refines first (`classic_budget_k`), then moves the existing vertices. Left out: the stack's |
+| `pipeline` | `default` / `classic` | (`resolution_mm` and `budget_k` under classic, `classic_budget_k` under default, are reported in `inactive_settings`, not used.) `default` refines, displaces and simplifies in one run; `classic` remeshes (1 mm) and refines first (`classic_budget_k`), then moves the existing vertices. Left out: the stack's |
 | `resolution_mm` | number / null | Default pipeline: refinement edge length, 0.02..2 mm; `0` or `null` is automatic. Left out: the stack's |
 | `budget_k` | integer / null | Default pipeline: triangle budget in thousands, 0..4000 (0 skips simplification); `-1` or `null` is automatic. Left out: the stack's |
 | `classic_budget_k` | integer | Classic pipeline: the subdivision budget, 10..2000 (default 750). Not stored |
@@ -4191,7 +4193,7 @@ The options the bake used are stored into the stack, as the panel's controls sto
 kept), `mixed_filaments` (`slot` 1-based, `created`), `filaments_added`, `budget_limited` (`needed`, `kept` triangles
 when the budget cut detail, else null), `needs_bake` (paint is left), `undo_warning`, the object's placement,
 `closed_toolbar_tool`, `active_warnings`, the preview, and `next_steps` (`slice_all`; `get_filaments` after new
-mixed slots).
+mixed slots), `inactive_settings`.
 
 ```json
 {"object_id": 0}
@@ -4208,8 +4210,8 @@ call with nothing to change answers `changed: false` with the panel's words.
 | `operation` | What it does | Arguments |
 |-------------|--------------|-----------|
 | `remesh` | Rebuilds every model part with triangles near `target_edge_mm` (CGAL isotropic remesh); the painted area is carried onto the new triangles (`texture_paint: kept`); refused paint loss answers the panel's words and changes nothing | `target_edge_mm` 0.1..20 (default: the first part's mean edge), `keep_sharp_edges` (true), `sharp_angle_deg` 5..90 (40) |
-| `subdivide` | `adaptive` (default): refines the painted area only (`texture_paint: kept`); refused when nothing is painted. `adaptive: false`: splits every triangle of every part in four, `steps` times, and drops the texture paint (`texture_paint: dropped`); above 4 million triangles it is refused | adaptive: `max_edge_mm` 0.001..20 (default: half the first part's mean edge), `follow_texture` (false), `detail_mm` 0.001..1 (0.05) and `min_edge_mm` 0.001..20 (0.1) (with follow_texture), `edge_detail_mm` 0..5 (0.4), `color_detail_mm` 0..5 (0.3; used when a layer colours), `budget_k` 10..2000 (750). uniform: `steps` 1..5 (required) |
-| `smooth` | Relaxes the first part's painted vertices with the stack's smoothing; the given values are stored in the stack. Runs on the main thread (linear work) | `strength` 1..100 percent, `passes` 1..10, `ignore_outer_ring` (the stack's) |
+| `subdivide` | `adaptive` (default): refines the painted area only (`texture_paint: kept`); refused when nothing is painted. `adaptive: false`: splits every triangle of every part in four, `steps` times, and drops the texture paint (`texture_paint: dropped`); above 1 million triangles after the split it is refused (the paint is remapped on the main thread) | adaptive: `max_edge_mm` 0.001..20 (default: half the first part's mean edge), `follow_texture` (false), `detail_mm` 0.001..1 (0.05) and `min_edge_mm` 0.001..20 (0.1) (with follow_texture), `edge_detail_mm` 0..5 (0.4), `color_detail_mm` 0..5 (0.3; used when a layer colours), `budget_k` 10..2000 (750). uniform: `steps` 1..5 (required) |
+| `smooth` | Relaxes the first part's painted vertices with the stack's smoothing; the given values are stored in the stack. Runs on the main thread (linear work), so a part of more than 1 million triangles is refused; an open panel is closed first (its own undo step), once | `strength` 1..100 percent, `passes` 1..10, `ignore_outer_ring` (the stack's) |
 
 An argument of another operation is refused. **Response:** `changed`, `object_id`, `operation`, `parts` (`volume_id`,
 `name`, `facets_before`, `facets_after`), `texture_paint`, the object's placement, `needs_bake`, `message` (nothing to

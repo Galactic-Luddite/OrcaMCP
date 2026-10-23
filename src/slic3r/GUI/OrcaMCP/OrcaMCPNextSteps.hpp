@@ -145,8 +145,9 @@ std::vector<NextStep> bake_next_steps(int object_id, bool needs_bake);
 
 // What a bake's answer leads to: slice_all, since the object's mesh changed (every plate lost its slice); get_filaments
 // when the bake added mixed filament slots (`slots_added`), to see them; bake_texture_displacement again when paint
-// is left (`needs_bake`: a part the bake did not move keeps its paint).
-std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added);
+// is left (`needs_bake`: a part the bake did not move keeps its paint). The bake changed the object's mesh, so its plate
+// (`plate_index`, when known) lost its slice; mixed filament slots added change every plate's filaments.
+std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added, std::optional<int> plate_index);
 
 // What printer_control's answer to a set_* action (filtration, fans, print speed, Z offset) leads to:
 // get_printer_status, whose printer.controls reads back what the printer now reports -- it takes a moment
