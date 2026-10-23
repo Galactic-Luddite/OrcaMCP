@@ -1400,6 +1400,7 @@ echo "BV two classes named Slic3r::IslandLocator (ConnectedBodies.hpp, MultiMate
 echo "BW the texture bake and prepare jobs still run their work inline, which ours moved into plan_/apply_ functions MCP also calls (a move: 1 = keep ours; 0 = upstream changed that code): $(U src/slic3r/GUI/Jobs/TextureDisplacementBakeJob.cpp | grep -c 'const auto moved = \[this\](size_t i)') / $(U src/slic3r/GUI/Jobs/TextureDisplacementPrepareJob.cpp | grep -c 'm_results\[i\] = GLGizmoTextureDisplacement::prepare_mesh')"
 echo "BX the texture panel still holds the seam-path search and the palette's mix pick inline, which ours moved into TextureDisplacementObject and compose_palette (a move: 1 = keep ours; 0 = upstream changed that code): $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'std::priority_queue<QN') / $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'mixes = pick_mixes(\*m_mix_ranking')"
 echo "BY the texture panel's Unjoin renames no group: unjoining the lowest chart of a group leaves the others in the group it was named for (a move to unjoin_island fixes it; 1 = bug still there): $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'layer->island_groups\[size_t(chart)\] = chart;')"
+echo "BZ upstream's 3MF drops a part's UV channel (ModelVolume::texture_uv) on save (rel2506/16; a feature: non-zero = upstream has its own, compare): $(U src/libslic3r/Format/bbs_3mf.cpp | grep -c 'texture_uv')"
 ```
 
 Items M and N: upstream's `HttpServer::stop` closes every connection at once, so a reply still being
@@ -2119,6 +2120,18 @@ panel's Unjoin set only the chart's own entry to its number, so unjoining the gr
 group named after it, still "joined" to a chart that had left. Ours calls `unjoin_island` (`TextureDisplacementObject.cpp`,
 which MCP's `set_texture_unwrap` calls too): when the chart is its group's name, the others take the next-lowest member's
 number. On a 0, upstream fixed the line: take its version and re-run `slic3rutils_tests "[McpTexture]"`.
+
+Item BZ is a feature, not a fix: `ModelVolume::texture_uv`, a part's own UV channel (three corners per triangle, loaded
+from an OBJ with its material library), is what a `model_uv` texture layer maps through, and upstream's 3MF writer never
+saved it: after a save and reopen the layer fell back to triplanar. Ours writes one `texture_uv="u1 v1 u2 v2 u3 v3"`
+attribute per triangle of a part that has a channel (`%.9g`, like the vertices), beside `paint_color` and the texture
+masks, and reads it back in both of `bbs_3mf.cpp`'s importers (a channel is taken only when every triangle of the part
+carried a valid one; the reader's flip of an inside-out mesh swaps the channel's corners with the mesh's; the exporter
+shares one mesh between volumes only while their channels are equal). The 3MF Materials extension's
+`m:texture2dgroup` was not used: it needs a texture resource a part with only UVs does not have, and the importer
+ignores `pid`/`p1`/`p2`/`p3` by design. An older build ignores the attribute, as it does the texture paint ones. Offered
+upstream as a pull request (code in `bbs_3mf.cpp` and `tests/libslic3r/test_3mf.cpp` only). On a non-zero count,
+upstream has its own: take it and re-run `libslic3r_tests "[3mf]"`.
 
 Item I is not a fork patch -- we deliberately carry nothing for it (see
 `docs/superpowers/plans/2026-09-17-next-release-plan.md`, Stage 3). It is here so the sync notices
