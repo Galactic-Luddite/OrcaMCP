@@ -4,6 +4,7 @@
 
 #include "libslic3r/AABBMesh.hpp"
 #include "libslic3r/TextureDisplacement.hpp"
+#include "slic3r/Utils/ThreadCancel.hpp"
 
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
@@ -454,15 +455,20 @@ std::vector<FacetAssignment> assign_visible(const std::vector<PaintPlanVolume>& 
         const indexed_triangle_set& its = pv.mesh->its;
         FacetAssignment             assignment;
         assignment.states.assign(its.indices.size(), -1);
-        if (plate_transform_is_invertible(pv.to_plate)) {
-            const Matrix3d normal_matrix = pv.to_plate.linear().inverse().transpose();
-            tbb::parallel_for(tbb::blocked_range<size_t>(0, its.indices.size()), [&](const tbb::blocked_range<size_t>& range) {
+        // A quit ends the work: what is left stays unselected, and the caller's next hop is refused by the gate.
+        if (plate_transform_is_invertible(pv.to_plate) && !Slic3r::this_thread_cancelled()) {
+            // A mirroring transform (negative determinant) turns the winding over, and the normal with it.
+            const double winding = pv.to_plate.linear().determinant() < 0.0 ? -1.0 : 1.0;
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, its.indices.size(), 256), [&](const tbb::blocked_range<size_t>& range) {
+                if (Slic3r::this_thread_cancelled())
+                    return;
                 for (size_t f = range.begin(); f < range.end(); ++f) {
                     const Vec3i32& face = its.indices[f];
                     const Vec3d    a    = its.vertices[face[0]].cast<double>();
                     const Vec3d    b    = its.vertices[face[1]].cast<double>();
                     const Vec3d    c    = its.vertices[face[2]].cast<double>();
-                    const Vec3d    normal = normal_matrix * (b - a).cross(c - a);
+                    const Vec3d    pa     = pv.to_plate * a;
+                    const Vec3d    normal = winding * (pv.to_plate * b - pa).cross(pv.to_plate * c - pa);
                     if (normal.squaredNorm() < 1e-20)
                         continue; // a degenerate facet has no facing
                     const Vec3d centroid = pv.to_plate * ((a + b + c) / 3.0);

@@ -349,3 +349,32 @@ TEST_CASE("texture paint names its states none and painted", "[orcamcp][PaintRem
     CHECK(state_mapping_error(PaintMode::Texture, PaintStateMap{{0, 1}}, 4).empty());
     CHECK_FALSE(state_mapping_error(PaintMode::Texture, PaintStateMap{{0, 2}}, 4).empty());
 }
+
+TEST_CASE("selection state on a texture layer repaints painted facets through the layer's own channel", "[orcamcp][PaintRemap]")
+{
+    // What paint_by_state does for mode texture: parse match_state / state, check the one-entry mapping, renumber the
+    // layer's mask, write it to that layer only.
+    int from = -1, to = -1;
+    std::string error;
+    REQUIRE(parse_state_param({{"match_state", "painted"}, {"state", "none"}}, PaintMode::Texture, k_repaint_from, from, error));
+    REQUIRE(parse_state_param({{"match_state", "painted"}, {"state", "none"}}, PaintMode::Texture, k_paint_with, to, error));
+    CHECK(from == 1);
+    CHECK(to == 0);
+    CHECK(state_mapping_error(PaintMode::Texture, {{from, to}}, 1).empty());
+    CHECK_FALSE(state_mapping_error(PaintMode::Texture, {{1, 2}}, 1).empty()); // texture has no state 2
+
+    Model        model;
+    ModelObject* object = model.add_object();
+    ModelVolume* volume = object->add_volume(TriangleMesh(its_make_cube(10.0, 10.0, 10.0)), ModelVolumeType::MODEL_PART, false);
+    const std::vector<int> states(volume->mesh().its.indices.size(), 1);
+    const PaintChannel     layer = PaintChannel::texture(4);
+    REQUIRE(apply_facet_states(*volume, layer, states, true));
+    const PaintData base = capture_paint_base(PaintTarget{object, {volume}, {0}, 0, 0}, layer)[0];
+
+    PaintRemapWrite write;
+    REQUIRE(build_remap_write(volume->mesh(), base, {{from, to}}, write));
+    CHECK(counts(write.before) == std::map<int, int>{{1, 12}});
+    CHECK(counts(write.after) == std::map<int, int>{{0, 12}});
+    CHECK(apply_paint_data(*volume, layer, std::move(write.data)));
+    CHECK_FALSE(has_volume_paint(*volume, layer));
+}

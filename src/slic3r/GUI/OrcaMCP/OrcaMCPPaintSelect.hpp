@@ -181,6 +181,7 @@ struct VisibleView
 // is seen when its plate normal faces the view and a ray from its centroid toward the viewer, 1e-4 mm clear of the
 // surface, meets no facet of any of `occluders` (every model part of the object, the targets among them; under a
 // perspective view only what lies between the facet and the eye). `unassigned` counts the facets not seen.
+// Stops as soon as this_thread_cancelled() says so (a quit), leaving the rest unselected: the caller checks it afterwards.
 std::vector<FacetAssignment> assign_visible(const std::vector<PaintPlanVolume>& targets,
                                             const std::vector<PaintPlanVolume>& occluders,
                                             const VisibleView&                  view,

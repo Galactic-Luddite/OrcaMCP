@@ -220,6 +220,8 @@ struct MaskReport
 std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_reports(const std::vector<MaskInput>&);
 // Some layer of the stack is painted, readably, on some part.
 bool needs_bake(const std::vector<TextureDisplacementLayer>&, const std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>>&);
+// One slot of the above, the cheap form: some model part holds a readable mask with state 1 in that slot.
+bool slot_painted_fast(const ModelObject&, int slot);
 // The cheap form for every-object reports: FacetsAnnotation::empty() per slot, no selector.
 bool needs_bake_fast(const ModelObject&, const ModelVolume* owner);
 

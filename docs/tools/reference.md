@@ -3592,8 +3592,9 @@ per-triangle paint, the same data the paint gizmos write. To put a whole object 
 support enforcers do nothing while `enable_support` is off; `next_steps` then names the
 `set_object_config` call that turns it on with a `(manual)` `support_type`, for support only where
 painted. A paint panel open in the app (the colour, support, seam, fuzzy skin or texture panel) is
-closed first, in every mode, as the user would close it: it would otherwise write its own copy of
-the paint over this one when it next flushes. The answer's `closed_toolbar_tool` names it.
+closed, in every mode, as the user would close it, right before the write and only when the write changes
+something (a refused call, or a repaint of what is there, leaves it open and takes no undo step). Closing
+takes the panel's own "Leaving ..." undo step. The answer's `closed_toolbar_tool` names it.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
@@ -3624,7 +3625,7 @@ the paint over this one when it next flushes. The answer's `closed_toolbar_tool`
 - **Texture layers.** `mode: texture` writes the mask of one texture displacement layer (`texture_layer`, its
   slot): where the layer applies is where its mask is painted (`state: painted`), and `state: none` unpaints.
   It changes the mask only; nothing reaches the print until the layers are baked into the mesh. It is one
-  undo step, refused while an arrange, orient or bake runs or when the slot holds no layer. The answer
+  undo step (plus the open paint panel's own "Leaving ..." step when this call had to close one; a refused call, or a repaint of what is there, closes nothing and takes none), refused while an arrange, orient or bake runs or when the slot holds no layer. The answer
   adds `texture_layer`, `needs_bake` (some layer of the object is painted, so a bake would change the
   mesh) and, when the layer is now painted on no part, a `next_steps` entry that paints it on the whole object.
   <!-- TODO(T6/T8): name get_texture_displacement and bake_texture_displacement here once they exist. -->
@@ -3633,7 +3634,8 @@ the paint over this one when it next flushes. The answer's `closed_toolbar_tool`
   facet of any model part of the object hides (a ray from its centroid toward the viewer, started
   1e-4 mm off the surface). It is what the texture panel's "Project only on visible" selects. A named
   view or `vector` is orthographic; `current` is the 3D view's camera as it is now. With `frame_layer`
-  a facet must also project inside that layer's frame (the layer must have one).
+  a facet must also project inside that layer's frame (the layer must have a view projection through a frame).
+  Only the target instance's own model parts can hide a facet: other instances and objects never do, as in the panel. `current` with the canvas not yet drawn is the default camera.
 - An even split (`filaments`) is colour-only. The other three modes take explicit `bands`
   with a `state`, because alternating enforcer and blocker along an axis means nothing.
 - `fuzzy_skin` has no `blocker`: `EnforcerBlockerType::FUZZY_SKIN` is an alias of `ENFORCER`.

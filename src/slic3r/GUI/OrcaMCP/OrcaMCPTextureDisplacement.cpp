@@ -966,22 +966,28 @@ bool needs_bake(const std::vector<TextureDisplacementLayer>& stack, const std::v
     return false;
 }
 
+bool slot_painted_fast(const ModelObject& object, int slot)
+{
+    if (slot < 0 || size_t(slot) >= TEXTURE_DISPLACEMENT_MAX_LAYERS)
+        return false;
+    for (const ModelVolume* v : object.volumes)
+        if (v->is_model_part()) {
+            const PaintData& data = v->texture_displacement_facet(slot).get_data();
+            // Painted, as needs_bake counts it: a readable mask with state 1 in it.
+            if (!data.triangles_to_split.empty() && !mask_is_stale(data, v->mesh().its.indices.size()) &&
+                data.used_states.size() > 1 && data.used_states[1])
+                return true;
+        }
+    return false;
+}
+
 bool needs_bake_fast(const ModelObject& object, const ModelVolume* owner)
 {
     if (owner == nullptr)
         return false;
-    for (const TextureDisplacementLayer& layer : owner->texture_displacement_layers) {
-        if (layer.slot < 0 || size_t(layer.slot) >= TEXTURE_DISPLACEMENT_MAX_LAYERS)
-            continue;
-        for (const ModelVolume* v : object.volumes)
-            if (v->is_model_part()) {
-                const PaintData& data = v->texture_displacement_facet(layer.slot).get_data();
-                // Painted, as needs_bake counts it: a readable mask with state 1 in it.
-                if (!data.triangles_to_split.empty() && !mask_is_stale(data, v->mesh().its.indices.size()) &&
-                    data.used_states.size() > 1 && data.used_states[1])
-                    return true;
-            }
-    }
+    for (const TextureDisplacementLayer& layer : owner->texture_displacement_layers)
+        if (slot_painted_fast(object, layer.slot))
+            return true;
     return false;
 }
 

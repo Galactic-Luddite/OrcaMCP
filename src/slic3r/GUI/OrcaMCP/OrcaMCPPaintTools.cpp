@@ -5,6 +5,7 @@
 #include "OrcaMCPPaintSelect.hpp"
 #include "OrcaMCPFilamentModel.hpp"
 #include "OrcaMCPNextSteps.hpp"
+#include "OrcaMCPJsonRpcError.hpp"
 #include "OrcaMCPPartEdits.hpp"
 #include "OrcaMCPPartTools.hpp"
 #include "OrcaMCPTextureDisplacement.hpp"
@@ -12,6 +13,7 @@
 
 #include "slic3r/Utils/FixModelByCgal.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/Utils/ThreadCancel.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -245,14 +247,6 @@ std::optional<std::string> texture_paint_refusal(const PaintChannel& channel, co
     return std::nullopt;
 }
 
-// Whether any model part of `object` carries paint for `channel`.
-bool channel_painted_anywhere(const Slic3r::ModelObject& object, const PaintChannel& channel)
-{
-    return std::any_of(object.volumes.begin(), object.volumes.end(), [&](const Slic3r::ModelVolume* mv) {
-        return mv->is_model_part() && has_volume_paint(*mv, channel);
-    });
-}
-
 // The GUI bookkeeping a texture paint write owes, what GLGizmoTextureDisplacement::update_model_object does: the
 // object list's info items and the background process. Not the plate notification: the slicer never reads
 // texture paint, so no plate loses its slice.
@@ -275,7 +269,7 @@ void add_texture_answer(nlohmann::json& result, const PaintTarget& target, const
     result["needs_bake"]    = needs_bake_fast(*target.object, texture_stack_owner(*target.object));
     // TODO(T8): bake_texture_displacement's step comes with that tool.
     add_next_steps(result, texture_paint_next_steps(target.object_id, channel.texture_layer,
-                                                    channel_painted_anywhere(*target.object, channel)));
+                                                    slot_painted_fast(*target.object, channel.texture_layer)));
 }
 
 // The plate-frame bounding box of exactly the volumes a call paints, so a band range defaulted
@@ -409,7 +403,7 @@ struct PaintRequest
     int                    component      = -1;
     // selection == "visible": the view, and every model part of the object (what can hide a facet)
     VisibleView                 visible_view;
-    std::vector<PaintPlanVolume> occluders;
+    PaintPlan                   occluders;
 };
 
 // Reads the one state a non-band selection paints with: `filament` in colour mode, `state` in
@@ -639,6 +633,42 @@ bool parse_paint_request(const nlohmann::json& params,
     return false;
 }
 
+// The same object and instance with every model part as the volumes: what can hide a facet. Another instance of
+// the object, or another object, never does, as in the texture panel.
+PaintTarget all_model_parts(const PaintTarget& target)
+{
+    PaintTarget everything;
+    everything.object       = target.object;
+    everything.object_id    = target.object_id;
+    everything.instance_idx = target.instance_idx;
+    for (int i = 0; i < int(target.object->volumes.size()); ++i)
+        if (target.object->volumes[std::size_t(i)]->is_model_part()) {
+            everything.volumes.push_back(target.object->volumes[std::size_t(i)]);
+            everything.volume_ids.push_back(i);
+        }
+    return everything;
+}
+
+// selection "connected" with a facet seed: its part is one of the parts in scope and the facet is one of its facets,
+// both known from the call alone, so a miss is refused before anything is done (a point seed always lands on a part).
+bool seed_in_scope(const PaintRequest& request, const PaintTarget& target, std::string& error)
+{
+    std::string ids;
+    for (std::size_t i = 0; i < target.volumes.size(); ++i) {
+        ids += (ids.empty() ? "" : ", ") + std::to_string(target.volume_ids[i]);
+        if (target.volume_ids[i] != request.seed_volume_id)
+            continue;
+        const std::size_t facets = target.volumes[i]->mesh().its.indices.size();
+        if (std::size_t(request.seed_facet) < facets)
+            return true;
+        error = "seed.facet " + std::to_string(request.seed_facet) + " is out of range for volume " +
+                std::to_string(request.seed_volume_id) + " (" + std::to_string(facets) + " facets)";
+        return false;
+    }
+    error = "seed.volume_id " + std::to_string(request.seed_volume_id) + " is not in scope: this call addresses volume_id " + ids;
+    return false;
+}
+
 // The named views selection "visible" takes, with "current": the 3D view's camera now.
 const std::vector<std::string>& visible_view_names()
 {
@@ -716,25 +746,17 @@ bool capture_visible_view(const nlohmann::json& params, const PaintTarget& targe
             return false;
         }
         const Slic3r::Transform3d owner_to_plate = volume_to_plate(*target.object, *owner, target.instance_idx);
-        if (!layer->view_project_projective || !plate_transform_is_invertible(owner_to_plate)) {
-            error = "view.frame_layer " + std::to_string(slot) + ": that layer has no projection frame (a frame is set by an "
-                    "orthographic projection from a view); leave frame_layer out to paint what the view sees";
+        const bool framed = layer->projection_method == Slic3r::TextureProjectionMethod::ViewProjected && layer->view_project_projective;
+        if (!framed || !plate_transform_is_invertible(owner_to_plate)) {
+            error = "view.frame_layer " + std::to_string(slot) + ": that layer has no projection frame (a view projection through a "
+                    "frame, as the texture panel's Project through a frame sets); leave frame_layer out to paint what the view sees";
             return false;
         }
         out.frame          = layer->view_project_matrix;
         out.plate_to_frame = owner_to_plate.inverse();
     }
 
-    PaintTarget everything;
-    everything.object       = target.object;
-    everything.object_id    = target.object_id;
-    everything.instance_idx = target.instance_idx;
-    for (int i = 0; i < int(target.object->volumes.size()); ++i)
-        if (target.object->volumes[std::size_t(i)]->is_model_part()) {
-            everything.volumes.push_back(target.object->volumes[std::size_t(i)]);
-            everything.volume_ids.push_back(i);
-        }
-    request.occluders = capture_paint_plan(everything).volumes;
+    request.occluders = capture_paint_plan(all_model_parts(target));
     return true;
 }
 
@@ -876,7 +898,7 @@ nlohmann::json run_paint_remap(const nlohmann::json& params, const PaintRemapReq
     PaintPlan              plan;
     std::vector<PaintData> base;
     std::string            closed_tool;
-    nlohmann::json gate = run_on_main_thread([&params, &request, &needs, &plan, &base, &closed_tool]() -> nlohmann::json {
+    nlohmann::json gate = run_on_main_thread([&params, &request, &needs, &plan, &base]() -> nlohmann::json {
         PaintTarget target;
         std::string error;
         if (!resolve_paint_target(params, target, error, needs))
@@ -888,10 +910,6 @@ nlohmann::json run_paint_remap(const nlohmann::json& params, const PaintRemapReq
         for (std::size_t i = 0; i < target.volumes.size(); ++i)
             if (target.volumes[i]->mesh().its.indices.empty())
                 return error_response("volume_id " + std::to_string(target.volume_ids[i]) + " has an empty mesh, so it has no paint");
-        // An open paint panel writes its own copy of the paint when it next flushes, over this write: close it first,
-        // as the user would, before the paint this call builds on is captured.
-        if (const auto failed = close_toolbar_tool_for_change(*wxGetApp().plater(), target.object_id, target.object->volumes.size(), closed_tool))
-            return *failed;
         plan = capture_paint_plan(target);
         base = capture_paint_base(target, request.channel);
         return {{"status", "success"}};
@@ -926,8 +944,12 @@ nlohmann::json run_paint_remap(const nlohmann::json& params, const PaintRemapReq
         }
 
         // One snapshot for every volume, so one undo puts all of them back.
-        if (any_change)
+        if (any_change) {
+            // Closed right before the change, and only for one: closing an open paint panel takes its own undo step.
+            if (const auto failed = close_toolbar_tool_for_change(*wxGetApp().plater(), target.object_id, target.object->volumes.size(), closed_tool))
+                return *failed;
             wxGetApp().plater()->take_snapshot(request.snapshot_name);
+        }
         bool           changed = false;
         nlohmann::json volumes = nlohmann::json::array();
         for (std::size_t i = 0; i < plan.volumes.size(); ++i) {
@@ -1001,7 +1023,9 @@ void OrcaMCPServer::register_paint_tools()
         "plate axis (an even split across a "
         "list of filaments, or explicit ranges), a box, a sphere, the whole volume, or visible: the facets "
         "seen from `view` (front-facing and not hidden by the object's other facets), as the texture panel's "
-        "Project only on visible does, in any mode. "
+        "Project only on visible does, in any mode; only the target instance's own model parts can hide a facet "
+        "(other instances and objects never do), and view direction current is the 3D view's camera, the default one "
+        "before the canvas has been drawn. "
         "connected fills the surface region around a seed without crossing an edge sharper than "
         "`angle` -- the way to paint a feature such as a bag or a sleeve; component paints one "
         "shell by id; state repaints every facet now in one state (match_filament, or match_state "
@@ -1201,7 +1225,7 @@ void OrcaMCPServer::register_paint_tools()
             // when request.replace is false. Left empty otherwise.
             std::vector<PaintData> paint_base;
             {
-                nlohmann::json gate = run_on_main_thread([&params, &plan, &request, &channel, &mode, &closed_tool,
+                nlohmann::json gate = run_on_main_thread([&params, &plan, &request, &channel, &mode,
                                                           &paint_base]() -> nlohmann::json {
                     PaintTarget target;
                     std::string error;
@@ -1217,6 +1241,8 @@ void OrcaMCPServer::register_paint_tools()
 
                     if (!parse_paint_request(params, mode, target, request, error))
                         return nlohmann::json{{"status", "error"}, {"message", error}};
+                    if (request.selection == "connected" && !request.seed_by_point && !seed_in_scope(request, target, error))
+                        return nlohmann::json{{"status", "error"}, {"message", error}};
                     if (request.selection == "visible" && !capture_visible_view(params, target, request, error))
                         return nlohmann::json{{"status", "error"}, {"message", error}};
                     if (const auto refusal = texture_paint_refusal(channel, *target.object, target.object_id))
@@ -1230,13 +1256,6 @@ void OrcaMCPServer::register_paint_tools()
                             return nlohmann::json{{"status", "error"},
                                                   {"message", "volume_id " + std::to_string(target.volume_ids[i]) +
                                                               " has an empty mesh, so it has no facets to paint"}};
-
-                    // An open paint panel writes its own copy of the paint when it next flushes, over this write
-                    // (in every mode): close it first, as the user would, before the paint this call builds on is
-                    // captured.
-                    if (const auto failed = close_toolbar_tool_for_change(*wxGetApp().plater(), target.object_id,
-                                                                          target.object->volumes.size(), closed_tool))
-                        return *failed;
 
                     plan       = capture_paint_plan(target);
                     // One loop over target.volumes each, so the two vectors are the same length
@@ -1376,7 +1395,9 @@ void OrcaMCPServer::register_paint_tools()
             if (!seed_error.empty())
                 return nlohmann::json{{"status", "error"}, {"message", seed_error}};
             if (request.selection == "visible")
-                assignments = assign_visible(plan.volumes, request.occluders, request.visible_view, request.state);
+                assignments = assign_visible(plan.volumes, request.occluders.volumes, request.visible_view, request.state);
+            if (Slic3r::this_thread_cancelled())
+                throw McpShuttingDown();
 
             // A seed.volume_id naming a part that is not in scope would otherwise seed nothing,
             // and the call would report success over a selection that covered no facet -- with
@@ -1427,6 +1448,9 @@ void OrcaMCPServer::register_paint_tools()
                 // is the one the states were computed against.
                 if (!resolve_paint_target(params, target, error) || !plan_still_valid(target, plan, error))
                     return nlohmann::json{{"status", "error"}, {"message", error}};
+                // What hid a facet is part of the scene the states were computed from.
+                if (request.selection == "visible" && !plan_still_valid(all_model_parts(target), request.occluders, error))
+                    return nlohmann::json{{"status", "error"}, {"message", error}};
 
                 // A replace: false write was built on top of the paint the volume carried in hop 1.
                 // If a gizmo stroke landed on it while hop 2 ran, applying that write would discard
@@ -1457,8 +1481,14 @@ void OrcaMCPServer::register_paint_tools()
                 for (std::size_t i = 0; i < plan.volumes.size(); ++i)
                     write_changes[i] = !paint_base_unchanged(*target.volumes[std::size_t(plan.volumes[i].index)], channel,
                                                              writes[i].data);
-                if (std::find(write_changes.begin(), write_changes.end(), true) != write_changes.end())
+                if (std::find(write_changes.begin(), write_changes.end(), true) != write_changes.end()) {
+                    // An open paint panel is closed, as the user closes it, right before the change and only for a
+                    // change: closing takes its own undo step, which a refused call or a repaint of what is there
+                    // must not leave behind. Nothing below can refuse, so the closed tool is told in the answer.
+                    if (const auto failed = close_toolbar_tool_for_change(*plater, target.object_id, target.object->volumes.size(), closed_tool))
+                        return *failed;
                     plater->take_snapshot(_u8L("Paint Object") + " (" + paint_mode_name(mode) + ")");
+                }
 
                 // Facets the selection COVERED, which is not the same as facets given a paint:
                 // `filament: 0` covers a facet and unpaints it. Named for what it counts.

@@ -4,6 +4,7 @@
 #include "slic3r/GUI/OrcaMCP/OrcaMCPPaintSelect.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPTextureDisplacement.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "slic3r/Utils/ThreadCancel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -590,4 +591,75 @@ TEST_CASE("Under a perspective view only what lies between a facet and the eye h
     for (size_t f = 0; f < below.states.size(); ++f)
         if (below.states[f] >= 0)
             CHECK(facet_normal_plate(cube.mesh->its, int(f), Transform3d::Identity()).z() < -0.99);
+}
+
+TEST_CASE("A facet hidden by another part of the same mesh is not visible", "[PaintSelect][orcamcp]")
+{
+    // One mesh holding the cube and a block in front of its left half: the block hides a facet of the same part.
+    indexed_triangle_set both = Slic3r::its_make_cube(10., 10., 10.);
+    indexed_triangle_set block = translated(Slic3r::its_make_cube(5., 3., 10.), Vec3f(0.f, -5.f, 0.f));
+    Slic3r::its_merge(both, block);
+    const std::vector<PaintPlanVolume> part = {plan_volume(both, Transform3d::Identity(), 0)};
+    VisibleView view;
+    view.forward = Vec3d::UnitY();
+    const FacetAssignment out = assign_visible(part, part, view, 1)[0];
+    // The block's front (2) and the cube's uncovered front facet (1); the covered one is hidden.
+    CHECK(selected(out) == 3);
+}
+
+TEST_CASE("A mirrored, scaled instance away from the origin is seen from the side it faces", "[PaintSelect][orcamcp]")
+{
+    Transform3d to_plate = Eigen::Translation3d(100., 50., 0.) * Eigen::Scaling(-2., 1.5, 1.);
+    const PaintPlanVolume cube = plan_volume(Slic3r::its_make_cube(10., 10., 10.), to_plate, 1);
+    const std::vector<PaintPlanVolume> targets = {cube};
+    VisibleView top;
+    top.forward = -Vec3d::UnitZ();
+    const FacetAssignment up = assign_visible(targets, targets, top, 1)[0];
+    CHECK(selected(up) == 2);
+    for (size_t f = 0; f < up.states.size(); ++f)
+        if (up.states[f] >= 0) {
+            const auto& face = cube.mesh->its.indices[f];
+            CHECK((to_plate * cube.mesh->its.vertices[face[0]].cast<double>()).z() == 10.);
+        }
+    VisibleView bottom;
+    bottom.forward = Vec3d::UnitZ();
+    const FacetAssignment down = assign_visible(targets, targets, bottom, 1)[0];
+    CHECK(selected(down) == 2);
+    for (size_t f = 0; f < down.states.size(); ++f)
+        if (down.states[f] >= 0)
+            CHECK((to_plate * cube.mesh->its.vertices[cube.mesh->its.indices[f][0]].cast<double>()).z() == 0.);
+    // From the side the mirrored cube still shows only the face turned to the viewer.
+    VisibleView front;
+    front.forward = Vec3d::UnitY();
+    const FacetAssignment side = assign_visible(targets, targets, front, 1)[0];
+    CHECK(selected(side) == 2);
+    for (size_t f = 0; f < side.states.size(); ++f)
+        if (side.states[f] >= 0)
+            CHECK((to_plate * cube.mesh->its.vertices[cube.mesh->its.indices[f][0]].cast<double>()).y() == 50.);
+}
+
+TEST_CASE("A projection frame set in the owner's frame clips through a non-identity owner transform", "[PaintSelect][orcamcp]")
+{
+    const Transform3d owner_to_plate = Eigen::Translation3d(100., 0., 0.) * Eigen::Scaling(2.);
+    const std::vector<PaintPlanVolume> cube = {plan_volume(Slic3r::its_make_cube(10., 10., 10.), owner_to_plate, 0)};
+    VisibleView view;
+    view.forward = -Vec3d::UnitZ();
+    // Plate x 100..110 is the owner's x 0..5, the left half of the top face (plate 100..120, y 0..20).
+    view.frame = orthographic_frame_matrix(Vec3d::UnitX(), Vec3d::UnitY(), Vec3d(105., 10., 0.), 10., 20., owner_to_plate);
+    view.plate_to_frame = owner_to_plate.inverse();
+    CHECK(selected(assign_visible(cube, cube, view, 1)[0]) == 1);
+    // The same frame read through the plate frame instead would miss the cube entirely.
+    view.plate_to_frame = Transform3d::Identity();
+    CHECK(selected(assign_visible(cube, cube, view, 1)[0]) == 0);
+}
+
+TEST_CASE("A cancelled thread selects nothing", "[PaintSelect][orcamcp]")
+{
+    const std::vector<PaintPlanVolume> cube = {plan_volume(Slic3r::its_make_cube(10., 10., 10.), Transform3d::Identity(), 0)};
+    VisibleView view;
+    view.forward = -Vec3d::UnitZ();
+    Slic3r::ScopedThreadCancelCheck cancelled([] { return true; });
+    const FacetAssignment out = assign_visible(cube, cube, view, 1)[0];
+    CHECK(selected(out) == 0);
+    CHECK(out.unassigned == 12);
 }
