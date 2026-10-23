@@ -165,7 +165,11 @@ const char* const TEXTURE_MODE_REFUSAL = "mode texture needs texture_layer: get_
 
 bool mode_is_texture(const nlohmann::json& params)
 {
-    return params.contains("mode") && params["mode"].is_string() && params["mode"].get<std::string>() == "texture";
+    if (!params.contains("mode") || !params["mode"].is_string())
+        return false;
+    std::string name = params["mode"].get<std::string>();
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+    return name == "texture";
 }
 
 bool resolve_paint_modes(const nlohmann::json& params, std::vector<PaintMode>& out, std::string& error)

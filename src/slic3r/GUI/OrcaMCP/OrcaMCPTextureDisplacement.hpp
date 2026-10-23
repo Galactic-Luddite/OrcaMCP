@@ -147,13 +147,17 @@ struct StackFacts
     bool owner_has_uv = false;
     int  physical_filaments = 1;
     bool texture_has_color = false;
+    int  color_mix_count = -1; // the stack's value now, -1 when not known
 };
 // Refusals that need the stack: no free slot; no layer in that slot (lists the slots); colour on grayscale;
 // model_uv without UV; color_mix_count above max(1, 32 - physical_filaments); view_direction / view_axes when
 // the projection after the call is not view; move to_position out of range; adjust_image on a layer with no
-// image. `after` is the layer with the request's settings applied (for add, the new layer).
+// image. `after` is the layer with the request's settings applied (for add, the new layer); `before` is the
+// layer as it is now (nullptr for add). Colour, model_uv and the mixed-colour count are refused only when they
+// would change what the layer or the stack holds, so a value read back from a get is always accepted.
 std::optional<std::string> layer_edit_refusal(int object_id, const std::vector<TextureDisplacementLayer>& stack, const LayerRequest&,
-                                              const TextureDisplacementLayer& after, const StackFacts&);
+                                              const TextureDisplacementLayer* before, const TextureDisplacementLayer& after,
+                                              const StackFacts&);
 std::optional<int>         first_free_slot(const std::vector<TextureDisplacementLayer>&);
 // add_texture_layer's defaults: the slot, and ModelUV when the owner has a UV channel. No image.
 TextureDisplacementLayer new_layer(int slot, bool owner_has_uv);
@@ -265,15 +269,16 @@ struct LayerTexture
     std::optional<std::string> id;
     std::string                source = "project";
 };
-// {layer, position, base, texture {texture (id or null), name, source, path}, color_capable, depth_mm,
+// {layer, position, base, image {texture (id or null), name, source, path}, color_capable, depth_mm,
 // tile_size_mm, rotation_deg, offset, invert, midlevel, smoothing, edge_fade, edge_fade_amount, tile,
-// tile_method, projection, blend, color, view {right, up} (view), projection_frame {active} (view with a
-// frame), unwrap {seam_angle_deg, island_padding_mm, auto_connect_islands, seams, placed_islands, uv_edits}
+// tile_method, projection, blend, color, view_axes {right, up} in plate axes (view; set_texture_displacement's
+// own shape), projection_frame_active (view with a frame; read_layer_request ignores it), unwrap {seam_angle_deg, island_padding_mm, auto_connect_islands, seams, placed_islands, uv_edits}
 // (unwrap), paint [{volume_id, name, painted, stale, painted_facets, coverage_percent}], painted,
 // inactive_settings, warnings}
 nlohmann::json layer_json(const TextureDisplacementLayer& layer, int position, bool base, const LayerTexture& texture,
                           std::optional<bool> color_capable, const std::vector<MaskReport>& paint, bool owner_has_uv,
-                          const std::vector<TextureDisplacementLayer>& stack, const TextureDisplacementOptions& options);
+                          const std::vector<TextureDisplacementLayer>& stack, const TextureDisplacementOptions& options,
+                          const Transform3d& volume_to_world);
 // {pipeline (default | classic), displace_border, smooth {enabled, strength (percent), passes,
 // ignore_outer_ring}, resolution_mm (null = auto), budget_k (null = auto), color_mix, color_mix_count,
 // color_denoise}

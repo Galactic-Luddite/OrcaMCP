@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -31,10 +32,20 @@ struct PaintChannel
     PaintMode mode          = PaintMode::Color;
     int       texture_layer = -1; // the slot, Texture only
 
-    PaintChannel(PaintMode m) : mode(m) {}
+    // Throws for Texture: a texture channel has a slot, so it is made by texture().
+    PaintChannel(PaintMode m) : mode(m)
+    {
+        if (m == PaintMode::Texture)
+            throw std::invalid_argument("a texture paint channel needs its layer: PaintChannel::texture(slot)");
+    }
+    // Throws for a slot outside 0..7.
     static PaintChannel texture(int slot)
     {
-        PaintChannel c(PaintMode::Texture);
+        if (slot < 0 || slot >= int(TEXTURE_DISPLACEMENT_MAX_LAYERS))
+            throw std::invalid_argument("texture layer slot " + std::to_string(slot) + " is outside 0.." +
+                                        std::to_string(int(TEXTURE_DISPLACEMENT_MAX_LAYERS) - 1));
+        PaintChannel c(PaintMode::Color);
+        c.mode          = PaintMode::Texture;
         c.texture_layer = slot;
         return c;
     }

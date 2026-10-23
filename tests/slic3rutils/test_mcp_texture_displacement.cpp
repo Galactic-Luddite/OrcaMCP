@@ -178,7 +178,7 @@ TEST_CASE("a PNG header says what decode_height_texture will find", "[McpTexture
     CHECK_FALSE(png_color_from_file("/no/such/file.png").has_value());
 }
 
-TEST_CASE("two encodings of one picture are the same texture", "[McpTexture][orcamcp]")
+TEST_CASE("an image and its colour twin are two textures", "[McpTexture][orcamcp]")
 {
     DecodedHeightTexture grey;
     grey.width  = 4;
@@ -189,8 +189,11 @@ TEST_CASE("two encodings of one picture are the same texture", "[McpTexture][orc
         rgb.rgb.insert(rgb.rgb.end(), {v, v, v});
     REQUIRE(rgb.has_color());
 
-    CHECK(same_texture(grey, rgb));
-    CHECK(texture_identity(grey).hash == texture_identity(rgb).hash);
+    // The app decodes the one as colour and the other not, so color: true is allowed on one only.
+    CHECK_FALSE(same_texture(grey, rgb));
+    CHECK(texture_identity(grey).hash != texture_identity(rgb).hash);
+    CHECK(same_texture(rgb, rgb));
+    CHECK(texture_identity(rgb).hash == texture_identity(DecodedHeightTexture(rgb)).hash);
 
     DecodedHeightTexture changed = grey;
     changed.pixels[3] = 31;
@@ -349,7 +352,9 @@ TEST_CASE("a layer edit is refused for the stack it lands on", "[McpTexture][orc
         std::string error;
         const auto  req = read(params, error);
         REQUIRE(req.has_value());
-        return layer_edit_refusal(1, stack, *req, after, facts);
+        const auto it = req->layer ? std::find_if(stack.begin(), stack.end(), [&](const TextureDisplacementLayer& l) { return l.slot == *req->layer; })
+                                   : stack.end();
+        return layer_edit_refusal(1, stack, *req, it == stack.end() ? nullptr : &*it, after, facts);
     };
 
     SECTION("no free slot")
@@ -378,10 +383,18 @@ TEST_CASE("a layer edit is refused for the stack it lands on", "[McpTexture][orc
         CHECK_FALSE(check({{"action", "edit"}, {"layer", 0}, {"color", false}}, layer_in(0)).has_value());
         facts.texture_has_color = true;
         CHECK_FALSE(check({{"action", "edit"}, {"layer", 0}, {"color", true}}, layer_in(0)).has_value());
+        // A layer that already colours is not refused for saying so again.
+        facts.texture_has_color = false;
+        stack[0].color_enabled  = true;
+        CHECK_FALSE(check({{"action", "edit"}, {"layer", 0}, {"color", true}}, layer_in(0)).has_value());
     }
     SECTION("model_uv without UV")
     {
         CHECK(check({{"action", "edit"}, {"layer", 0}, {"projection", "model_uv"}}, layer_in(0))->find("UV") != std::string::npos);
+        // Already model_uv (the UV channel went with a 3MF reload): sent back, it is accepted.
+        stack[0].projection_method = TextureProjectionMethod::ModelUV;
+        CHECK_FALSE(check({{"action", "edit"}, {"layer", 0}, {"projection", "model_uv"}}, layer_in(0)).has_value());
+        stack[0].projection_method = TextureProjectionMethod::Triplanar;
         facts.owner_has_uv = true;
         CHECK_FALSE(check({{"action", "edit"}, {"layer", 0}, {"projection", "model_uv"}}, layer_in(0)).has_value());
     }
@@ -390,6 +403,9 @@ TEST_CASE("a layer edit is refused for the stack it lands on", "[McpTexture][orc
         facts.physical_filaments = 30;
         CHECK(check({{"action", "edit"}, {"layer", 0}, {"color_mix_count", 3}}, layer_in(0))->find("room for") != std::string::npos);
         CHECK_FALSE(check({{"action", "edit"}, {"layer", 0}, {"color_mix_count", 2}}, layer_in(0)).has_value());
+        facts.color_mix_count = 3; // the stack already holds it
+        CHECK_FALSE(check({{"action", "edit"}, {"layer", 0}, {"color_mix_count", 3}}, layer_in(0)).has_value());
+        facts.color_mix_count = -1;
         facts.physical_filaments = 40;
         CHECK_FALSE(check({{"action", "edit"}, {"layer", 0}, {"color_mix_count", 1}}, layer_in(0)).has_value());
         CHECK(check({{"action", "edit"}, {"layer", 0}, {"color_mix_count", 2}}, layer_in(0)).has_value());
@@ -464,6 +480,14 @@ TEST_CASE("layer settings map onto the layer and report a change", "[McpTexture]
         CHECK_FALSE(layer.view_project_projective);
         CHECK(layer.tile_enabled);
         CHECK_FALSE(apply_layer_settings(layer, clear));
+    }
+    SECTION("clearing a frame that is not there leaves tiling alone")
+    {
+        layer.tile_enabled = false;
+        LayerSettings clear;
+        clear.clear_projection_frame = true;
+        CHECK_FALSE(apply_layer_settings(layer, clear));
+        CHECK_FALSE(layer.tile_enabled);
     }
     SECTION("the stack's colour options")
     {
@@ -559,6 +583,8 @@ TEST_CASE("what the panel greys out but stores is reported", "[McpTexture][orcam
         CHECK(inactive_settings(stack, top, options, true, false).contains("tile_size_mm"));
         CHECK_FALSE(inactive_settings(stack, top, options, true, false).contains("projection"));
         CHECK(inactive_settings(stack, top, options, false, false).contains("projection"));
+        // Without UV the layer maps by mm, so the tile size is live.
+        CHECK_FALSE(inactive_settings(stack, top, options, false, false).contains("tile_size_mm"));
     }
     SECTION("edge fade, tile and colour")
     {
@@ -581,6 +607,8 @@ TEST_CASE("what the panel greys out but stores is reported", "[McpTexture][orcam
         const json j                = inactive_settings(stack, top, options, false, false);
         for (const char* key : {"tile_size_mm", "rotation_deg", "offset", "tile_method"})
             CHECK(j.contains(key));
+        top.tile_enabled = true; // tiling on under a frame: the method is live
+        CHECK_FALSE(inactive_settings(stack, top, options, false, false).contains("tile_method"));
     }
     CHECK(layer_warnings(base).empty());
     base.midlevel = 0.5f;
@@ -628,6 +656,18 @@ TEST_CASE("mask reports count what each layer paints, and a stale mask apart", "
     CHECK(reports[0][5].painted_facets == 0);
     CHECK(reports[0][0].painted_facets == 0);
 
+    SECTION("a stale mask needs no bake, in the fast form too")
+    {
+        PaintData bad;
+        bad.triangles_to_split.emplace_back(40, 0);
+        bad.used_states[1] = true;
+        part->texture_displacement_facet(5).set_data(PaintData(bad));
+        part->texture_displacement_layers = {layer_in(5)};
+        CHECK_FALSE(needs_bake({layer_in(5)}, reports));
+        CHECK_FALSE(needs_bake_fast(*object, part));
+        part->texture_displacement_layers = {layer_in(5), layer_in(2)};
+        CHECK(needs_bake_fast(*object, part));
+    }
     SECTION("a bake is needed for a painted layer only")
     {
         CHECK_FALSE(needs_bake({layer_in(0), layer_in(1)}, reports));
@@ -691,6 +731,63 @@ TEST_CASE("what a mesh edit dropped is told from the state before", "[McpTexture
         CHECK(j["layers_lost"] == 2);
         CHECK(j.contains("paint_lost"));
     }
+}
+
+TEST_CASE("a first part turned into a modifier leaves its stack unused, not lost", "[McpTexture][orcamcp]")
+{
+    Model        model;
+    ModelObject* object = cube_object(model);
+    ModelVolume* first  = object->volumes.front();
+    ModelVolume* second = object->add_volume(TriangleMesh(its_make_cube(5., 5., 5.)), ModelVolumeType::MODEL_PART, false);
+    first->texture_displacement_layers = {layer_in(0)};
+    paint_facets(*first, 0, 3);
+    const TextureState before = texture_state_of(*object);
+
+    first->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    const json j = texture_changes_json(before, {object}, second);
+    CHECK_FALSE(j.contains("paint_lost"));
+    CHECK_FALSE(j.contains("layers_lost"));
+    REQUIRE(j.contains("stacks_unused"));
+    CHECK(j["stacks_unused"][0]["volume_id"] == 0);
+}
+
+TEST_CASE("a layer read back is accepted and changes nothing", "[McpTexture][orcamcp]")
+{
+    TextureDisplacementOptions options;
+    TextureDisplacementLayer   layer = layer_in(1);
+    layer.name                       = "Bark";
+    layer.depth_mm                   = 0.8f;
+    layer.offset                     = Vec2f(0.25f, 0.5f);
+    layer.projection_method          = TextureProjectionMethod::ViewProjected;
+    layer.view_project_projective    = true;
+    layer.tile_enabled               = false;
+    layer.view_project_right         = Vec3f(0, 1, 0);
+    layer.view_project_up            = Vec3f(0, 0, 1);
+    LayerTexture texture;
+    texture.id = "builtin/Bark.png";
+
+    // The volume is turned a quarter about Z, so the report is in plate axes, not the stored volume ones.
+    Transform3d turned = Transform3d::Identity();
+    turned.rotate(Eigen::AngleAxisd(M_PI / 2., Vec3d::UnitZ()));
+    json echoed = layer_json(layer, 0, true, texture, true, {}, true, {layer}, options, turned);
+    CHECK_THAT(echoed["view_axes"]["right"][0].get<double>(), WithinAbs(-1., 1e-6));
+    CHECK_THAT(echoed["view_axes"]["right"][1].get<double>(), WithinAbs(0., 1e-6));
+    echoed["action"] = "edit";
+
+    std::string error;
+    const auto  req = read_layer_request(echoed, error);
+    INFO(error);
+    REQUIRE(req.has_value());
+    TextureDisplacementLayer after = layer;
+    CHECK_FALSE(apply_layer_settings(after, req->settings));
+    REQUIRE(req->settings.view_axes.has_value());
+    const auto [right, up] = view_projector_axes(req->settings.view_axes->first, req->settings.view_axes->second, turned);
+    CHECK((right - layer.view_project_right).norm() < 1e-5f);
+    CHECK((up - layer.view_project_up).norm() < 1e-5f);
+
+    StackFacts facts;
+    facts.texture_has_color = false;
+    CHECK_FALSE(layer_edit_refusal(1, {layer}, *req, &layer, after, facts).has_value());
 }
 
 TEST_CASE("an unwrap request is read for its shapes and bounds", "[McpTexture][orcamcp]")
@@ -757,13 +854,13 @@ TEST_CASE("a layer and the stack's options are told", "[McpTexture][orcamcp]")
     texture.id     = "builtin/Bark.png";
     texture.source = "builtin";
 
-    const json j = layer_json(layer, 0, true, texture, false, {report}, false, {layer}, options);
+    const json j = layer_json(layer, 0, true, texture, false, {report}, false, {layer}, options, Transform3d::Identity());
     CHECK(j["layer"] == 2);
     CHECK(j["base"] == true);
-    CHECK(j["texture"]["texture"] == "builtin/Bark.png");
+    CHECK(j["image"]["texture"] == "builtin/Bark.png");
     CHECK(j["projection"] == "view");
-    CHECK(j["projection_frame"]["active"] == true);
-    CHECK(j["view"].contains("right"));
+    CHECK(j["projection_frame_active"] == true);
+    CHECK(j["view_axes"].contains("right"));
     CHECK(j["painted"] == true);
     CHECK_THAT(j["paint"][0]["coverage_percent"].get<double>(), WithinAbs(33.33, 1e-6));
     CHECK(j["color_capable"] == false);
@@ -771,8 +868,8 @@ TEST_CASE("a layer and the stack's options are told", "[McpTexture][orcamcp]")
     CHECK(j["warnings"].empty());
 
     LayerTexture project_only;
-    CHECK(layer_json(layer, 0, true, project_only, std::nullopt, {}, false, {layer}, options)["texture"]["source"] == "project");
-    CHECK(layer_json(layer, 0, true, project_only, std::nullopt, {}, false, {layer}, options)["color_capable"].is_null());
+    CHECK(layer_json(layer, 0, true, project_only, std::nullopt, {}, false, {layer}, options, Transform3d::Identity())["image"]["source"] == "project");
+    CHECK(layer_json(layer, 0, true, project_only, std::nullopt, {}, false, {layer}, options, Transform3d::Identity())["color_capable"].is_null());
 
     const json o = stack_options_json(options);
     CHECK(o["pipeline"] == "default");

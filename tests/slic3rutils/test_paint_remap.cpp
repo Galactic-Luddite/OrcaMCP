@@ -308,6 +308,19 @@ TEST_CASE("a texture layer's mask is written and read as its own channel", "[orc
     }
 }
 
+TEST_CASE("a texture channel cannot be made without a layer", "[orcamcp][PaintRemap]")
+{
+    CHECK_THROWS(PaintChannel(PaintMode::Texture));
+    CHECK_THROWS(PaintChannel::texture(-1));
+    CHECK_THROWS(PaintChannel::texture(8));
+    CHECK(PaintChannel::texture(7).texture_layer == 7);
+
+    Model        model;
+    ModelObject* object = model.add_object();
+    ModelVolume* volume = object->add_volume(TriangleMesh(its_make_cube(10.0, 10.0, 10.0)), ModelVolumeType::MODEL_PART, false);
+    CHECK_THROWS(annotation_for_mode(*volume, PaintMode::Texture));
+}
+
 TEST_CASE("texture paint names its states none and painted", "[orcamcp][PaintRemap]")
 {
     int state = -1;

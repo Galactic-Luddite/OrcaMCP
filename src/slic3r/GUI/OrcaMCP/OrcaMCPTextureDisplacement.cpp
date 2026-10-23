@@ -216,17 +216,6 @@ json library_entry_json(const TextureLibraryEntry& entry, const std::string& id,
 
 namespace {
 
-// The image has colour a layer could print with: some pixel is not grey.
-bool has_real_color(const DecodedHeightTexture& t)
-{
-    if (!t.has_color())
-        return false;
-    for (size_t i = 0; i + 2 < t.rgb.size(); i += 3)
-        if (t.rgb[i] != t.rgb[i + 1] || t.rgb[i] != t.rgb[i + 2])
-            return true;
-    return false;
-}
-
 void fnv(std::uint64_t& h, const std::uint8_t* data, size_t n)
 {
     for (size_t i = 0; i < n; ++i) {
@@ -246,7 +235,11 @@ TextureIdentity texture_identity(const DecodedHeightTexture& t)
     const int dims[2] = {t.width, t.height};
     fnv(id.hash, reinterpret_cast<const std::uint8_t*>(dims), sizeof dims);
     fnv(id.hash, t.pixels.data(), t.pixels.size());
-    if (has_real_color(t))
+    // A colour image differs from its grayscale twin: the app decodes the one as colour (color: true is
+    // allowed on it), the other not.
+    const std::uint8_t has_color = t.has_color() ? 1 : 0;
+    fnv(id.hash, &has_color, 1);
+    if (t.has_color())
         fnv(id.hash, t.rgb.data(), t.rgb.size());
     return id;
 }
@@ -255,8 +248,7 @@ bool same_texture(const DecodedHeightTexture& a, const DecodedHeightTexture& b)
 {
     if (a.width != b.width || a.height != b.height || a.pixels != b.pixels)
         return false;
-    const bool ca = has_real_color(a), cb = has_real_color(b);
-    return ca == cb && (!ca || a.rgb == b.rgb);
+    return a.has_color() == b.has_color() && (!a.has_color() || a.rgb == b.rgb);
 }
 
 // ---- One call's layer edit ----
@@ -698,7 +690,8 @@ TextureDisplacementLayer new_layer(int slot, bool owner_has_uv)
 }
 
 std::optional<std::string> layer_edit_refusal(int object_id, const std::vector<TextureDisplacementLayer>& stack, const LayerRequest& req,
-                                              const TextureDisplacementLayer& after, const StackFacts& facts)
+                                              const TextureDisplacementLayer* before, const TextureDisplacementLayer& after,
+                                              const StackFacts& facts)
 {
     const std::string object = "object " + std::to_string(object_id);
     if (req.action == LayerAction::add) {
@@ -724,11 +717,12 @@ std::optional<std::string> layer_edit_refusal(int object_id, const std::vector<T
         return std::nullopt;
     }
     const LayerSettings& s = req.settings;
-    if (s.color.value_or(false) && !facts.texture_has_color)
+    if (s.color.value_or(false) && !facts.texture_has_color && !(before != nullptr && before->color_enabled))
         return "The layer's texture has no colours, so it cannot colour the print: pick a colour texture (get_texture_library lists them) or leave color out";
-    if (s.projection && *s.projection == TextureProjectionMethod::ModelUV && !facts.owner_has_uv)
+    if (s.projection && *s.projection == TextureProjectionMethod::ModelUV && !facts.owner_has_uv &&
+        !(before != nullptr && before->projection_method == TextureProjectionMethod::ModelUV))
         return object + "'s first part has no UV channel, so projection model_uv has nothing to map by (only a textured OBJ brings one)";
-    if (s.color_mix_count) {
+    if (s.color_mix_count && *s.color_mix_count != facts.color_mix_count) {
         const int most = std::max(1, 32 - facts.physical_filaments);
         if (*s.color_mix_count > most)
             return "color_mix_count " + std::to_string(*s.color_mix_count) + " is more than the " + std::to_string(most) +
@@ -757,7 +751,7 @@ template<class T> bool assign(T& field, const std::optional<T>& value)
 bool apply_layer_settings(TextureDisplacementLayer& l, const LayerSettings& s)
 {
     bool changed = false;
-    if (s.clear_projection_frame && (l.view_project_projective || !l.tile_enabled)) {
+    if (s.clear_projection_frame && l.view_project_projective) {
         l.view_project_projective = false;
         l.tile_enabled            = true;
         changed                   = true;
@@ -842,17 +836,18 @@ json inactive_settings(const std::vector<TextureDisplacementLayer>& stack, const
     if (layer.projection_method == TextureProjectionMethod::ModelUV) {
         if (!owner_has_uv)
             out["projection"] = "the first part has no UV channel, so the layer maps like triplanar";
-        out["tile_size_mm"] = "the model's own UV layout is the placement, so there is no tile size";
+        else
+            out["tile_size_mm"] = "the model's own UV layout is the placement, so there is no tile size";
     }
     if (framed)
-        for (const char* key : {"tile_size_mm", "rotation_deg", "offset", "tile_method"})
+        for (const char* key : {"tile_size_mm", "rotation_deg", "offset"})
             out[key] = "a projection frame is the placement";
     const bool base = std::none_of(stack.begin(), stack.end(), [&](const TextureDisplacementLayer& l) { return l.slot < layer.slot; });
     if (base)
         out["blend"] = "the base layer has nothing beneath it to blend with";
     if (!layer.edge_smoothing)
         out["edge_fade_amount"] = "edge_fade is off";
-    if (!layer.tile_enabled && !framed)
+    if (!layer.tile_enabled)
         out["tile_method"] = "tile is off";
     if (layer.color_enabled && !texture_has_color)
         out["color"] = "the texture has no colours";
@@ -930,8 +925,13 @@ bool needs_bake_fast(const ModelObject& object, const ModelVolume* owner)
         if (layer.slot < 0 || size_t(layer.slot) >= TEXTURE_DISPLACEMENT_MAX_LAYERS)
             continue;
         for (const ModelVolume* v : object.volumes)
-            if (v->is_model_part() && !v->texture_displacement_facet(layer.slot).empty())
-                return true;
+            if (v->is_model_part()) {
+                const PaintData& data = v->texture_displacement_facet(layer.slot).get_data();
+                // Painted, as needs_bake counts it: a readable mask with state 1 in it.
+                if (!data.triangles_to_split.empty() && !mask_is_stale(data, v->mesh().its.indices.size()) &&
+                    data.used_states.size() > 1 && data.used_states[1])
+                    return true;
+            }
     }
     return false;
 }
@@ -943,8 +943,6 @@ TextureState texture_state_of(const ModelObject& object)
     TextureState state;
     for (size_t i = 0; i < object.volumes.size(); ++i) {
         const ModelVolume* v = object.volumes[i];
-        if (!v->is_model_part())
-            continue;
         TextureState::Part part;
         part.id        = v->id();
         part.volume_id = int(i);
@@ -953,7 +951,10 @@ TextureState texture_state_of(const ModelObject& object)
         for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
             if (!v->texture_displacement_facet(slot).empty())
                 part.painted_slots.push_back(slot);
-        state.parts.push_back(std::move(part));
+        // A volume of any type is told when it holds a stack or paint: the first part turned into a modifier
+        // keeps its stack, which the object no longer reads.
+        if (v->is_model_part() || part.layers > 0 || !part.painted_slots.empty())
+            state.parts.push_back(std::move(part));
     }
     return state;
 }
@@ -1278,12 +1279,12 @@ json unwrap_json(const PatchUnwrap& unwrap, const TextureDisplacementLayer& laye
 
 json layer_json(const TextureDisplacementLayer& layer, int position, bool base, const LayerTexture& texture, std::optional<bool> color_capable,
                 const std::vector<MaskReport>& paint, bool owner_has_uv, const std::vector<TextureDisplacementLayer>& stack,
-                const TextureDisplacementOptions& options)
+                const TextureDisplacementOptions& options, const Transform3d& volume_to_world)
 {
     json out = {{"layer", layer.slot},
                 {"position", position},
                 {"base", base},
-                {"texture",
+                {"image",
                  {{"texture", texture.id ? json(*texture.id) : json(nullptr)},
                   {"name", layer.name},
                   {"source", texture.source},
@@ -1304,10 +1305,13 @@ json layer_json(const TextureDisplacementLayer& layer, int position, bool base, 
                 {"blend", blend_name(layer.blend_mode)},
                 {"color", layer.color_enabled}};
     if (layer.projection_method == TextureProjectionMethod::ViewProjected) {
-        out["view"] = {{"right", {layer.view_project_right.x(), layer.view_project_right.y(), layer.view_project_right.z()}},
-                       {"up", {layer.view_project_up.x(), layer.view_project_up.y(), layer.view_project_up.z()}}};
+        // In plate axes, the shape set_texture_displacement's view_axes takes: the stored axes are the volume's.
+        const Matrix3d to_world = volume_to_world.matrix().block<3, 3>(0, 0);
+        const Vec3d    right = (to_world * layer.view_project_right.cast<double>()).normalized();
+        const Vec3d    up    = (to_world * layer.view_project_up.cast<double>()).normalized();
+        out["view_axes"] = {{"right", {right.x(), right.y(), right.z()}}, {"up", {up.x(), up.y(), up.z()}}};
         if (layer.view_project_projective)
-            out["projection_frame"] = {{"active", true}};
+            out["projection_frame_active"] = true;
     }
     if (layer.projection_method == TextureProjectionMethod::LSCM)
         out["unwrap"] = {{"seam_angle_deg", layer.lscm_seam_angle_deg},

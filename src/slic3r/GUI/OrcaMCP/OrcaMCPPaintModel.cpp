@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <stdexcept>
 #include <cctype>
 
 namespace Slic3r { namespace GUI { namespace OrcaMCP {
@@ -50,7 +51,7 @@ FacetsAnnotation& annotation_for_mode(ModelVolume& mv, PaintMode mode)
     case PaintMode::Support:   return mv.supported_facets;
     case PaintMode::Seam:      return mv.seam_facets;
     case PaintMode::FuzzySkin: return mv.fuzzy_skin_facets;
-    case PaintMode::Texture:   assert(false && "a texture mask needs its layer: use annotation_for"); break;
+    case PaintMode::Texture:   throw std::invalid_argument("a texture mask needs its layer: use annotation_for");
     case PaintMode::Color:     break;
     }
     return mv.mmu_segmentation_facets;
@@ -63,10 +64,8 @@ const FacetsAnnotation& annotation_for_mode(const ModelVolume& mv, PaintMode mod
 
 FacetsAnnotation& annotation_for(ModelVolume& mv, const PaintChannel& channel)
 {
-    if (channel.mode == PaintMode::Texture) {
-        assert(channel.texture_layer >= 0 && channel.texture_layer < int(TEXTURE_DISPLACEMENT_MAX_LAYERS));
+    if (channel.mode == PaintMode::Texture)
         return mv.texture_displacement_facet(channel.texture_layer);
-    }
     return annotation_for_mode(mv, channel.mode);
 }
 
