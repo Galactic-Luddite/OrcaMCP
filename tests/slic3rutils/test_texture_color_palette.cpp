@@ -32,6 +32,7 @@
 #include "libslic3r/Color.hpp"
 #include "libslic3r/FilamentMixer.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TextureDisplacement.hpp"
@@ -476,6 +477,9 @@ TEST_CASE("removing a layer clears its slot on every part", "[TextureObject][Tex
         CHECK_FALSE(part->texture_displacement_facet(0).empty());
     }
     CHECK_FALSE(remove_texture_layer(*object, 1)); // already gone
+    paint_facets(*parts.back(), 1, 2);               // a mask left in the empty slot is still cleared, and counts
+    CHECK(remove_texture_layer(*object, 1));
+    CHECK(parts.back()->texture_displacement_facet(1).empty());
 }
 
 TEST_CASE("moving a layer exchanges slots one neighbour at a time and keeps the others in order", "[TextureObject][TextureDisplacement]")
@@ -488,7 +492,12 @@ TEST_CASE("moving a layer exchanges slots one neighbour at a time and keeps the 
         for (int slot = 0; slot < 3; ++slot)
             paint_facets(*part, slot, slot + 1); // slot n holds n + 1 facets: tells the masks apart
 
-    const auto facets_in = [&parts](int slot) { return parts.back()->texture_displacement_facet(slot).get_data().triangles_to_split.size(); };
+    const auto facets_in = [&parts](int slot) {
+        const size_t last = parts.back()->texture_displacement_facet(slot).get_data().triangles_to_split.size();
+        // The owner's masks move with the others.
+        CHECK(parts.front()->texture_displacement_facet(slot).get_data().triangles_to_split.size() == last);
+        return last;
+    };
     const auto name_in   = [&parts](int slot) {
         for (const TextureDisplacementLayer &l : parts.front()->texture_displacement_layers)
             if (l.slot == slot)
@@ -630,12 +639,14 @@ TEST_CASE("the bake planned from a captured input is the bake of the same mesh, 
     REQUIRE(plan.results.size() == 1);
     CHECK(last_percent > 0);
 
-    const TextureDisplacementBakeVolume &captured = input.volumes.front();
-    const indexed_triangle_set           direct   = build_texture_displacement(
-        captured.base_mesh, captured.layers, captured.facets_data, captured.options, {}, nullptr, captured.volume_to_world, nullptr,
-        nullptr, nullptr, &captured.texture_anchor, captured.resting_drop);
+    // The panel-free path (the model volume's own overload, which reads nothing from the input) is the oracle.
+    const indexed_triangle_set direct = build_texture_displacement(*volume);
     CHECK(plan.results.front().mesh.its.indices == direct.indices);
     CHECK(plan.results.front().mesh.its.vertices == direct.vertices);
+    float highest = 0.f;
+    for (const Vec3f &v : direct.vertices)
+        highest = std::max(highest, std::abs(v.z()));
+    CHECK(highest > 0.1f); // the ramp image really relieved the sheet
     CHECK(texture_bake_moved(input, plan, 0));
 
     SECTION("A progress hook that says no stops the plan") {
@@ -657,6 +668,15 @@ TEST_CASE("the bake planned from a captured input is the bake of the same mesh, 
         volume->texture_displacement_layers.front().depth_mm += 1.f;
         CHECK_FALSE(texture_bake_applies_to(model, input));
     }
+    SECTION("Where the panel was left is not part of the bake") {
+        volume->texture_displacement_options.active_slot = 3;
+        volume->texture_displacement_options.panel_mode  = 1;
+        CHECK(texture_bake_applies_to(model, input));
+    }
+    SECTION("An image adjustment the panel is showing") {
+        volume->texture_displacement_layers.front().preview_adjust.brightness = 0.5f;
+        CHECK_FALSE(texture_bake_applies_to(model, input));
+    }
     SECTION("A part that is gone") {
         object->delete_volume(0);
         CHECK_FALSE(texture_bake_applies_to(model, input));
@@ -664,5 +684,178 @@ TEST_CASE("the bake planned from a captured input is the bake of the same mesh, 
     SECTION("An object with no paint captures nothing") {
         volume->texture_displacement_facet(0).reset();
         CHECK(capture_texture_bake(*object, {}, true).volumes.empty());
+    }
+}
+
+TEST_CASE("a bake is captured for the painted parts, their drops and their stripped layers", "[TextureObject][TextureDisplacement]")
+{
+    Model        model;
+    ModelObject *object = two_part_object(model, 5.);
+    const std::vector<ModelVolume *> parts = texture_parts(*object);
+    TextureDisplacementLayer         layer = gray_ramp_layer(0);
+    layer.islands       = { TextureIsland{} };
+    layer.lscm_seam_edges = { { 0, 1 } };
+    parts.front()->texture_displacement_layers = { layer };
+
+    SECTION("Nothing painted, nothing captured") {
+        CHECK(capture_texture_bake(*object, {}, true).volumes.empty());
+    }
+    SECTION("Only the upper part painted: its drop counts the unpainted part below, and its layers are stripped") {
+        paint_facets(*parts.back(), 0, 4);
+        const TextureDisplacementBakeInput input = capture_texture_bake(*object, {}, true);
+        CHECK(input.take_snapshot);
+        REQUIRE(input.volumes.size() == 1);
+        CHECK(input.volumes.front().volume_id == parts.back()->id());
+        CHECK_THAT(input.volumes.front().resting_drop, WithinAbs(5., 1e-5));
+        REQUIRE(input.volumes.front().layers.size() == 1);
+        CHECK(input.volumes.front().layers.front().islands.empty());
+        CHECK(input.volumes.front().layers.front().lscm_seam_edges.empty());
+        CHECK(input.volumes.front().texture_anchor.isApprox(texture_anchor(*object)));
+    }
+    SECTION("Both painted: the owner keeps its islands and the lowest part has no drop") {
+        paint_facets(*parts.front(), 0, 4);
+        paint_facets(*parts.back(), 0, 4);
+        const TextureDisplacementBakeInput input = capture_texture_bake(*object, {}, false);
+        REQUIRE(input.volumes.size() == 2);
+        CHECK(input.volumes[0].volume_id == parts.front()->id());
+        CHECK_THAT(input.volumes[0].resting_drop, WithinAbs(0., 1e-5));
+        CHECK(input.volumes[0].layers.front().islands.size() == 1);
+        CHECK(input.volumes[1].layers.front().islands.empty());
+        CHECK(texture_bake_applies_to(model, input));
+
+        SECTION("A drop that changed because an unpainted part moved") {
+            parts.front()->set_offset(Vec3d(0., 0., 1.));
+            CHECK_FALSE(texture_bake_applies_to(model, input));
+        }
+        SECTION("A part turned into a modifier") {
+            parts.back()->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+            CHECK_FALSE(texture_bake_applies_to(model, input));
+        }
+    }
+    SECTION("A part painted after the capture") {
+        paint_facets(*parts.front(), 0, 4);
+        const TextureDisplacementBakeInput input = capture_texture_bake(*object, {}, true);
+        REQUIRE(input.volumes.size() == 1);
+        CHECK(texture_bake_applies_to(model, input));
+        paint_facets(*parts.back(), 0, 4);
+        CHECK_FALSE(texture_bake_applies_to(model, input));
+    }
+}
+
+namespace {
+bool same_entries(const std::vector<Entry> &a, const std::vector<Entry> &b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (a[i].a != b[i].a || a[i].b != b[i].b || a[i].a_percent() != b[i].a_percent() || !a[i].rgb.isApprox(b[i].rgb))
+            return false;
+    return true;
+}
+} // namespace
+
+TEST_CASE("the palette is composed from the project's filaments, the ranking and the free slots", "[TextureObject][TextureColorPalette]")
+{
+    PresetBundle bundle;
+    TextureDisplacementOptions options;
+    options.color_mix_enabled = true;
+    options.color_mix_count   = 3;
+    options.color_despeckle   = 4;
+    const std::vector<ColorRGBA> colors{ RED, BLUE };
+
+    const Gizmo::PaletteInputs inputs = Gizmo::palette_inputs(options, bundle, colors);
+    CHECK(inputs.filaments == colors);
+    CHECK(inputs.mixing);
+    CHECK(inputs.mix_count == 3);
+    CHECK(inputs.free_slots == std::max(0, int(EnforcerBlockerType::ExtruderMax) - int(bundle.filament_presets.size())));
+
+    SECTION("A mixed slot is not a physical filament") {
+        auto *mixed = bundle.project_config.option<ConfigOptionBools>("filament_is_mixed", true);
+        mixed->values = { false, true };
+        CHECK(Gizmo::palette_inputs(options, bundle, colors).filaments == std::vector<ColorRGBA>{ RED });
+    }
+    SECTION("Without a ranking only the filaments are offered; with one, its first mixes") {
+        const std::vector<Entry> single = Gizmo::compose_palette(inputs, std::nullopt, bundle.project_config);
+        CHECK(same_entries(single, Gizmo::make_palette(colors, {})));
+
+        const std::vector<Entry> ranking = Gizmo::rank_mixes(colors, { target(Vec3f(0.5f, 0.f, 0.5f), 1.f) }, 8);
+        REQUIRE_FALSE(ranking.empty());
+        const std::vector<Entry> mixed = Gizmo::compose_palette(inputs, ranking, bundle.project_config);
+        CHECK(mixed.size() > colors.size());
+        CHECK(mixed.size() <= colors.size() + size_t(inputs.mix_count));
+
+        Gizmo::PaletteInputs off = inputs;
+        off.mixing = false;
+        CHECK(same_entries(Gizmo::compose_palette(off, ranking, bundle.project_config), single));
+        Gizmo::PaletteInputs none = inputs;
+        none.free_slots = 0;
+        CHECK(same_entries(Gizmo::compose_palette(none, ranking, bundle.project_config), single));
+    }
+    SECTION("Colour settings rank the stack's own images, as the panel's cache does") {
+        const std::vector<TextureDisplacementLayer> layers{ gradient_layer() };
+        const TextureColorSettings                  settings = Gizmo::color_settings(layers, options, inputs, bundle.project_config);
+        const std::vector<Entry> ranking = Gizmo::rank_mixes(colors, Gizmo::mix_targets(layers),
+                                                             int(EnforcerBlockerType::ExtruderMax) - int(colors.size()));
+        CHECK(same_entries(settings.palette, Gizmo::compose_palette(inputs, ranking, bundle.project_config)));
+        CHECK(same_entries(settings.palette_pure, Gizmo::make_palette(colors, {})));
+        CHECK(settings.despeckle_passes == 4);
+
+        // Nothing colouring: every colour path stays off.
+        TextureDisplacementLayer plain = layers.front();
+        plain.color_enabled = false;
+        CHECK(Gizmo::color_settings({ plain }, options, inputs, bundle.project_config).empty());
+        // Mixing off: the palette is the filaments alone.
+        options.color_mix_enabled = false;
+        const Gizmo::PaletteInputs no_mix = Gizmo::palette_inputs(options, bundle, colors);
+        CHECK(same_entries(Gizmo::color_settings(layers, options, no_mix, bundle.project_config).palette, Gizmo::make_palette(colors, {})));
+    }
+}
+
+TEST_CASE("a prepare is captured for the chosen parts and planned until it is told to stop", "[TextureObject][TextureDisplacement]")
+{
+    Model        model;
+    ModelObject *object = two_part_object(model, 5.);
+    const std::vector<ModelVolume *> parts = texture_parts(*object);
+    parts.front()->texture_displacement_layers = { gray_ramp_layer(0) };
+    paint_facets(*parts.back(), 0, 4);
+
+    TextureDisplacementPrepareParams params;
+    const TextureColorSettings       no_color;
+
+    const TextureDisplacementPrepareInput painted = capture_texture_prepare(*object, params, TexturePrepareScope::PaintedParts, no_color, "step");
+    REQUIRE(painted.volumes.size() == 1);
+    CHECK(painted.volumes.front().volume_id == parts.back()->id());
+    CHECK(painted.snapshot_name == "step");
+    CHECK_FALSE(painted.volumes.front().texture_frame.isApprox(Transform3d::Identity()));
+    CHECK(painted.volumes.front().layers.front().islands.empty());
+
+    const TextureDisplacementPrepareInput all = capture_texture_prepare(*object, params, TexturePrepareScope::AllParts, no_color, "");
+    REQUIRE(all.volumes.size() == 2);
+    CHECK(all.snapshot_name.empty());
+    CHECK(all.volumes.front().volume_id == parts.front()->id());
+
+    SECTION("A plan with nothing to do finishes, each part with an empty result") {
+        int last = 0;
+        const TextureDisplacementPreparePlan plan = plan_texture_prepare(all, [&last](int percent) {
+            last = percent;
+            return true;
+        });
+        CHECK_FALSE(plan.canceled);
+        CHECK(plan.results.size() == 2);
+    }
+    SECTION("A progress hook that says no cancels the plan") {
+        // Only a run that reports progress can be stopped: refine the sheet's painted area.
+        Model        sheet_model;
+        ModelObject *flat = sheet_model.add_object();
+        flat->add_instance();
+        ModelVolume *plate = flat->add_volume(TriangleMesh(sheet(4)), ModelVolumeType::MODEL_PART, false);
+        plate->texture_displacement_layers = { gray_ramp_layer(0) };
+        paint_facets(*plate, 0, int(plate->mesh().its.indices.size()));
+        TextureDisplacementPrepareParams refine;
+        refine.subdiv_target_mm   = 2.f;
+        refine.subdiv_added_triangles = 2000;
+        const TextureDisplacementPrepareInput input = capture_texture_prepare(*flat, refine, TexturePrepareScope::PaintedParts, no_color, "");
+        const TextureDisplacementPreparePlan  plan  = plan_texture_prepare(input, [](int) { return false; });
+        CHECK(plan.canceled);
     }
 }

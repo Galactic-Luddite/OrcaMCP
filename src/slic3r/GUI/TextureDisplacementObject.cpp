@@ -117,15 +117,17 @@ bool remove_texture_layer(ModelObject &object, int slot)
     auto      &layers  = owner->texture_displacement_layers;
     const auto removed = std::remove_if(layers.begin(), layers.end(),
                                         [slot](const TextureDisplacementLayer &l) { return l.slot == slot; });
-    const bool had_layer = removed != layers.end();
+    bool changed = removed != layers.end();
     layers.erase(removed, layers.end());
     if (slot >= 0 && slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS)) {
         // Every model part: paint left in the slot on another part would still bake, and the next layer
         // added reuses the slot.
-        for (ModelVolume *part : texture_parts(object))
+        for (ModelVolume *part : texture_parts(object)) {
+            changed = changed || !part->texture_displacement_facet(slot).empty();
             part->texture_displacement_facet(slot).reset();
+        }
     }
-    return had_layer;
+    return changed;
 }
 
 bool swap_texture_layer_slots(ModelObject &object, int slot_a, int slot_b)

@@ -1394,8 +1394,8 @@ echo "BS an agent's launch gets startup dialogs: the Linux SSL prompt and the pl
 echo "BT replies end their head lines with a bare LF / a request line is read up to its CR, so an LF that arrives later begins the next line (2026-10-02, Streamable HTTP): $(U src/slic3r/GUI/HttpServer.cpp | grep -c 'ssOut << std::endl') / $(U src/slic3r/GUI/HttpServer.cpp | grep -c "async_read_until(socket, buff, '\\\\r'")"
 echo "BU Windows CI's compiler cache keeps objects built with the old version after a bump (depend mode cannot see the precompiled header; 0 = bug): $(U .github/workflows/build_orca.yml | grep -c 'CCACHE_EXTRAFILES')"
 echo "BV two classes named Slic3r::IslandLocator (ConnectedBodies.hpp, MultiMaterialSegmentation.cpp) share one destructor symbol, aborting every painted slice (PR #16774; 0 = bug): $(U src/libslic3r/MultiMaterialSegmentation.cpp | grep -B6 '^class IslandLocator' | grep -c 'namespace {')"
-echo "BW the texture bake and prepare jobs run their work inline in process()/finalize(), which MCP's bake runs as capture / plan / apply (a move: 0 = keep ours): $(U src/slic3r/GUI/Jobs/TextureDisplacementBakeJob.cpp | grep -c 'plan_texture_bake') / $(U src/slic3r/GUI/Jobs/TextureDisplacementPrepareJob.cpp | grep -c 'plan_texture_prepare')"
-echo "BX the texture panel's bake inputs, palette, layer moves, seams and island joins are gizmo members over its selection (a move: 0 = keep ours): $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'texture_stack_owner(') / $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.hpp | grep -c 'compose_palette')"
+echo "BW the texture bake and prepare jobs still run their work inline, which ours moved into plan_/apply_ functions MCP also calls (a move: 1 = keep ours; 0 = upstream changed that code): $(U src/slic3r/GUI/Jobs/TextureDisplacementBakeJob.cpp | grep -c 'const auto moved = \[this\](size_t i)') / $(U src/slic3r/GUI/Jobs/TextureDisplacementPrepareJob.cpp | grep -c 'm_results\[i\] = GLGizmoTextureDisplacement::prepare_mesh')"
+echo "BX the texture panel still holds the seam-path search and the palette's mix pick inline, which ours moved into TextureDisplacementObject and compose_palette (a move: 1 = keep ours; 0 = upstream changed that code): $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'std::priority_queue<QN') / $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'mixes = pick_mixes(\*m_mix_ranking')"
 ```
 
 Items M and N: upstream's `HttpServer::stop` closes every connection at once, so a reply still being
@@ -2094,7 +2094,7 @@ functions the job and MCP both call: `capture_texture_bake` / `plan_texture_bake
 `apply_texture_prepare`, with `queue_texture_displacement_bake` taking the captured input. The apply steps show no dialog and
 push no notification (`finalize()` still does both, from the outcome); a prepare applied with an empty `snapshot_name` takes no
 undo step, so a bake can share the step of the prepare before it; `TexturePrepareScope` moves out of the gizmo into the prepare
-job's header. On a 0, upstream has split the jobs itself: take its split and re-run `slic3rutils_tests "[TextureObject]"`.
+job's header. On a 1, upstream still has the inline code and ours stands; on a 0, upstream changed that code: redo the move on its version and re-run `slic3rutils_tests "[TextureObject],[TextureDisplacement]"`.
 
 Item BX is a move: the texture panel's bake inputs and layer logic were members of the gizmo over its selection
 (`texture_volume()`, `texture_parts()`, `painted_parts()`, `layers_for_part()`, `texture_anchor()`, `resting_drops()`,
@@ -2107,8 +2107,8 @@ Ours moves the model half of each into `GUI/TextureDisplacementObject.{hpp,cpp}`
 `m_c->selection_info()->model_object()` plus the panel's own caches (thumbnails, expanded flags, active and picker slots), and
 adds the public statics `palette_inputs` / `compose_palette` / `color_settings` beside `make_palette` (the panel's two-level
 cache stays: `cached_palette()` calls `compose_palette`, `color_settings_for()` keeps its cache). `filament_palette()` gained
-an overload taking the extruder colours and the bundle, so a caller reads the app on the main thread itself. On a 0, upstream
-moved those functions: take its versions and re-run `slic3rutils_tests "[TextureObject],[TextureColorPalette]"`.
+an overload taking the extruder colours and the bundle, so a caller reads the app on the main thread itself. On a 1, upstream still has the inline code and ours stands; on a 0, upstream changed
+that code: redo the move on its version and re-run `slic3rutils_tests "[TextureObject],[TextureColorPalette]"`.
 
 Item I is not a fork patch -- we deliberately carry nothing for it (see
 `docs/superpowers/plans/2026-09-17-next-release-plan.md`, Stage 3). It is here so the sync notices

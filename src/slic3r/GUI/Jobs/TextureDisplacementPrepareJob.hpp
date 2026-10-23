@@ -90,19 +90,32 @@ enum class TexturePrepareScope { PaintedParts, AllParts };
 TextureDisplacementPrepareInput capture_texture_prepare(const ModelObject &object, const TextureDisplacementPrepareParams &params,
                                                         TexturePrepareScope scope, const TextureColorSettings &color,
                                                         const std::string &snapshot_name);
+struct TextureDisplacementPreparePlan
+{
+    std::vector<TextureDisplacementPrepareResult> results;
+    // `progress` said stop: the parts after the one it stopped in were never prepared, so nothing may be applied.
+    bool                                          canceled = false;
+};
 // Any thread: the prepare of every part of `input`, one after another. `progress` is told the overall
-// percentage and returns false to stop (an empty result for the part it stopped in, none after it).
-std::vector<TextureDisplacementPrepareResult> plan_texture_prepare(const TextureDisplacementPrepareInput &input,
-                                                                   const std::function<bool(int)>       &progress);
-// Main thread: commits the results. Committed, Unchanged (no part needed doing, nothing touched) or
-// PaintLost (a remesh landed but a part kept none of its paint: nothing is committed).
-TextureDisplacementPrepareOutcome apply_texture_prepare(Plater &plater, TextureDisplacementPrepareInput &input,
-                                                        std::vector<TextureDisplacementPrepareResult> &results);
+// percentage and returns false to stop.
+TextureDisplacementPreparePlan plan_texture_prepare(const TextureDisplacementPrepareInput &input,
+                                                    const std::function<bool(int)>       &progress);
+struct TextureDisplacementPrepareApplied
+{
+    TextureDisplacementPrepareOutcome outcome = TextureDisplacementPrepareOutcome::Failed;
+    // The prepared parts' new ids (a prepare gives each a new one), in the input's order: what a bake
+    // planned after it must name.
+    std::vector<ObjectID>             committed;
+};
+// Main thread: commits the plan. Committed, Unchanged (no part needed doing, nothing touched), PaintLost
+// (a remesh landed but a part kept none of its paint: nothing is committed) or Failed (a stopped plan).
+TextureDisplacementPrepareApplied apply_texture_prepare(Plater &plater, TextureDisplacementPrepareInput &input,
+                                                        TextureDisplacementPreparePlan &plan);
 
 class TextureDisplacementPrepareJob : public Job
 {
     TextureDisplacementPrepareInput                            m_input;
-    std::vector<TextureDisplacementPrepareResult>              m_results;
+    TextureDisplacementPreparePlan                             m_plan;
     std::function<void(TextureDisplacementPrepareOutcome)>     m_on_finished;
 
 public:

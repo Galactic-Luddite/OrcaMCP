@@ -47,7 +47,7 @@ void TextureDisplacementPrepareJob::process(Ctl &ctl)
     // throttled to whole percentage points because every call repaints the notification and wakes the
     // idle loop.
     int last_reported = 1;
-    m_results = plan_texture_prepare(m_input, [&ctl, &status, &last_reported](int overall) {
+    m_plan = plan_texture_prepare(m_input, [&ctl, &status, &last_reported](int overall) {
         if (ctl.was_canceled())
             return false;
         if (overall > last_reported) {
@@ -60,16 +60,17 @@ void TextureDisplacementPrepareJob::process(Ctl &ctl)
     ctl.update_status(100, status); // always finish at 100: this is what closes the notification
 }
 
-std::vector<TextureDisplacementPrepareResult> plan_texture_prepare(const TextureDisplacementPrepareInput &input,
-                                                                   const std::function<bool(int)>       &progress)
+TextureDisplacementPreparePlan plan_texture_prepare(const TextureDisplacementPrepareInput &input,
+                                                    const std::function<bool(int)>       &progress)
 {
     // Each part gets its own slice of the range, in order, so one bar covers them all.
     const size_t count = input.volumes.size();
-    std::vector<TextureDisplacementPrepareResult> results(count);
-    bool stopped = false;
+    TextureDisplacementPreparePlan plan;
+    plan.results.resize(count);
+    bool &stopped = plan.canceled;
     for (size_t i = 0; i < count; ++i) {
         const TextureDisplacementPrepareVolume &volume = input.volumes[i];
-        results[i] = GLGizmoTextureDisplacement::prepare_mesh(volume.base_mesh, volume.masks, volume.layers,
+        plan.results[i] = GLGizmoTextureDisplacement::prepare_mesh(volume.base_mesh, volume.masks, volume.layers,
                                                               volume.model_uv, volume.texture_frame,
                                                               input.params, input.color,
                                                               [&progress, &stopped, i, count](int percent) {
@@ -82,7 +83,7 @@ std::vector<TextureDisplacementPrepareResult> plan_texture_prepare(const Texture
         if (stopped)
             break;
     }
-    return results;
+    return plan;
 }
 
 TextureDisplacementPrepareInput capture_texture_prepare(const ModelObject &object, const TextureDisplacementPrepareParams &params,
@@ -127,18 +128,26 @@ void TextureDisplacementPrepareJob::finalize(bool canceled, std::exception_ptr &
 
     if (canceled || eptr)
         return;
-    outcome = apply_texture_prepare(*wxGetApp().plater(), m_input, m_results);
+    outcome = apply_texture_prepare(*wxGetApp().plater(), m_input, m_plan).outcome;
 }
 
-TextureDisplacementPrepareOutcome apply_texture_prepare(Plater &plater_ref, TextureDisplacementPrepareInput &input,
-                                                        std::vector<TextureDisplacementPrepareResult> &results)
+TextureDisplacementPrepareApplied apply_texture_prepare(Plater &plater_ref, TextureDisplacementPrepareInput &input,
+                                                        TextureDisplacementPreparePlan &plan)
 {
+    TextureDisplacementPrepareApplied applied;
+    std::vector<TextureDisplacementPrepareResult> &results = plan.results;
+    // A stopped plan has parts that were never prepared: committing the others would break the promise
+    // that a prepare which cannot finish changes nothing.
+    if (plan.canceled)
+        return applied;
     // One part losing its paint stops the whole prepare, exactly as it stops a single-part one: the
     // promise is that a prepare which cannot carry the paint changes nothing, and committing the other
     // parts would break it halfway. The message that follows tells the user to remesh by hand instead.
     for (const TextureDisplacementPrepareResult &result : results)
-        if (result.paint_lost)
-            return TextureDisplacementPrepareOutcome::PaintLost;
+        if (result.paint_lost) {
+            applied.outcome = TextureDisplacementPrepareOutcome::PaintLost;
+            return applied;
+        }
 
     Plater *plater = &plater_ref;
 
@@ -156,7 +165,8 @@ TextureDisplacementPrepareOutcome apply_texture_prepare(Plater &plater_ref, Text
     }
     if (to_commit.empty()) {
         // Nothing needed doing anywhere, which is not an error - every mesh already met the criteria.
-        return TextureDisplacementPrepareOutcome::Unchanged;
+        applied.outcome = TextureDisplacementPrepareOutcome::Unchanged;
+        return applied;
     }
 
     ModelObject *object = to_commit.front().second->get_object();
@@ -182,6 +192,7 @@ TextureDisplacementPrepareOutcome apply_texture_prepare(Plater &plater_ref, Text
             // restore_painting(), which resets it along with the extra facets for the same reason: it is
             // indexed by triangle and the triangles have changed.
             volume->texture_uv = std::move(results[i].uv);
+            applied.committed.push_back(volume->id());
         }
 
         if (ObjectList *obj_list = wxGetApp().obj_list()) {
@@ -192,7 +203,8 @@ TextureDisplacementPrepareOutcome apply_texture_prepare(Plater &plater_ref, Text
         }
         plater->changed_object(*object);
     }
-    return TextureDisplacementPrepareOutcome::Committed;
+    applied.outcome = TextureDisplacementPrepareOutcome::Committed;
+    return applied;
 }
 
 void queue_texture_displacement_prepare(TextureDisplacementPrepareInput                      &&input,

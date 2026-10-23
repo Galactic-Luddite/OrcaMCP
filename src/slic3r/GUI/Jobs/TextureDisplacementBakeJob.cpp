@@ -175,6 +175,9 @@ TextureBakeOutcome apply_texture_bake(Plater &plater_ref, TextureDisplacementBak
 {
     Plater *plater = &plater_ref;
     TextureBakeOutcome outcome;
+    // A stopped plan has parts that were never displaced; committing the others would apply half a bake.
+    if (plan.canceled)
+        return outcome;
 
     // Judged per part, because on a multibody object only some parts may carry a layer that displaces;
     // the ones that did move are committed and the rest are left exactly as they were.
@@ -208,8 +211,10 @@ TextureBakeOutcome apply_texture_bake(Plater &plater_ref, TextureDisplacementBak
             });
         // The mixed filament slots the bake named: the used entries beyond the single filaments.
         for (const uint8_t entry : used)
+            // A mix that got no slot prints in its dominant component, a physical number below the
+            // physical filament count: not a mixed slot.
             if (size_t(entry) > input.color.palette_pure.size() && size_t(entry) <= filament_of.size() &&
-                filament_of[size_t(entry) - 1] >= 0 &&
+                filament_of[size_t(entry) - 1] >= int(input.color.palette_pure.size()) &&
                 std::find(outcome.mixed_filaments.begin(), outcome.mixed_filaments.end(), filament_of[size_t(entry) - 1]) ==
                     outcome.mixed_filaments.end())
                 outcome.mixed_filaments.push_back(filament_of[size_t(entry) - 1]);
@@ -428,35 +433,48 @@ template<class T> std::string serialized(const T &value)
     }
     return os.str();
 }
+
+// The bake reads a layer's live image adjustments, which the archive leaves out.
+bool same_layers(const std::vector<TextureDisplacementLayer> &a, const std::vector<TextureDisplacementLayer> &b)
+{
+    if (a.size() != b.size() || serialized(a) != serialized(b))
+        return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (!(a[i].preview_adjust == b[i].preview_adjust))
+            return false;
+    return true;
+}
+
+// Options as the bake reads them: where the panel was left (active layer, mode) is not one of them.
+bool same_bake_options(TextureDisplacementOptions a, TextureDisplacementOptions b)
+{
+    a.active_slot = b.active_slot = 0;
+    a.panel_mode  = b.panel_mode  = 0;
+    return serialized(a) == serialized(b);
+}
 } // namespace
 
 bool texture_bake_applies_to(const Model &model, const TextureDisplacementBakeInput &input)
 {
-    const ModelObject *object = nullptr;
-    for (const TextureDisplacementBakeVolume &captured : input.volumes) {
-        const ModelVolume *volume = get_model_volume(captured.volume_id, model.objects);
-        if (volume == nullptr || volume->get_object() == nullptr)
-            return false;
-        if (object == nullptr)
-            object = volume->get_object();
-        else if (object != volume->get_object())
-            return false;
+    if (input.volumes.empty())
+        return true;
+    const ModelVolume *first = get_model_volume(input.volumes.front().volume_id, model.objects);
+    if (first == nullptr || first->get_object() == nullptr)
+        return false;
 
-        const indexed_triangle_set &its = volume->mesh().its;
-        if (its.indices != captured.base_mesh.indices || its.vertices != captured.base_mesh.vertices)
-            return false;
-        for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
-            if (!(volume->texture_displacement_facet(slot).get_data() == captured.facets_data[size_t(slot)]))
-                return false;
-        if (volume->has_texture_uv() ? volume->texture_uv != captured.model_uv : !captured.model_uv.empty())
-            return false;
-        if (texture_displacement_volume_to_world(*volume).matrix() != captured.volume_to_world.matrix())
-            return false;
-        if (serialized(layers_for_part(*object, *volume)) != serialized(captured.layers))
-            return false;
-        const ModelVolume *owner = texture_stack_owner(*object);
-        if (owner == nullptr || serialized(owner->texture_displacement_options) != serialized(captured.options) ||
-            texture_anchor(*object) != captured.texture_anchor)
+    // What a bake started now would capture: the same parts (one painted since, or turned into a modifier,
+    // changes the list), the same drops (they depend on the unpainted parts too) and everything else.
+    const TextureDisplacementBakeInput now = capture_texture_bake(*first->get_object(), input.color, input.take_snapshot);
+    if (now.volumes.size() != input.volumes.size())
+        return false;
+    for (size_t i = 0; i < now.volumes.size(); ++i) {
+        const TextureDisplacementBakeVolume &live = now.volumes[i], &captured = input.volumes[i];
+        if (live.volume_id != captured.volume_id || live.resting_drop != captured.resting_drop ||
+            live.texture_anchor != captured.texture_anchor ||
+            live.volume_to_world.matrix() != captured.volume_to_world.matrix() || live.model_uv != captured.model_uv ||
+            live.base_mesh.indices != captured.base_mesh.indices || live.base_mesh.vertices != captured.base_mesh.vertices ||
+            live.facets_data != captured.facets_data || !same_layers(live.layers, captured.layers) ||
+            !same_bake_options(live.options, captured.options))
             return false;
     }
     return true;

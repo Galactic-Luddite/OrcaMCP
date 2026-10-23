@@ -43,8 +43,8 @@ std::vector<float> resting_drops(const ModelObject &object, const std::vector<Mo
 // the identity for one.
 Transform3d prepare_texture_frame(const ModelObject &object, const ModelVolume &part);
 
-// Removes the layer in `slot` and resets that slot's mask on every model part. False when the slot is
-// out of range or holds no layer (nothing changed then).
+// Removes the layer in `slot` and resets that slot's mask on every model part. False when there was
+// neither a layer nor a mask in it (nothing changed then).
 bool remove_texture_layer(ModelObject &object, int slot);
 // Exchanges two slots: the layer definitions and the masks of every model part. No undo step.
 // False when nothing was exchanged (equal or out-of-range slots, no model part).
