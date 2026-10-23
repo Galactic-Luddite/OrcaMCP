@@ -1,5 +1,6 @@
 // src/slic3r/GUI/OrcaMCP/OrcaMCPTextureDisplacement.cpp
 #include "OrcaMCPTextureDisplacement.hpp"
+#include "OrcaMCPCommon.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -955,13 +956,14 @@ std::vector<std::string> layer_warnings(const TextureDisplacementLayer& layer)
 
 bool mask_is_stale(const PaintData& data, std::size_t facet_count)
 {
-    for (const TriangleSelector::TriangleBitStreamMapping& m : data.triangles_to_split)
-        if (m.triangle_idx < 0 || size_t(m.triangle_idx) >= facet_count)
-            return true;
-    return false;
+    // triangles_to_split is sorted by triangle_idx (FacetsAnnotation::get_triangle_as_string searches it), so the
+    // smallest and the largest index decide; a scene read polls this for every layer of every part.
+    if (data.triangles_to_split.empty())
+        return false;
+    return data.triangles_to_split.front().triangle_idx < 0 || size_t(data.triangles_to_split.back().triangle_idx) >= facet_count;
 }
 
-std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_reports(const std::vector<MaskInput>& inputs)
+std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_reports(const std::vector<MaskInput>& inputs, const std::vector<int>* slots)
 {
     std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> out;
     out.reserve(inputs.size());
@@ -971,6 +973,8 @@ std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_report
             MaskReport& rep = row[slot];
             rep.volume_id   = in.volume_id;
             rep.name        = in.name;
+            if (slots != nullptr && std::find(slots->begin(), slots->end(), int(slot)) == slots->end())
+                continue;
             const PaintData& data = in.masks[slot];
             if (data.triangles_to_split.empty() || !in.mesh)
                 continue;
@@ -989,15 +993,96 @@ std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_report
     return out;
 }
 
-MaskInput mask_input_of(const ModelVolume& v, int volume_id)
+MaskInput mask_input_of(const ModelVolume& v, int volume_id, const std::vector<int>* slots)
 {
     MaskInput input;
     input.volume_id = volume_id;
     input.name      = v.name;
     input.mesh      = v.mesh_ptr();
     for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
-        input.masks[size_t(slot)] = v.texture_displacement_facet(slot).get_data();
+        if (slots == nullptr || std::find(slots->begin(), slots->end(), slot) != slots->end())
+            input.masks[size_t(slot)] = v.texture_displacement_facet(slot).get_data();
     return input;
+}
+
+bool has_texture_paint(const ModelVolume& v)
+{
+    for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
+        if (mask_has_paint(v.texture_displacement_facet(slot).get_data(), v.mesh().its.indices.size()))
+            return true;
+    return false;
+}
+
+std::vector<int> texture_slots_painting_facet(const MaskInput& input, int facet)
+{
+    std::vector<int> slots;
+    if (!input.mesh || facet < 0 || size_t(facet) >= input.mesh->its.indices.size())
+        return slots;
+    for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot) {
+        const PaintData& data = input.masks[size_t(slot)];
+        if (!mask_has_paint(data, input.mesh->its.indices.size()))
+            continue;
+        TriangleSelector selector(*input.mesh);
+        selector.deserialize(data, false);
+        std::vector<int> source;
+        selector.get_facets_strict(EnforcerBlockerType::ENFORCER, &source);
+        if (std::find(source.begin(), source.end(), facet) != source.end())
+            slots.push_back(slot);
+    }
+    return slots;
+}
+
+bool resolve_paint_selection(const nlohmann::json& params, const std::vector<int>& stack_slots, bool all_slots_default,
+                             PaintSelection& out, std::string& error)
+{
+    PaintMode mode = PaintMode::Color;
+    out            = PaintSelection{};
+    out.named_mode = params.contains("mode");
+    if (out.named_mode && !(params["mode"].is_string() && parse_paint_mode(params["mode"].get<std::string>(), mode))) {
+        error = "Unknown mode; expected color, support, seam, fuzzy_skin or texture";
+        return false;
+    }
+    if (!(out.named_mode && mode == PaintMode::Texture) && params.contains("texture_layer")) {
+        error = "texture_layer belongs to mode texture: it names the layer whose paint this call reads or clears";
+        return false;
+    }
+    out.label = out.named_mode ? paint_mode_name(mode) : "all";
+    if (!out.named_mode) {
+        out.modes = {PaintMode::Color, PaintMode::Support, PaintMode::Seam, PaintMode::FuzzySkin};
+        return true;
+    }
+    if (mode != PaintMode::Texture) {
+        out.modes = {mode};
+        return true;
+    }
+    out.texture = true;
+    if (params.contains("texture_layer")) {
+        int slot = -1;
+        if (!parse_integer_param(params["texture_layer"], slot) || slot < 0 || slot >= int(TEXTURE_DISPLACEMENT_MAX_LAYERS)) {
+            error = "texture_layer must be a whole number from 0 to " + std::to_string(int(TEXTURE_DISPLACEMENT_MAX_LAYERS) - 1);
+            return false;
+        }
+        out.texture_slots = {slot};
+    } else if (all_slots_default) {
+        for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
+            out.texture_slots.push_back(slot);
+    } else {
+        out.texture_slots = stack_slots;
+    }
+    return true;
+}
+
+std::string texture_remap_refusal(const std::map<int, int>& mapping)
+{
+    for (const auto& [from, to] : mapping)
+        if (from > 1)
+            return "a texture mask has two states, 0 unpainted and 1 painted, so " + std::to_string(from) + " cannot be renumbered";
+    const auto painted = mapping.find(1);
+    const auto bare    = mapping.find(0);
+    if (painted != mapping.end() && painted->second == 0 && (bare == mapping.end() || bare->second == 0))
+        return "mapping 1 to 0 without painting the bare facets leaves split facets in the mask instead of erasing it: "
+               "clear_object_paint {mode: texture, texture_layer} clears a layer's paint; {\"0\": 1, \"1\": 0} inverts it";
+    return {};
 }
 
 std::vector<int> layer_slots_of(const ModelVolume* owner)
@@ -1008,6 +1093,11 @@ std::vector<int> layer_slots_of(const ModelVolume* owner)
             slots.push_back(layer.slot);
     std::sort(slots.begin(), slots.end());
     return slots;
+}
+
+nlohmann::json texture_paint_layers_cleared_json(const std::vector<int>& slots)
+{
+    return texture_paint_layers_json(std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>{}, slots);
 }
 
 nlohmann::json texture_paint_layers_json(const std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>& row, const std::vector<int>& slots)
@@ -1040,7 +1130,7 @@ nlohmann::json texture_volume_fields(const ModelObject& object, std::size_t volu
     const ModelVolume& volume = *object.volumes.at(volume_idx);
     nlohmann::json     slots  = nlohmann::json::array();
     for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
-        if (!volume.texture_displacement_facet(slot).empty())
+        if (mask_has_paint(volume.texture_displacement_facet(slot).get_data(), volume.mesh().its.indices.size()))
             slots.push_back(slot);
     return {{"model_uv", volume.has_texture_uv()},
             {"texture_layers", &volume == texture_stack_owner(object) ? int(volume.texture_displacement_layers.size()) : 0},

@@ -2479,7 +2479,7 @@ negative volume, support blocker) with its type and filament. It does not check 
 **Texture fields:** the object has `texture_layers`, `needs_bake` and `model_uv` as `get_scene_info`
 describes them, and each volume row (here, and in the part tools' `volumes`) has `model_uv` (the part has
 a UV channel), `texture_layers` (its layer count when it owns the stack, else `0`) and
-`texture_paint_layers` (the slots whose mask holds paint, `[]` for none).
+`texture_paint_layers` (the slots whose mask holds readable paint -- not a stale or all-unpainted mask --, `[]` for none).
 
 **Placement fields:** alongside `position`, `bounding_box`, `rotation_degrees` and `scale`, the
 response carries the same placement fields the transform tools return:
@@ -3771,7 +3771,7 @@ exporter numbered 1 to 3.
 | `mapping` | object | Yes | Old filament → new filament, e.g. `{"1": 2, "2": 3, "3": 4}` |
 | `volume_id` | integer | No | Part index (0-based); omit or `-1` for every model part |
 | `mode` | string | No | `color` (the default) or `texture`. For support, seam or fuzzy-skin states use `paint_object`'s `selection: state` |
-| `texture_layer` | integer | with `mode: texture` | The slot (0-7) of the texture layer whose mask is renumbered; the layer must exist. Texture states are `0` unpainted and `1` painted, so `{"1": 0}` unpaints the layer. Reordering layers is `set_texture_displacement`, action `move`. An open paint panel is closed first (`closed_toolbar_tool`), only when the mask changes |
+| `texture_layer` | integer | with `mode: texture` | The slot (0-7) of the texture layer whose mask is renumbered; the layer must exist. Texture states are `0` unpainted and `1` painted; `{"0": 1, "1": 0}` inverts the layer. A mapping that only sends `1` to `0` is refused (it leaves split facets in the mask): `clear_object_paint` erases a layer's paint. Reordering layers is `set_texture_displacement`, action `move`. An open paint panel is closed first (`closed_toolbar_tool`), only when the mask changes |
 
 - Filaments the mapping does not list keep their facets; two mapped to one merge.
 - `0` means unpainted: as a key it paints the bare facets, as a value it unpaints.
@@ -3845,7 +3845,7 @@ Reset an annotation, the equivalent of the gizmo's "Remove all".
 | `object_id` | integer | Yes | Object index (0-based) |
 | `volume_id` | integer | No | Part index (0-based); omit or `-1` for every part |
 | `mode` | string | No | Which annotation; omit to clear the four paint modes (texture masks are not print paint and stay) |
-| `texture_layer` | integer | No | With `mode: texture`: clear this slot's mask (0-7); omit to clear all eight. The layers stay |
+| `texture_layer` | integer | No | With `mode: texture`: clear this slot's mask (0-7); omit to clear all eight. The layers stay. A texture panel open on the object is closed first, so strokes it has not written back are cleared too; that close is the panel's own undo step, taken even when nothing is left to clear |
 
 There is no `instance_id`: paint lives on the volume and every instance shares it, so
 clearing itself is instance-independent. The response's `bounding_box` still needs *some*
@@ -3958,7 +3958,7 @@ Give exactly one of `point`, `ray`, or `pixel` (+ `camera`).
 **Response includes:** `volume_id`, `volume_name`, `facet`, `point` (plate mm, on the
 surface), `normal` (unit vector, plate frame), `distance_mm` (from the query point or ray
 origin), `query` (which of `point`/`ray`/`pixel` was used), `coordinate_frame` (`"plate"`),
-`instance_id`; `texture_layers` (the slots of the texture displacement layers whose mask paints the facet, wholly or in part; empty when none); with `include_component`: `component` (the shell id) and `component_count`.
+`instance_id`; `texture_layers` (the slots of the texture displacement layers whose mask paints part or all of the picked facet, from the facet's own leaf states; stale and all-unpainted masks are left out; empty when none); with `include_component`: `component` (the shell id) and `component_count`.
 
 The loop this closes: `render_plate_view` → read the image → `pick_facet {pixel, camera}` →
 `paint_object {selection: "connected", seed: {point}}`.

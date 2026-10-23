@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -227,13 +228,39 @@ struct MaskReport
     double      area_ratio = 0.;
 };
 // Any thread, state 1 only: one report per slot for each part.
-std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_reports(const std::vector<MaskInput>&);
-// One part's eight masks and mesh, copied (volume_id: its position among the object's volumes).
-MaskInput mask_input_of(const ModelVolume&, int volume_id);
+// `slots`: report only those (the others stay unbuilt); null reports all eight.
+std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_reports(const std::vector<MaskInput>&, const std::vector<int>* slots = nullptr);
+// One part's masks and mesh, copied (volume_id: its position among the object's volumes). `slots`: copy only those
+// masks (the others stay empty); null copies all eight.
+MaskInput mask_input_of(const ModelVolume&, int volume_id, const std::vector<int>* slots = nullptr);
+// Some mask of the part holds paint (a readable state 1): worth copying for a facet pick.
+bool has_texture_paint(const ModelVolume&);
+// The slots whose mask paints original facet `facet` of `input`'s mesh, wholly or in part: read from the facet's own leaf
+// states (the mask must be readable and hold state 1; stale and all-unpainted masks are left out).
+std::vector<int> texture_slots_painting_facet(const MaskInput& input, int facet);
+
+// What `mode` and `texture_layer` ask get_object_paint and clear_object_paint for. mode absent: the four paint modes
+// (texture masks are not print paint); a mode: that one; texture also names a slot, or without one `stack_slots` (a
+// read) or all eight slots (`all_slots_default`, a clear). texture_layer without mode texture is refused.
+struct PaintSelection
+{
+    std::vector<PaintMode> modes;         // the non-texture modes
+    bool                   texture = false;
+    std::vector<int>       texture_slots; // when texture
+    bool                   named_mode = false;
+    std::string            label;         // for an undo name: the mode, or "all"
+};
+bool resolve_paint_selection(const nlohmann::json& params, const std::vector<int>& stack_slots, bool all_slots_default,
+                             PaintSelection& out, std::string& error);
+// A texture mapping refused: a state above 1 (a mask has 0 unpainted and 1 painted), or one that sends every painted
+// state to 0, which leaves split facets serialized (clear_object_paint erases). Empty when fine.
+std::string texture_remap_refusal(const std::map<int, int>& mapping);
 // The slots of an owner's layers, ascending; none for no owner.
 std::vector<int> layer_slots_of(const ModelVolume* owner);
 // [{layer, painted_facets, coverage_percent, stale?}] for `slots` from one part's reports; stale only when true.
 nlohmann::json texture_paint_layers_json(const std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>& row, const std::vector<int>& slots);
+// The same for slots just cleared: painted nowhere, nothing stale.
+nlohmann::json texture_paint_layers_cleared_json(const std::vector<int>& slots);
 // The texture state an object's description carries, cheap enough for every object of a scene (no selector is built):
 // {texture_layers: the owner's layer count, needs_bake: needs_bake_fast, model_uv: some model part has a UV channel}.
 nlohmann::json texture_object_fields(const ModelObject&);

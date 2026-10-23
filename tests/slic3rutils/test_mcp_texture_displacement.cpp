@@ -747,9 +747,13 @@ TEST_CASE("an object and its volume rows say their texture state without a selec
         const nlohmann::json fields = texture_object_fields(*object);
         CHECK(fields["texture_layers"] == 2);
         CHECK(fields["needs_bake"] == true);
+        PaintData unpainted; // an entry whose state is 0: stored, but nothing is painted
+        unpainted.triangles_to_split.emplace_back(0, 0);
+        part->texture_displacement_facet(6).set_data(PaintData(unpainted));
         const nlohmann::json row = texture_volume_fields(*object, 0);
         CHECK(row["texture_layers"] == 2);
-        CHECK(row["texture_paint_layers"] == nlohmann::json::array({2, 5}));
+        // slot 5 is stale and slot 6 holds no painted state: neither is paint
+        CHECK(row["texture_paint_layers"] == nlohmann::json::array({2}));
 
         part->texture_displacement_facet(2).set_data(PaintData());
         CHECK(texture_object_fields(*object)["needs_bake"] == false); // only the stale mask is left
@@ -763,6 +767,132 @@ TEST_CASE("an object and its volume rows say their texture state without a selec
         CHECK(texture_volume_fields(*object, 1)["texture_layers"] == 0);
         CHECK(texture_object_fields(*object)["texture_layers"] == 1);
     }
+}
+
+TEST_CASE("a mask is stale when its first or last entry is outside the mesh", "[McpTexture][orcamcp]")
+{
+    const auto mask_of = [](std::initializer_list<int> triangles) {
+        PaintData data;
+        int       offset = 0;
+        for (int triangle : triangles) {
+            data.triangles_to_split.emplace_back(triangle, offset);
+            offset += 4;
+        }
+        return data;
+    };
+    CHECK_FALSE(mask_is_stale(PaintData(), 12));
+    CHECK_FALSE(mask_is_stale(mask_of({0, 5, 11}), 12));
+    CHECK(mask_is_stale(mask_of({0, 5, 11}), 11)); // the last entry
+    CHECK(mask_is_stale(mask_of({-1, 5}), 12));    // the first entry
+    CHECK(mask_is_stale(mask_of({3, 12}), 12));
+    CHECK_FALSE(mask_is_stale(mask_of({3, 12}), 13));
+}
+
+TEST_CASE("masks are copied and reported for the slots asked for", "[McpTexture][orcamcp]")
+{
+    Model        model;
+    ModelObject* object = cube_object(model);
+    ModelVolume* part   = object->volumes.front();
+    paint_facets(*part, 2, 4);
+    paint_facets(*part, 3, 6);
+
+    const std::vector<int> only_two = {2};
+    MaskInput              input    = mask_input_of(*part, 0, &only_two);
+    CHECK_FALSE(input.masks[2].triangles_to_split.empty());
+    CHECK(input.masks[3].triangles_to_split.empty());
+
+    MaskInput all = mask_input_of(*part, 0);
+    const auto limited = mask_reports({all}, &only_two);
+    CHECK(limited[0][2].painted_facets == 4);
+    CHECK(limited[0][3].painted_facets == 0); // slot 3 is painted but was not asked for
+    CHECK(mask_reports({all})[0][3].painted_facets == 6);
+
+    const nlohmann::json cleared = texture_paint_layers_cleared_json({2, 3});
+    REQUIRE(cleared.size() == 2);
+    CHECK(cleared[1]["layer"] == 3);
+    CHECK(cleared[1]["painted_facets"] == 0);
+    CHECK_FALSE(cleared[1].contains("stale"));
+}
+
+TEST_CASE("the texture layers painting a facet come from its own leaf states", "[McpTexture][orcamcp]")
+{
+    Model        model;
+    ModelObject* object = cube_object(model);
+    ModelVolume* part   = object->volumes.front();
+    paint_facets(*part, 2, 4); // facets 0..3
+    paint_facets(*part, 4, 1); // facet 0 only
+    PaintData stale;
+    stale.triangles_to_split.emplace_back(40, 0);
+    stale.used_states[1] = true;
+    part->texture_displacement_facet(5).set_data(PaintData(stale));
+
+    MaskInput input = mask_input_of(*part, 0);
+    CHECK(texture_slots_painting_facet(input, 0) == std::vector<int>{2, 4});
+    CHECK(texture_slots_painting_facet(input, 3) == std::vector<int>{2});
+    CHECK(texture_slots_painting_facet(input, 4).empty());
+    CHECK(texture_slots_painting_facet(input, 7).empty());
+    CHECK(texture_slots_painting_facet(input, -1).empty());
+    CHECK(texture_slots_painting_facet(input, 99).empty());
+    CHECK(has_texture_paint(*part));
+    part->texture_displacement_facet(2).set_data(PaintData());
+    part->texture_displacement_facet(4).set_data(PaintData());
+    CHECK_FALSE(has_texture_paint(*part)); // slot 5 is stale
+}
+
+TEST_CASE("get_object_paint and clear_object_paint read mode and texture_layer", "[McpTexture][orcamcp]")
+{
+    PaintSelection selection;
+    std::string    error;
+    const std::vector<int> stack = {1, 4};
+
+    SECTION("no mode is the four paint modes")
+    {
+        REQUIRE(resolve_paint_selection({}, stack, false, selection, error));
+        CHECK(selection.modes.size() == 4);
+        CHECK_FALSE(selection.texture);
+        CHECK(selection.label == "all");
+        CHECK_FALSE(selection.named_mode);
+    }
+    SECTION("texture_layer without mode texture is refused")
+    {
+        CHECK_FALSE(resolve_paint_selection({{"texture_layer", 1}}, stack, false, selection, error));
+        CHECK(error.find("texture_layer belongs to mode texture") != std::string::npos);
+        CHECK_FALSE(resolve_paint_selection({{"mode", "color"}, {"texture_layer", 1}}, stack, false, selection, error));
+    }
+    SECTION("a read of texture takes the stack's slots, a clear all eight")
+    {
+        REQUIRE(resolve_paint_selection({{"mode", "Texture"}}, stack, false, selection, error));
+        CHECK(selection.texture);
+        CHECK(selection.modes.empty());
+        CHECK(selection.texture_slots == stack);
+        CHECK(selection.label == "texture");
+        REQUIRE(resolve_paint_selection({{"mode", "texture"}}, {}, true, selection, error));
+        CHECK(selection.texture_slots.size() == TEXTURE_DISPLACEMENT_MAX_LAYERS);
+    }
+    SECTION("a named layer is that slot, in range")
+    {
+        REQUIRE(resolve_paint_selection({{"mode", "texture"}, {"texture_layer", 6}}, stack, true, selection, error));
+        CHECK(selection.texture_slots == std::vector<int>{6});
+        CHECK_FALSE(resolve_paint_selection({{"mode", "texture"}, {"texture_layer", 8}}, stack, true, selection, error));
+        CHECK_FALSE(resolve_paint_selection({{"mode", "texture"}, {"texture_layer", -1}}, stack, true, selection, error));
+        CHECK_FALSE(resolve_paint_selection({{"mode", "texture"}, {"texture_layer", "abc"}}, stack, true, selection, error));
+    }
+    SECTION("an unknown mode is refused")
+    {
+        CHECK_FALSE(resolve_paint_selection({{"mode", "mmu"}}, stack, false, selection, error));
+        CHECK_FALSE(resolve_paint_selection({{"mode", 3}}, stack, false, selection, error));
+    }
+}
+
+TEST_CASE("a texture mapping is refused when it cannot erase or renumber a mask", "[McpTexture][orcamcp]")
+{
+    CHECK(texture_remap_refusal({{0, 1}, {1, 0}}).empty()); // inversion
+    CHECK(texture_remap_refusal({{0, 1}}).empty());
+    CHECK(texture_remap_refusal({{1, 1}}).empty());
+    CHECK(texture_remap_refusal({{1, 0}, {0, 1}}).empty());
+    CHECK(texture_remap_refusal({{1, 0}}).find("clear_object_paint") != std::string::npos);
+    CHECK_FALSE(texture_remap_refusal({{1, 0}, {0, 0}}).empty());
+    CHECK(texture_remap_refusal({{2, 0}}).find("2 cannot be renumbered") != std::string::npos);
 }
 
 TEST_CASE("what a mesh edit dropped is told from the state before", "[McpTexture][orcamcp]")

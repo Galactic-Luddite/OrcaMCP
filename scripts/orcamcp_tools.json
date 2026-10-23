@@ -600,7 +600,7 @@
     },
     {
       "category": "Painting",
-      "description": "Reset a paint annotation on an object back to unpainted -- the equivalent of the paint gizmo's 'Remove all' button. mode picks which annotation; omit it to clear all four, which paint_object cannot do in one call. Texture displacement masks are not print paint: without mode they stay; mode texture clears one texture_layer's mask, or all eight slots without it (the layers themselves stay; an open paint panel is closed first, closed_toolbar_tool). Clearing is instance-independent: paint lives on the volume, so there is no instance_id here.",
+      "description": "Reset a paint annotation on an object back to unpainted -- the equivalent of the paint gizmo's 'Remove all' button. mode picks which annotation; omit it to clear all four, which paint_object cannot do in one call. Texture displacement masks are not print paint: without mode they stay; mode texture clears one texture_layer's mask, or all eight slots without it (the layers themselves stay). A texture panel open on the object is closed first, so strokes it has not written back are cleared too (closed_toolbar_tool); that close is the panel's own undo step and is taken even when the clear then finds nothing to clear. Clearing is instance-independent: paint lives on the volume, so there is no instance_id here.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2211,7 +2211,7 @@
     },
     {
       "category": "Painting",
-      "description": "Find the facet a point, a ray, or a pixel of a render lands on. Give ONE of: point [x,y,z] (plate mm; snaps to the nearest surface), ray {origin, direction} (plate mm; first hit), or pixel [u,v] plus the `camera` object from a render_plate_view result (u right, v down, (0,0) top-left). Returns the volume, facet, plate point and normal -- feed `point` straight into paint_object {selection: \"connected\", seed: {point}}. include_component adds the shell id for paint_object {selection: \"component\"}; it costs a pass over the mesh. texture_layers lists the slots of the texture displacement layers whose paint covers the facet, wholly or in part (empty when none).",
+      "description": "Find the facet a point, a ray, or a pixel of a render lands on. Give ONE of: point [x,y,z] (plate mm; snaps to the nearest surface), ray {origin, direction} (plate mm; first hit), or pixel [u,v] plus the `camera` object from a render_plate_view result (u right, v down, (0,0) top-left). Returns the volume, facet, plate point and normal -- feed `point` straight into paint_object {selection: \"connected\", seed: {point}}. include_component adds the shell id for paint_object {selection: \"component\"}; it costs a pass over the mesh. texture_layers lists the slots of the texture displacement layers whose paint covers part or all of the picked facet (empty when none).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2622,7 +2622,7 @@
     },
     {
       "category": "Painting",
-      "description": "Renumber an object's painted filaments in one step: mapping {\"1\": 2, \"2\": 3, \"3\": 4} moves every facet painted with filament 1 to 2, 2 to 3 and 3 to 4 together -- never chained, so 1 does not end up at 3 -- which frees slot 1, e.g. for a support filament. Filaments the mapping does not list keep their facets. 0 means unpainted: as a key it paints the bare facets, as a value it unpaints. New filaments must be existing slots (get_filaments). One undo step. Returns facet counts per filament before and after (facets_before / facets_after, and per volume). Unpainted facets print with the part's own filament, which this leaves as it is: when the mapping moves that filament, notes names the set_object_filament call that moves them too. For one filament, paint_object with selection \"state\" does the same. mode texture renumbers one texture_layer's mask instead ({\"1\": 0} unpaints it); moving layers is set_texture_displacement, action move.",
+      "description": "Renumber an object's painted filaments in one step: mapping {\"1\": 2, \"2\": 3, \"3\": 4} moves every facet painted with filament 1 to 2, 2 to 3 and 3 to 4 together -- never chained, so 1 does not end up at 3 -- which frees slot 1, e.g. for a support filament. Filaments the mapping does not list keep their facets. 0 means unpainted: as a key it paints the bare facets, as a value it unpaints. New filaments must be existing slots (get_filaments). One undo step. Returns facet counts per filament before and after (facets_before / facets_after, and per volume). Unpainted facets print with the part's own filament, which this leaves as it is: when the mapping moves that filament, notes names the set_object_filament call that moves them too. For one filament, paint_object with selection \"state\" does the same. mode texture renumbers one texture_layer's mask instead ({\"0\": 1, \"1\": 0} inverts it; clear_object_paint erases it); moving layers is set_texture_displacement, action move.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

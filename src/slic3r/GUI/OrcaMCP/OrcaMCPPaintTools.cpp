@@ -17,6 +17,7 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmosManager.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/TextureDisplacementObject.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
@@ -177,64 +178,6 @@ bool read_texture_slot(const nlohmann::json& value, int& slot, std::string& erro
 
 const char* const UNKNOWN_MODE_MESSAGE = "Unknown mode; expected color, support, seam, fuzzy_skin or texture";
 
-// What `mode` and `texture_layer` ask the readers and the clearer for. mode absent: the four paint modes (texture is
-// not print paint, so no texture); a mode: that one; texture also names a layer, or without one every layer of the
-// object's stack (all eight slots when `all_slots_default`, which a clear takes). texture_layer belongs to mode texture.
-struct PaintSelection
-{
-    std::vector<PaintMode> modes;          // the non-texture modes
-    bool                   texture = false;
-    std::vector<int>       texture_slots;  // when texture
-    bool                   named_mode = false;
-    std::string            label;         // for an undo name: the mode, or "all"
-};
-
-bool resolve_paint_selection(const nlohmann::json& params, const Slic3r::ModelObject& object, bool all_slots_default, PaintSelection& out, std::string& error)
-{
-    PaintMode mode = PaintMode::Color;
-    out.named_mode = params.contains("mode");
-    if (out.named_mode && !(params["mode"].is_string() && parse_paint_mode(params["mode"].get<std::string>(), mode))) {
-        error = UNKNOWN_MODE_MESSAGE;
-        return false;
-    }
-    if (!(out.named_mode && mode == PaintMode::Texture) && params.contains("texture_layer")) {
-        error = "texture_layer belongs to mode texture: it names the layer whose paint this call reads or clears";
-        return false;
-    }
-    out.label = out.named_mode ? paint_mode_name(mode) : "all";
-    if (!out.named_mode) {
-        out.modes = {PaintMode::Color, PaintMode::Support, PaintMode::Seam, PaintMode::FuzzySkin};
-        return true;
-    }
-    if (mode != PaintMode::Texture) {
-        out.modes = {mode};
-        return true;
-    }
-    out.texture = true;
-    if (params.contains("texture_layer")) {
-        int slot = -1;
-        if (!read_texture_slot(params["texture_layer"], slot, error))
-            return false;
-        out.texture_slots = {slot};
-    } else if (all_slots_default) {
-        for (int slot = 0; slot < int(Slic3r::TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
-            out.texture_slots.push_back(slot);
-    } else {
-        out.texture_slots = layer_slots_of(texture_stack_owner(object));
-    }
-    return true;
-}
-
-// The slots whose texture mask holds paint on this original facet (the facet's entry in the mask is not empty).
-std::vector<int> texture_layers_painting(const Slic3r::ModelVolume& volume, int facet)
-{
-    std::vector<int> slots;
-    for (int slot = 0; slot < int(Slic3r::TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
-        if (!volume.texture_displacement_facet(slot).get_triangle_as_string(facet).empty())
-            slots.push_back(slot);
-    return slots;
-}
-
 // The annotation a paint_object call addresses: `mode` (default color) and, for texture, `texture_layer`.
 // texture_layer is the slot (0..7) of a layer of the object's texture displacement stack, and belongs to mode texture only.
 bool parse_paint_channel(const nlohmann::json& params, PaintChannel& out, std::string& error)
@@ -265,13 +208,21 @@ bool parse_paint_channel(const nlohmann::json& params, PaintChannel& out, std::s
     return true;
 }
 
+// The texture displacement panel is open on this object (it works on the selected one).
+bool texture_panel_open_on(Slic3r::GUI::Plater& plater, int object_id)
+{
+    GLCanvas3D* canvas = plater.get_view3D_canvas3D();
+    return canvas != nullptr && canvas->get_gizmos_manager().get_current_type() == GLGizmosManager::TextureDisplacement &&
+           canvas->get_selection().get_object_idx() == object_id;
+}
+
 // Why a texture paint cannot be written now: a bake or another job running on the UI worker would reset the mask it
 // captured, and the slot must hold a layer, or the mask would apply to nothing. Nothing for the other modes.
-std::optional<std::string> texture_paint_refusal(const PaintChannel& channel, const Slic3r::ModelObject& object, int object_id)
+std::optional<std::string> texture_paint_refusal(const PaintChannel& channel, const Slic3r::ModelObject& object, int object_id, const std::string& tool)
 {
     if (channel.mode != PaintMode::Texture)
         return std::nullopt;
-    if (const auto refusal = edit_job_refusal(!wxGetApp().plater()->get_ui_job_worker().is_idle(), "paint_object"))
+    if (const auto refusal = edit_job_refusal(!wxGetApp().plater()->get_ui_job_worker().is_idle(), tool))
         return refusal;
     const Slic3r::ModelVolume* owner = texture_stack_owner(object);
     const auto has_layer = [&](const Slic3r::TextureDisplacementLayer& layer) { return layer.slot == channel.texture_layer; };
@@ -870,6 +821,7 @@ struct PaintRemapRequest
     PaintStateMap mapping;
     std::string    snapshot_name; // the undo entry the write makes
     nlohmann::json extra;         // what the calling tool adds to the response, e.g. its selection
+    std::string    tool = "remap_paint"; // the tool the call came in as, for its refusals
 };
 
 nlohmann::json mapping_json(const PaintStateMap& mapping)
@@ -938,7 +890,10 @@ nlohmann::json run_paint_remap(const nlohmann::json& params, const PaintRemapReq
             return error_response(error);
         if (const std::string refusal = state_mapping_error(request.channel.mode, request.mapping, filament_slot_count()); !refusal.empty())
             return error_response(refusal);
-        if (const auto refusal = texture_paint_refusal(request.channel, *target.object, target.object_id))
+        if (request.channel.mode == PaintMode::Texture)
+            if (const std::string refusal = texture_remap_refusal(request.mapping); !refusal.empty())
+                return error_response(refusal);
+        if (const auto refusal = texture_paint_refusal(request.channel, *target.object, target.object_id, request.tool))
             return error_response(*refusal);
         for (std::size_t i = 0; i < target.volumes.size(); ++i)
             if (target.volumes[i]->mesh().its.indices.empty())
@@ -1036,7 +991,7 @@ nlohmann::json paint_by_state(const nlohmann::json& params)
     int         to   = 0;
     if (!parse_state_param(params, mode, k_repaint_from, from, error) || !parse_state_param(params, mode, k_paint_with, to, error))
         return error_response(error);
-    return run_paint_remap(params, {channel, {{from, to}}, _u8L("Paint Object") + " (" + paint_mode_name(mode) + ")", {{"selection", "state"}}});
+    return run_paint_remap(params, {channel, {{from, to}}, _u8L("Paint Object") + " (" + paint_mode_name(mode) + ")", {{"selection", "state"}}, "paint_object"});
 }
 
 } // namespace
@@ -1278,7 +1233,7 @@ void OrcaMCPServer::register_paint_tools()
                         return nlohmann::json{{"status", "error"}, {"message", error}};
                     if (request.selection == "visible" && !capture_visible_view(params, target, request, error))
                         return nlohmann::json{{"status", "error"}, {"message", error}};
-                    if (const auto refusal = texture_paint_refusal(channel, *target.object, target.object_id))
+                    if (const auto refusal = texture_paint_refusal(channel, *target.object, target.object_id, "paint_object"))
                         return error_response(*refusal);
 
                     // build_paint_write refuses a mesh with no facets too, but only with a
@@ -1698,7 +1653,7 @@ void OrcaMCPServer::register_paint_tools()
         "facets print with the part's own filament, which this leaves as it is: when the mapping moves "
         "that filament, notes names the set_object_filament call that moves them too. For one filament, "
         "paint_object with selection \"state\" does the same. mode texture renumbers one texture_layer's "
-        "mask instead ({\"1\": 0} unpaints it); moving layers is set_texture_displacement, action move.",
+        "mask instead ({\"0\": 1, \"1\": 0} inverts it; clear_object_paint erases it); moving layers is set_texture_displacement, action move.",
         {
             {"type", "object"},
             {"properties", {
@@ -1750,12 +1705,8 @@ void OrcaMCPServer::register_paint_tools()
                                                                  : "mapping is required: old filament -> new filament, "
                                                                    "e.g. {\"1\": 2, \"2\": 3}");
             nlohmann::json extra = nlohmann::json::object();
-            if (channel.mode == PaintMode::Texture) {
-                for (const auto& [from, to] : mapping)
-                    if (from > 1)
-                        return error_response("a texture mask has two states, 0 unpainted and 1 painted, so " + std::to_string(from) + " cannot be renumbered");
+            if (channel.mode == PaintMode::Texture)
                 extra["texture_layer"] = channel.texture_layer;
-            }
             return run_paint_remap(params, {channel, mapping, _u8L("Remap Paint") + " (" + paint_mode_name(channel.mode) + ")", extra});
         }
     });
@@ -1768,8 +1719,9 @@ void OrcaMCPServer::register_paint_tools()
         "gizmo's 'Remove all' button. mode picks which annotation; omit it to clear all four, "
         "which paint_object cannot do in one call. Texture displacement masks are not print paint: "
         "without mode they stay; mode texture clears one texture_layer's mask, or all eight slots "
-        "without it (the layers themselves stay; an open paint panel is closed first, "
-        "closed_toolbar_tool). Clearing is instance-independent: paint lives "
+        "without it (the layers themselves stay). A texture panel open on the object is closed first, "
+        "so strokes it has not written back are cleared too (closed_toolbar_tool); that close is the panel's own "
+        "undo step and is taken even when the clear then finds nothing to clear. Clearing is instance-independent: paint lives "
         "on the volume, so there is no instance_id here.",
         {
             {"type", "object"},
@@ -1808,12 +1760,20 @@ void OrcaMCPServer::register_paint_tools()
                     return nlohmann::json{{"status", "error"}, {"message", error}};
 
                 PaintSelection selection;
-                if (!resolve_paint_selection(params, *target.object, /*all_slots_default=*/true, selection, error))
+                if (!resolve_paint_selection(params, {}, /*all_slots_default=*/true, selection, error))
                     return nlohmann::json{{"status", "error"}, {"message", error}};
                 // A texture clear is refused while a bake or another job holds the UI worker, as a texture write is.
                 if (selection.texture)
                     if (const auto refusal = edit_job_refusal(!plater->get_ui_job_worker().is_idle(), "clear_object_paint"))
                         return nlohmann::json{{"status", "error"}, {"message", *refusal}};
+
+                // Every refusal is behind us. A texture paint panel open on this object holds strokes it has not written
+                // back, which a clear would lose or the panel would write over it: close it first, then ask what
+                // changes. Closing is the panel's own undo step, taken even when the clear then finds nothing to clear.
+                std::string closed_tool;
+                if (selection.texture && texture_panel_open_on(*plater, target.object_id))
+                    if (const auto failed = close_toolbar_tool_for_change(*plater, target.object_id, target.object->volumes.size(), closed_tool))
+                        return *failed;
 
                 std::vector<PaintChannel> channels(selection.modes.begin(), selection.modes.end());
                 for (int slot : selection.texture_slots)
@@ -1831,11 +1791,9 @@ void OrcaMCPServer::register_paint_tools()
                             texture_will_change |= channel.mode == PaintMode::Texture;
                         }
 
-                // Every refusal is behind us. An open paint panel holds its own copy of the masks and would write
-                // them back over the clear, so it is closed -- right before the change, and only for a texture mask
-                // that will change: closing takes its own undo step, which a call that changes nothing must not leave.
-                std::string closed_tool;
-                if (texture_will_change)
+                // Any other open toolbar tool is closed right before the change, and only for a texture mask that will
+                // change: closing takes its own undo step, which a call that changes nothing must not leave.
+                if (texture_will_change && closed_tool.empty())
                     if (const auto failed = close_toolbar_tool_for_change(*plater, target.object_id, target.object->volumes.size(), closed_tool))
                         return *failed;
 
@@ -1906,8 +1864,7 @@ void OrcaMCPServer::register_paint_tools()
                     };
                     // The texture layers' paint as get_object_paint reports it, read after the clear.
                     if (selection.texture)
-                        volume["texture"] = {{"layers", texture_paint_layers_json(mask_reports({mask_input_of(*mv, target.volume_ids[i])}).front(),
-                                                                                  selection.texture_slots)}};
+                        volume["texture"] = {{"layers", texture_paint_layers_cleared_json(selection.texture_slots)}};
                     volumes.push_back(std::move(volume));
                 }
 
@@ -2194,7 +2151,7 @@ void OrcaMCPServer::register_paint_tools()
                     return nlohmann::json{{"status", "error"}, {"message", error}};
 
                 PaintSelection selection;
-                if (!resolve_paint_selection(params, *target.object, /*all_slots_default=*/false, selection, error))
+                if (!resolve_paint_selection(params, layer_slots_of(texture_stack_owner(*target.object)), /*all_slots_default=*/false, selection, error))
                     return nlohmann::json{{"status", "error"}, {"message", error}};
                 const std::vector<PaintMode>& modes = selection.modes;
                 // Without a mode the texture layers are reported beside the four modes; texture alone is the layers.
@@ -2202,7 +2159,7 @@ void OrcaMCPServer::register_paint_tools()
                 texture_slots = selection.texture ? selection.texture_slots : layer_slots_of(texture_stack_owner(*target.object));
                 if (with_texture)
                     for (std::size_t i = 0; i < target.volumes.size(); ++i)
-                        mask_inputs.push_back(mask_input_of(*target.volumes[i], target.volume_ids[i]));
+                        mask_inputs.push_back(mask_input_of(*target.volumes[i], target.volume_ids[i], &texture_slots));
 
                 nlohmann::json        volumes = nlohmann::json::array();
                 // Merged as the per-volume boxes are computed rather than by a second pass through
@@ -2255,7 +2212,7 @@ void OrcaMCPServer::register_paint_tools()
             if (result.value("status", "") != "success" || !with_texture)
                 return result;
             // The texture masks are walked here, off the main thread, from the copies.
-            const auto reports = mask_reports(mask_inputs);
+            const auto reports = mask_reports(mask_inputs, &texture_slots);
             for (std::size_t i = 0; i < reports.size() && i < result["volumes"].size(); ++i)
                 result["volumes"][i]["texture"] = {{"layers", texture_paint_layers_json(reports[i], texture_slots)}};
             return result;
@@ -2334,7 +2291,7 @@ void OrcaMCPServer::register_paint_tools()
         "feed `point` straight into paint_object {selection: \"connected\", seed: {point}}. "
         "include_component adds the shell id for paint_object {selection: \"component\"}; it "
         "costs a pass over the mesh. texture_layers lists the slots of the texture displacement layers "
-        "whose paint covers the facet, wholly or in part (empty when none).",
+        "whose paint covers part or all of the picked facet (empty when none).",
         {
             {"type", "object"},
             {"properties", {
@@ -2403,12 +2360,16 @@ void OrcaMCPServer::register_paint_tools()
 
             // Hop 1: the plan.
             PaintPlan plan;
-            nlohmann::json gate = run_on_main_thread([&params, &plan]() -> nlohmann::json {
+            std::vector<MaskInput> texture_masks; // the painted volumes' masks, so the texture layers need no hop of their own
+            nlohmann::json gate = run_on_main_thread([&params, &plan, &texture_masks]() -> nlohmann::json {
                 PaintTarget target;
                 std::string err;
                 if (!resolve_paint_target(params, target, err))
                     return nlohmann::json{{"status", "error"}, {"message", err}};
                 plan = capture_paint_plan(target);
+                for (std::size_t i = 0; i < target.volumes.size(); ++i)
+                    if (has_texture_paint(*target.volumes[i]))
+                        texture_masks.push_back(mask_input_of(*target.volumes[i], target.volume_ids[i]));
                 return nlohmann::json{{"status", "success"}};
             });
             if (gate.value("status", "") != "success")
@@ -2464,23 +2425,13 @@ void OrcaMCPServer::register_paint_tools()
                 result["component"]       = ids[std::size_t(best.facet)];
                 result["component_count"] = count;
             }
-            // Hop 3: which texture layers' masks paint the facet. Read off the live volume, which must still be the
-            // one the pick was made on.
-            const int volume_id = best_volume->volume_id;
-            const int facet     = best.facet;
-            nlohmann::json texture = run_on_main_thread([&params, &plan, volume_id, facet]() -> nlohmann::json {
-                PaintTarget target;
-                std::string err;
-                if (!resolve_paint_target(params, target, err) || !plan_meshes_unchanged(target, plan, err))
-                    return error_response(err);
-                for (std::size_t i = 0; i < target.volumes.size(); ++i)
-                    if (target.volume_ids[i] == volume_id)
-                        return {{"status", "success"}, {"layers", texture_layers_painting(*target.volumes[i], facet)}};
-                return error_response("volume " + std::to_string(volume_id) + " is no longer there");
-            });
-            if (texture.value("status", "") != "success")
-                return texture;
-            result["texture_layers"] = std::move(texture["layers"]);
+            // Which texture layers' masks paint the facet, from the copies taken with the plan (none when the volume
+            // has no paint, which needs no work at all).
+            std::vector<int> layers;
+            for (const MaskInput& input : texture_masks)
+                if (input.volume_id == best_volume->volume_id)
+                    layers = texture_slots_painting_facet(input, best.facet);
+            result["texture_layers"] = layers;
             return result;
         }
     });
