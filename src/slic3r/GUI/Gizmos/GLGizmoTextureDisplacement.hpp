@@ -10,6 +10,7 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/IconManager.hpp"
 #include "slic3r/GUI/TextureLibrary.hpp"
+#include "slic3r/GUI/Jobs/TextureDisplacementPrepareJob.hpp"
 
 #include <Eigen/Core>
 #include <array>
@@ -34,6 +35,11 @@
 #include <utility>
 #include <wx/event.h>
 #include <wx/string.h>
+
+namespace Slic3r {
+class PresetBundle;
+class DynamicPrintConfig;
+}
 
 namespace Slic3r::GUI {
 
@@ -129,6 +135,31 @@ public:
     static std::vector<PaletteEntry> make_palette(const std::vector<ColorRGBA> &filaments,
                                                   const std::vector<PaletteEntry> &mixes);
 
+    // What a palette is composed from, read off the project: the loaded physical filaments, whether the
+    // stack mixes and how many mixes it may offer, and how many filament slots are still free for a mix.
+    struct PaletteInputs
+    {
+        std::vector<ColorRGBA> filaments;
+        bool                   mixing    = false;
+        int                    mix_count = 0;
+        int                    free_slots = 0;
+    };
+    // `extruder_colors` is every extruder's colour (Plater::get_extruders_colors(), read on the main
+    // thread by the caller): the physical filaments are those of it the project does not flag as mixed.
+    static PaletteInputs palette_inputs(const TextureDisplacementOptions &options, const PresetBundle &bundle,
+                                        const std::vector<ColorRGBA> &extruder_colors);
+    // The printable palette for `inputs`: the filaments, then the first mixes of `ranking` (rank_mixes())
+    // the project can give a slot to, as `project_config` has its fixed mixed slots.
+    static std::vector<PaletteEntry> compose_palette(const PaletteInputs                                 &inputs,
+                                                     const std::optional<std::vector<PaletteEntry>>     &ranking,
+                                                     const DynamicPrintConfig                           &project_config);
+    // Everything a job colours with, for a layer stack, composed afresh (the ranking is computed here
+    // when the stack mixes). Empty when no layer is colouring. The panel keeps its own cache instead
+    // (color_settings_for()).
+    static TextureColorSettings color_settings(const std::vector<TextureDisplacementLayer> &layers,
+                                               const TextureDisplacementOptions &options, const PaletteInputs &inputs,
+                                               const DynamicPrintConfig &project_config);
+
     // Maps an image colour to the closest entry of `palette`, perceptually (CIEDE2000 over CIELAB - a
     // plain RGB distance picks visibly wrong filaments, most obviously between a saturated colour and
     // a grey of similar brightness).
@@ -179,6 +210,7 @@ public:
 
     // The loaded physical filaments, clamped to the states mmu_segmentation_facets can address.
     static std::vector<ColorRGBA> filament_palette();
+    static std::vector<ColorRGBA> filament_palette(const std::vector<ColorRGBA> &extruder_colors, const PresetBundle &bundle);
 
     // The Normal preview's triangles, grouped by the palette entry they will print in. Colour is per facet
     // and the palette is small, so the mesh is uploaded once with its index buffer
@@ -227,6 +259,7 @@ public:
     // texture that has colour to give. What decides whether a palette is captured into a job at all,
     // and so whether the colour criterion and the mmu write ever run.
     static bool any_layer_colors(const ModelVolume &mv);
+    static bool any_layer_colors(const std::vector<TextureDisplacementLayer> &layers);
 
     // The model's own colour paint (mmu_segmentation_facets) as the gizmo draws it over its surface: the
     // sub-triangles painted in a filament, grouped by that filament. NONE - the volume's own filament - is
@@ -386,7 +419,7 @@ private:
     //    prepares exactly the parts that displacement will move; a plain Remesh is a mesh operation on
     //    the object and takes all of them, so painting the rest of a multibody object afterwards has a
     //    dense enough mesh to show relief on.
-    enum class PrepareScope { PaintedParts, AllParts };
+    using PrepareScope = TexturePrepareScope;
     void queue_prepare(const TextureDisplacementPrepareParams &params, const std::string &snapshot_name,
                        bool then_bake, const std::string &unchanged_msg,
                        PrepareScope scope = PrepareScope::PaintedParts);

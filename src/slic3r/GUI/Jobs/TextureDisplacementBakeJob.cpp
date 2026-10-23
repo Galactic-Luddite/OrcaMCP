@@ -11,7 +11,12 @@
 #include <cstddef>
 #include <cstdint>
 #include "slic3r/GUI/Jobs/Worker.hpp"
+#include "slic3r/GUI/TextureDisplacementObject.hpp"
 #include <memory>
+#include <sstream>
+
+#include <cereal/archives/binary.hpp>
+#include <cereal/types/utility.hpp>
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/format.hpp"
@@ -49,6 +54,28 @@ void TextureDisplacementBakeJob::process(Ctl &ctl)
     // grows a close button once it reaches 100%, so a job that reports 0 and nothing else leaves an
     // uncloseable notification pinned on screen. It also carries the Cancel button's effect into the
     // bake, which on a subdivided mesh can run for several seconds.
+    int last_reported = 1;
+    m_plan = plan_texture_bake(m_input, [&ctl, &status, &last_reported](int overall) {
+        if (ctl.was_canceled())
+            return false;
+        // The notification repaints (and wakes the idle loop) on every call, so only push a
+        // message when the displayed integer percentage actually moves.
+        if (overall > last_reported) {
+            last_reported = overall;
+            ctl.update_status(overall, status);
+        }
+        return true;
+    });
+
+    // Always finish at 100: this is what closes the notification. Reported even on cancel, where
+    // build_texture_displacement() returns an empty mesh and finalize() commits nothing.
+    ctl.update_status(100, status);
+}
+
+TextureBakePlan plan_texture_bake(const TextureDisplacementBakeInput &input, const std::function<bool(int)> &progress)
+{
+    TextureBakePlan plan;
+
     // Colour, when any layer asks for it, is computed in the same pass as the displacement: both need
     // the same per-layer projection and UV work, and doing it twice would double the expensive part.
     //
@@ -56,47 +83,51 @@ void TextureDisplacementBakeJob::process(Ctl &ctl)
     // cube that costs tens of milliseconds, and the palette is the object's, not the part's.
     TextureColorRequest  color_request;
     TextureColorRequest *color = nullptr;
-    if (!m_input.color.empty()) {
-        color_request.quantize = GLGizmoTextureDisplacement::make_palette_quantizer(m_input.color.palette);
-        if (!m_input.color.palette_pure.empty())
-            color_request.quantize_pure = GLGizmoTextureDisplacement::make_palette_quantizer(m_input.color.palette_pure);
-        color_request.despeckle_passes = m_input.color.despeckle_passes;
+    if (!input.color.empty()) {
+        color_request.quantize = GLGizmoTextureDisplacement::make_palette_quantizer(input.color.palette);
+        if (!input.color.palette_pure.empty())
+            color_request.quantize_pure = GLGizmoTextureDisplacement::make_palette_quantizer(input.color.palette_pure);
+        color_request.despeckle_passes = input.color.despeckle_passes;
         if (color_request.quantize)
             color = &color_request;
     }
 
     // Each part gets its own slice of the 1..100 range, in order, so one progress bar covers the whole
     // bake however many parts it displaces.
-    const size_t count = m_input.volumes.size();
-    m_results.resize(count);
-    int last_reported = 1;
+    const size_t count = input.volumes.size();
+    plan.results.resize(count);
     for (size_t i = 0; i < count; ++i) {
-        const TextureDisplacementBakeVolume &volume = m_input.volumes[i];
+        const TextureDisplacementBakeVolume &volume = input.volumes[i];
         if (color != nullptr)
-            color_request.out_triangle = &m_results[i].triangle_color;
-        m_results[i].mesh = TriangleMesh(build_texture_displacement(
+            color_request.out_triangle = &plan.results[i].triangle_color;
+        plan.results[i].mesh = TriangleMesh(build_texture_displacement(
             volume.base_mesh, volume.layers, volume.facets_data, volume.options,
-            [&ctl, &status, &last_reported, i, count](int percent) {
-                if (ctl.was_canceled())
+            [&progress, &plan, i, count](int percent) {
+                if (plan.canceled || !progress(int((i * 100 + size_t(std::max(0, percent))) / count))) {
+                    plan.canceled = true;
                     return false;
-                // The notification repaints (and wakes the idle loop) on every call, so only push a
-                // message when the displayed integer percentage actually moves.
-                const int overall = int((i * 100 + size_t(std::max(0, percent))) / count);
-                if (overall > last_reported) {
-                    last_reported = overall;
-                    ctl.update_status(overall, status);
                 }
                 return true;
             },
-            color, volume.volume_to_world, nullptr, &m_results[i].stats,
+            color, volume.volume_to_world, nullptr, &plan.results[i].stats,
             volume.model_uv.empty() ? nullptr : &volume.model_uv, &volume.texture_anchor, volume.resting_drop));
-        if (ctl.was_canceled())
+        if (plan.canceled)
             break;
     }
+    return plan;
+}
 
-    // Always finish at 100: this is what closes the notification. Reported even on cancel, where
-    // build_texture_displacement() returns an empty mesh and finalize() commits nothing.
-    ctl.update_status(100, status);
+bool texture_bake_moved(const TextureDisplacementBakeInput &input, const TextureBakePlan &plan, size_t part)
+{
+    const TriangleMesh &result = plan.results[part].mesh;
+    if (result.empty())
+        return false;
+    const indexed_triangle_set &out  = result.its;
+    const indexed_triangle_set &base = input.volumes[part].base_mesh;
+    bool unchanged = out.indices.size() == base.indices.size() && out.vertices.size() == base.vertices.size();
+    for (size_t v = 0; unchanged && v < out.vertices.size(); ++v)
+        unchanged = (out.vertices[v] - base.vertices[v]).cwiseAbs().maxCoeff() < 1e-5f;
+    return !unchanged;
 }
 
 void TextureDisplacementBakeJob::finalize(bool canceled, std::exception_ptr &eptr)
@@ -107,76 +138,97 @@ void TextureDisplacementBakeJob::finalize(bool canceled, std::exception_ptr &ept
         ~OnExit() { if (fn) fn(); }
     } on_exit{m_on_finished};
 
-    if (canceled || eptr)
+    if (canceled || eptr || m_plan.canceled)
         return;
+
+    const TextureBakeOutcome outcome = apply_texture_bake(*wxGetApp().plater(), m_input, m_plan);
 
     // A bake that moved nothing - no layer could be sampled, or every sample was zero - must not be
     // committed: committing is what clears the baked layers' paint, so the user would see the painted
     // region simply vanish with no relief in its place and no idea why. Keep the paint and say so.
-    // Judged per part, because on a multibody object only some parts may carry a layer that displaces;
-    // the ones that did move are committed and the rest are left exactly as they were.
-    const auto moved = [this](size_t i) {
-        const TriangleMesh &result = m_results[i].mesh;
-        if (result.empty())
-            return false;
-        const indexed_triangle_set &out  = result.its;
-        const indexed_triangle_set &base = m_input.volumes[i].base_mesh;
-        bool unchanged = out.indices.size() == base.indices.size() && out.vertices.size() == base.vertices.size();
-        for (size_t v = 0; unchanged && v < out.vertices.size(); ++v)
-            unchanged = (out.vertices[v] - base.vertices[v]).cwiseAbs().maxCoeff() < 1e-5f;
-        return !unchanged;
-    };
-
-    std::vector<size_t> to_commit;
-    for (size_t i = 0; i < m_results.size(); ++i)
-        if (moved(i))
-            to_commit.push_back(i);
-    if (to_commit.empty()) {
+    if (outcome.committed.empty()) {
         show_error(nullptr, _u8L("The bake produced no displacement, so nothing was changed and the paint was kept. "
                                  "Check that the painted layer has a texture and a non-zero depth."));
         return;
     }
 
-    Plater *plater = wxGetApp().plater();
+    // The refinement went finer than the budget could keep: the simplification had to take detail back
+    // out to fit, so what was baked carries less of the texture than the resolution asked for. Said
+    // here, with the numbers, because it is the only place that knows them - and not as an error
+    // dialog: the result is a usable mesh, just not the one the settings described. Summed over the
+    // parts that hit it, since the budget is spent per part and one message is enough.
+    if (outcome.refined > 0) {
+        // Thousands under a million, so a small budget is not reported as "0.1 M".
+        const auto count = [](size_t n) {
+            return n >= 1000000 ? Slic3r::format("%1$.1f M", double(n) / 1000000.) :
+                                  Slic3r::format("%1% k", (n + 500) / 1000);
+        };
+        wxGetApp().notification_manager()->push_notification(
+            NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+            Slic3r::format(_u8L("The triangle budget limited the detail: this resolution needs %1% triangles, "
+                                "the budget kept %2%. Raise Budget or use a coarser Resolution for the full detail."),
+                           count(outcome.refined), count(outcome.budget)));
+    }
+}
 
-    // The filament each palette entry prints in. This is where a mix becomes a mixed filament slot,
-    // and only a mix the bake actually painted with: the preview never creates one, so the project
-    // gains only the slots this result needs. Decided once for the whole bake, over the entries every
-    // part used between them, so the same mix cannot end up in two slots. Done before anything below
-    // names them - adding a slot runs ModelVolume::update_extruder_count(), which clamps paint above
-    // the old filament count.
-    const auto filaments_for_palette = [this, plater, &to_commit]() {
+TextureBakeOutcome apply_texture_bake(Plater &plater_ref, TextureDisplacementBakeInput &input, TextureBakePlan &plan)
+{
+    Plater *plater = &plater_ref;
+    TextureBakeOutcome outcome;
+
+    // Judged per part, because on a multibody object only some parts may carry a layer that displaces;
+    // the ones that did move are committed and the rest are left exactly as they were.
+    std::vector<size_t> to_commit;
+    for (size_t i = 0; i < plan.results.size(); ++i)
+        if (texture_bake_moved(input, plan, i))
+            to_commit.push_back(i);
+        else
+            outcome.unmoved.push_back(input.volumes[i].volume_id);
+    if (to_commit.empty())
+        return outcome;
+
+    outcome.filaments_before = int(wxGetApp().preset_bundle->filament_presets.size());
+
+    const auto filaments_for_palette = [&input, &plan, plater, &to_commit, &outcome]() {
         // palette_filaments() only cares *which* entries appear, so the union of the parts' entries
         // stands in for their concatenated per-triangle colours.
-        std::vector<char>    seen(m_input.color.palette.size() + 1, 0);
+        std::vector<char>    seen(input.color.palette.size() + 1, 0);
         std::vector<uint8_t> used;
         for (const size_t i : to_commit)
-            for (const uint8_t entry : m_results[i].triangle_color)
+            for (const uint8_t entry : plan.results[i].triangle_color)
                 if (entry > 0 && size_t(entry) < seen.size() && !seen[size_t(entry)]) {
                     seen[size_t(entry)] = 1;
                     used.push_back(entry);
                 }
         Sidebar &sidebar = plater->sidebar();
-        return GLGizmoTextureDisplacement::palette_filaments(
-            m_input.color.palette, used, [&sidebar](const PrintableColor &mix) {
+        std::vector<int> filament_of = GLGizmoTextureDisplacement::palette_filaments(
+            input.color.palette, used, [&sidebar](const PrintableColor &mix) {
                 return sidebar.ensure_mixed_filament({ unsigned(mix.a + 1), unsigned(mix.b + 1) },
                                                      { mix.a_percent(), 100 - mix.a_percent() });
             });
+        // The mixed filament slots the bake named: the used entries beyond the single filaments.
+        for (const uint8_t entry : used)
+            if (size_t(entry) > input.color.palette_pure.size() && size_t(entry) <= filament_of.size() &&
+                filament_of[size_t(entry) - 1] >= 0 &&
+                std::find(outcome.mixed_filaments.begin(), outcome.mixed_filaments.end(), filament_of[size_t(entry) - 1]) ==
+                    outcome.mixed_filaments.end())
+                outcome.mixed_filaments.push_back(filament_of[size_t(entry) - 1]);
+        return filament_of;
     };
 
-    const auto commit = [this, plater, &to_commit, &filaments_for_palette]() {
+    const auto commit = [&input, &plan, plater, &to_commit, &filaments_for_palette, &outcome]() {
         const std::vector<int> filament_of = filaments_for_palette();
         ModelObject           *object      = nullptr;
 
         for (const size_t i : to_commit) {
-            ModelVolume *volume = get_model_volume(m_input.volumes[i].volume_id, plater->model().objects);
+            ModelVolume *volume = get_model_volume(input.volumes[i].volume_id, plater->model().objects);
             // The lookup doubles as a staleness check: anything that replaces a volume's mesh also gives it
             // a new id, so a part replaced since this bake started - by an undo, another bake, or a
             // boolean - simply fails to find its volume and is skipped.
             if (volume == nullptr)
                 continue;
-            const TextureDisplacementBakeVolume &input          = m_input.volumes[i];
-            const std::vector<uint8_t>          &triangle_color = m_results[i].triangle_color;
+            const TextureDisplacementBakeVolume &captured       = input.volumes[i];
+            const std::vector<uint8_t>          &triangle_color = plan.results[i].triangle_color;
 
             // Whether the bake replaced the triangles or only moved the vertices it was given. The classic
             // path is topology-preserving by contract, so every per-triangle annotation on the volume still
@@ -185,8 +237,8 @@ void TextureDisplacementBakeJob::finalize(bool canceled, std::exception_ptr &ept
             // the triangles matter - the annotations are per facet and reference no vertex index - so a
             // vertex count that changed on its own (the bake compacts unreferenced vertices away) is not a
             // reason to remap anything.
-            const bool topology_changed = input.options.pipeline_v2 ||
-                                          m_results[i].mesh.its.indices.size() != input.base_mesh.indices.size();
+            const bool topology_changed = captured.options.pipeline_v2 ||
+                                          plan.results[i].mesh.its.indices.size() != captured.base_mesh.indices.size();
 
             // Carry the volume's existing paint - the model's own colours above all - across that rebuild.
             // Without it a bake left the mmu_segmentation_facets bitstream pointing at a triangle set that
@@ -206,9 +258,10 @@ void TextureDisplacementBakeJob::finalize(bool canceled, std::exception_ptr &ept
                 before[3] = volume->fuzzy_skin_facets.get_data();
             }
 
-            volume->set_mesh(std::move(m_results[i].mesh));
+            volume->set_mesh(std::move(plan.results[i].mesh));
             volume->set_new_unique_id();
             volume->calculate_convex_hull();
+            outcome.committed.push_back(volume->id());
 
             if (topology_changed) {
                 const std::array<FacetsAnnotation *, 4> target{ &volume->supported_facets, &volume->seam_facets,
@@ -216,7 +269,7 @@ void TextureDisplacementBakeJob::finalize(bool canceled, std::exception_ptr &ept
                                                                 &volume->fuzzy_skin_facets };
                 for (size_t ch = 0; ch < target.size(); ++ch) {
                     const std::vector<uint8_t> state =
-                        transfer_facet_paint(input.base_mesh, before[ch], volume->mesh().its);
+                        transfer_facet_paint(captured.base_mesh, before[ch], volume->mesh().its);
                     // Nothing was painted in this channel, or there is nothing to paint it onto: either
                     // way the annotation must not keep describing the mesh that is gone.
                     if (state.empty()) {
@@ -267,19 +320,19 @@ void TextureDisplacementBakeJob::finalize(bool canceled, std::exception_ptr &ept
             // topology is exactly what makes the gizmo reload an empty selector over a non-empty mask and
             // then erase it on the next flush - see GLGizmoTextureDisplacement::update_from_model_object().
             for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot) {
-                const auto it = std::find_if(input.layers.begin(), input.layers.end(),
+                const auto it = std::find_if(captured.layers.begin(), captured.layers.end(),
                                              [slot](const TextureDisplacementLayer &l) { return l.slot == slot; });
-                if (topology_changed || (it != input.layers.end() && !it->empty()))
+                if (topology_changed || (it != captured.layers.end() && !it->empty()))
                     volume->texture_displacement_facet(slot).reset();
             }
 
             // The model's own UV channel. Resampled onto a rebuilt mesh from the surface the bake started
             // from: a displaced vertex came from its foot point on that surface, which is the position its
             // uv belongs to - so no distance limit, the relief depth is exactly how far it has moved.
-            if (!input.model_uv.empty())
-                volume->texture_uv = topology_changed ? transfer_uv_channel(input.base_mesh, input.model_uv,
+            if (!captured.model_uv.empty())
+                volume->texture_uv = topology_changed ? transfer_uv_channel(captured.base_mesh, captured.model_uv,
                                                                             volume->mesh().its) :
-                                                         input.model_uv;
+                                                         captured.model_uv;
 
             if (object == nullptr)
                 object = volume->get_object();
@@ -287,6 +340,7 @@ void TextureDisplacementBakeJob::finalize(bool canceled, std::exception_ptr &ept
 
         if (object == nullptr)
             return;
+        outcome.object = object;
 
         if (ObjectList *obj_list = wxGetApp().obj_list()) {
             const ModelObjectPtrs &objs = plater->model().objects;
@@ -303,36 +357,21 @@ void TextureDisplacementBakeJob::finalize(bool canceled, std::exception_ptr &ept
     // subdivision and the displacement: the first Undo would land on a mesh carrying every added
     // triangle and no relief at all, and pressing Bake again from there would subdivide that mesh a
     // second time. So the caller says who owns the undo step.
-    if (m_input.take_snapshot) {
+    if (input.take_snapshot) {
         Plater::TakeSnapshot snapshot(plater, _u8L("Bake texture displacement"), UndoRedo::SnapshotType::GizmoAction);
         commit();
     } else {
         commit();
     }
+    outcome.filaments_after = int(wxGetApp().preset_bundle->filament_presets.size());
 
-    // The refinement went finer than the budget could keep: the simplification had to take detail back
-    // out to fit, so what was baked carries less of the texture than the resolution asked for. Said
-    // here, with the numbers, because it is the only place that knows them - and not as an error
-    // dialog: the result is a usable mesh, just not the one the settings described. Summed over the
-    // parts that hit it, since the budget is spent per part and one message is enough.
-    size_t refined = 0, budget = 0;
+    // The budget is spent per part, so the parts that hit it are summed.
     for (const size_t i : to_commit)
-        if (m_results[i].stats.budget_limited) {
-            refined += m_results[i].stats.triangles_refined;
-            budget  += m_results[i].stats.triangles_budget;
+        if (plan.results[i].stats.budget_limited) {
+            outcome.refined += plan.results[i].stats.triangles_refined;
+            outcome.budget  += plan.results[i].stats.triangles_budget;
         }
-    if (refined > 0) {
-        // Thousands under a million, so a small budget is not reported as "0.1 M".
-        const auto count = [](size_t n) {
-            return n >= 1000000 ? Slic3r::format("%1$.1f M", double(n) / 1000000.) :
-                                  Slic3r::format("%1% k", (n + 500) / 1000);
-        };
-        wxGetApp().notification_manager()->push_notification(
-            NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
-            Slic3r::format(_u8L("The triangle budget limited the detail: this resolution needs %1% triangles, "
-                                "the budget kept %2%. Raise Budget or use a coarser Resolution for the full detail."),
-                           count(refined), count(budget)));
-    }
+    return outcome;
 }
 
 TextureDisplacementBakeVolume texture_displacement_bake_volume(const ModelVolume                           &volume,
@@ -356,15 +395,75 @@ TextureDisplacementBakeVolume texture_displacement_bake_volume(const ModelVolume
     return out;
 }
 
-void queue_texture_displacement_bake(std::vector<TextureDisplacementBakeVolume> volumes,
-                                     const TextureColorSettings &color,
-                                     std::function<void()> on_finished, bool take_snapshot)
+TextureDisplacementBakeInput capture_texture_bake(const ModelObject &object, const TextureColorSettings &color,
+                                                  bool take_snapshot)
 {
     TextureDisplacementBakeInput input;
-    input.volumes       = std::move(volumes);
     input.color         = color;
     input.take_snapshot = take_snapshot;
 
+    const ModelVolume *owner = texture_stack_owner(object);
+    if (owner == nullptr)
+        return input;
+    // Every painted part, not only the one holding the layer stack: the brush paints across all of
+    // them, so baking one would leave the user's paint on the others untouched and their geometry flat.
+    const std::vector<ModelVolume *> parts = painted_texture_parts(const_cast<ModelObject &>(object));
+    const Vec3d                      anchor = texture_anchor(object);
+    const std::vector<float>         drops  = resting_drops(object, parts);
+    input.volumes.reserve(parts.size());
+    for (size_t i = 0; i < parts.size(); ++i)
+        input.volumes.push_back(texture_displacement_bake_volume(*parts[i], layers_for_part(object, *parts[i]),
+                                                                 owner->texture_displacement_options, anchor, drops[i]));
+    return input;
+}
+
+namespace {
+// Two values the undo stack would store alike: compared through the cereal archive that stack writes.
+template<class T> std::string serialized(const T &value)
+{
+    std::ostringstream os(std::ios::binary);
+    {
+        cereal::BinaryOutputArchive archive(os);
+        archive(value);
+    }
+    return os.str();
+}
+} // namespace
+
+bool texture_bake_applies_to(const Model &model, const TextureDisplacementBakeInput &input)
+{
+    const ModelObject *object = nullptr;
+    for (const TextureDisplacementBakeVolume &captured : input.volumes) {
+        const ModelVolume *volume = get_model_volume(captured.volume_id, model.objects);
+        if (volume == nullptr || volume->get_object() == nullptr)
+            return false;
+        if (object == nullptr)
+            object = volume->get_object();
+        else if (object != volume->get_object())
+            return false;
+
+        const indexed_triangle_set &its = volume->mesh().its;
+        if (its.indices != captured.base_mesh.indices || its.vertices != captured.base_mesh.vertices)
+            return false;
+        for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
+            if (!(volume->texture_displacement_facet(slot).get_data() == captured.facets_data[size_t(slot)]))
+                return false;
+        if (volume->has_texture_uv() ? volume->texture_uv != captured.model_uv : !captured.model_uv.empty())
+            return false;
+        if (texture_displacement_volume_to_world(*volume).matrix() != captured.volume_to_world.matrix())
+            return false;
+        if (serialized(layers_for_part(*object, *volume)) != serialized(captured.layers))
+            return false;
+        const ModelVolume *owner = texture_stack_owner(*object);
+        if (owner == nullptr || serialized(owner->texture_displacement_options) != serialized(captured.options) ||
+            texture_anchor(*object) != captured.texture_anchor)
+            return false;
+    }
+    return true;
+}
+
+void queue_texture_displacement_bake(TextureDisplacementBakeInput &&input, std::function<void()> on_finished)
+{
     auto &worker = wxGetApp().plater()->get_ui_job_worker();
     queue_job(worker, std::make_unique<TextureDisplacementBakeJob>(std::move(input), std::move(on_finished)));
 }

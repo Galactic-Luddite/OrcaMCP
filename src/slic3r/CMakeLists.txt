@@ -689,6 +689,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/TaskManager.hpp
     GUI/TextLines.cpp
     GUI/TextLines.hpp
+    GUI/TextureDisplacementObject.cpp
+    GUI/TextureDisplacementObject.hpp
     GUI/TextureLibrary.cpp
     GUI/TextureLibrary.hpp
     GUI/TextureProjectorFrame.cpp

@@ -1,6 +1,7 @@
 #ifndef slic3r_TextureDisplacementBakeJob_hpp_
 #define slic3r_TextureDisplacementBakeJob_hpp_
 
+#include <cstddef>
 #include <exception>
 #include <cstdint>
 #include <functional>
@@ -13,9 +14,15 @@
 
 #include "Job.hpp"
 
-namespace Slic3r { class ModelVolume; }
+namespace Slic3r {
+class Model;
+class ModelObject;
+class ModelVolume;
+}
 
 namespace Slic3r::GUI {
+
+class Plater;
 
 // One model part's share of a bake: its own mesh, its own paint masks and UV channel, and the layer
 // stack to displace it by. Captured by value on the main thread when the job is queued so the worker
@@ -59,6 +66,55 @@ struct TextureDisplacementBakeInput
     bool                                       take_snapshot = true;
 };
 
+// What the bake produced for one part of TextureDisplacementBakeInput::volumes, at the same index.
+struct TextureBakeVolumeResult
+{
+    TriangleMesh         mesh;
+    // Per triangle of `mesh`: the palette entry to print it in, as its index + 1 (0 = leave alone).
+    // Empty unless a layer asked for colour. See TextureColorRequest; the apply step turns these into
+    // filaments.
+    std::vector<uint8_t> triangle_color;
+    // What the bake spent, for the message it leaves behind when the budget capped the detail.
+    TextureBakeStats     stats;
+};
+
+struct TextureBakePlan
+{
+    std::vector<TextureBakeVolumeResult> results;
+    bool                                 canceled = false;
+};
+
+// The bake in three steps, which the panel's Bake job and OrcaMCP's bake_texture_displacement both run
+// (as FixModelByCgal.hpp does for the repair): capture on the main thread, plan on any thread, apply on
+// the main thread.
+//
+// Main thread: the job's input for `object`, as the panel's Bake builds it - the painted parts, the
+// object's layers for each, the owner's options, the texture anchor and each part's resting drop. Empty
+// `volumes` when the object has no painted part.
+TextureDisplacementBakeInput capture_texture_bake(const ModelObject &object, const TextureColorSettings &color,
+                                                  bool take_snapshot);
+// Any thread: the displacement of every part of `input`, one after another. `progress` is told the
+// overall percentage and returns false to stop (the plan is then `canceled` and nothing may be applied).
+TextureBakePlan plan_texture_bake(const TextureDisplacementBakeInput &input, const std::function<bool(int)> &progress);
+// Main thread: the input still describes the model - every part found by id with the same mesh, masks,
+// layers, options and placement.
+bool texture_bake_applies_to(const Model &model, const TextureDisplacementBakeInput &input);
+// A part's result is worth committing: it is not empty and some vertex moved more than 1e-5 mm. A bake
+// that moved nothing must not be committed, since committing clears the baked layers' paint.
+bool texture_bake_moved(const TextureDisplacementBakeInput &input, const TextureBakePlan &plan, std::size_t part);
+
+struct TextureBakeOutcome
+{
+    std::vector<ObjectID> committed, unmoved;  // parts baked (their new ids) / parts the bake did not move, left as they were
+    std::vector<int>      mixed_filaments;     // 0-based slots the colour bake named, each created or reused
+    int                   filaments_before = 0, filaments_after = 0; // to tell created from reused
+    std::size_t           refined = 0, budget = 0; // the budget notice's numbers, 0 when it did not cap
+    ModelObject          *object = nullptr;
+};
+// Main thread: commits the plan's parts under the input's undo step (when `take_snapshot`). Shows no
+// dialog and pushes no notification: the caller does.
+TextureBakeOutcome apply_texture_bake(Plater &plater, TextureDisplacementBakeInput &input, TextureBakePlan &plan);
+
 // Bakes an object's painted texture-displacement layers into real mesh geometry in the background,
 // then commits the result on the main thread - mirrors EmbossJob's UpdateJob/update_volume()
 // bake-and-commit pattern (see EmbossJob.cpp). Every part is displaced in the one job and committed
@@ -72,30 +128,15 @@ public:
     void finalize(bool canceled, std::exception_ptr &eptr) override;
 
 private:
-    // What the bake produced for one part of m_input.volumes, at the same index.
-    struct VolumeResult
-    {
-        TriangleMesh         mesh;
-        // Per triangle of `mesh`: the palette entry to print it in, as its index + 1 (0 = leave
-        // alone). Empty unless a layer asked for colour. See TextureColorRequest; finalize() turns
-        // these into filaments.
-        std::vector<uint8_t> triangle_color;
-        // What the bake spent, for the message it leaves behind when the budget capped the detail.
-        TextureBakeStats     stats;
-    };
-
     TextureDisplacementBakeInput m_input;
-    std::vector<VolumeResult>    m_results;
+    TextureBakePlan              m_plan;
     std::function<void()>        m_on_finished;
 };
 
-// Captures each of `volumes`' current mesh/layers/paint data and queues a single
-// TextureDisplacementBakeJob on the app's UI job worker. `on_finished` is always called once the job
-// settles (success, failure, or cancellation), so the caller can clear its own "bake in progress" UI
-// state. Must be called from the main thread.
-void queue_texture_displacement_bake(std::vector<TextureDisplacementBakeVolume> volumes,
-                                     const TextureColorSettings &color,
-                                     std::function<void()> on_finished, bool take_snapshot = true);
+// Queues a single TextureDisplacementBakeJob for `input` on the app's UI job worker. `on_finished` is
+// always called once the job settles (success, failure, or cancellation), so the caller can clear its own
+// "bake in progress" UI state. Must be called from the main thread.
+void queue_texture_displacement_bake(TextureDisplacementBakeInput &&input, std::function<void()> on_finished);
 
 // `volume`'s share of a bake, read off the live Model. `layers`, `options`, `texture_anchor` and
 // `resting_drop` are passed in rather than taken from `volume` because they belong to the object, not

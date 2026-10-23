@@ -1,6 +1,7 @@
 #ifndef slic3r_TextureDisplacementPrepareJob_hpp_
 #define slic3r_TextureDisplacementPrepareJob_hpp_
 
+#include <cstddef>
 #include <exception>
 #include <functional>
 #include <string>
@@ -13,10 +14,13 @@
 #include "libslic3r/TextureDisplacement.hpp"
 
 namespace Slic3r {
+class ModelObject;
 class ModelVolume;
 }
 
 namespace Slic3r::GUI {
+
+class Plater;
 
 // Getting a mesh ready to receive displacement - the isotropic remesh, carrying the paint onto it, and
 // the adaptive refinement - off the UI thread.
@@ -70,6 +74,30 @@ struct TextureDisplacementPrepareInput
     // displacement job that follows commits into this same step rather than pushing its own.
     std::string                                   snapshot_name;
 };
+
+// Which parts a prepare acts on. A bake prepares exactly the parts that displacement will move (the
+// painted ones); a plain Remesh is a mesh operation on the object and takes all of them, so painting the
+// rest of a multibody object afterwards has a dense enough mesh to show relief on.
+enum class TexturePrepareScope { PaintedParts, AllParts };
+
+// The prepare in three steps, which the panel's job and OrcaMCP both run (as the bake does, see
+// TextureDisplacementBakeJob.hpp): capture on the main thread, plan on any thread, apply on the main
+// thread.
+//
+// Main thread: the job's input for `object`'s parts in `scope`. `color` is captured as given (empty when
+// the refinement has no colour criterion); `snapshot_name` names the undo step the apply opens, none when
+// empty (the caller has one that covers it).
+TextureDisplacementPrepareInput capture_texture_prepare(const ModelObject &object, const TextureDisplacementPrepareParams &params,
+                                                        TexturePrepareScope scope, const TextureColorSettings &color,
+                                                        const std::string &snapshot_name);
+// Any thread: the prepare of every part of `input`, one after another. `progress` is told the overall
+// percentage and returns false to stop (an empty result for the part it stopped in, none after it).
+std::vector<TextureDisplacementPrepareResult> plan_texture_prepare(const TextureDisplacementPrepareInput &input,
+                                                                   const std::function<bool(int)>       &progress);
+// Main thread: commits the results. Committed, Unchanged (no part needed doing, nothing touched) or
+// PaintLost (a remesh landed but a part kept none of its paint: nothing is committed).
+TextureDisplacementPrepareOutcome apply_texture_prepare(Plater &plater, TextureDisplacementPrepareInput &input,
+                                                        std::vector<TextureDisplacementPrepareResult> &results);
 
 class TextureDisplacementPrepareJob : public Job
 {

@@ -32,6 +32,7 @@
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Shortcuts.hpp"
+#include "slic3r/GUI/TextureDisplacementObject.hpp"
 #include "slic3r/GUI/TextureLibrary.hpp"
 #include "slic3r/GUI/TextureProjectorFrame.hpp"
 #include "slic3r/GUI/UVEditorCanvas.hpp"
@@ -1037,59 +1038,17 @@ void GLGizmoTextureDisplacement::mark_seam_path(int v_from, int v_to)
 {
     TextureDisplacementLayer *layer = active_layer();
     const ModelVolume        *mv    = texture_volume();
-    if (layer == nullptr || mv == nullptr || v_from < 0 || v_to < 0 || v_from == v_to)
+    if (layer == nullptr || mv == nullptr)
         return;
-    const indexed_triangle_set &its = mv->mesh().its;
-    const size_t                n   = its.vertices.size();
-    if (size_t(v_from) >= n || size_t(v_to) >= n)
+    const std::vector<std::pair<int, int>> path = seam_path_edges(mv->mesh().its, v_from, v_to);
+    if (path.empty())
         return;
-
-    // Shortest path over the mesh's edge graph (Dijkstra, edge weight = length). Built on demand; one
-    // pass per click is fine even on a dense mesh.
-    std::vector<std::vector<std::pair<int, float>>> adj(n);
-    for (const stl_triangle_vertex_indices &tri : its.indices)
-        for (int i = 0; i < 3; ++i) {
-            const int a = tri[i], b = tri[(i + 1) % 3];
-            const float w = (its.vertices[size_t(a)] - its.vertices[size_t(b)]).norm();
-            adj[size_t(a)].push_back({ b, w });
-            adj[size_t(b)].push_back({ a, w });
-        }
-
-    std::vector<float> dist(n, std::numeric_limits<float>::infinity());
-    std::vector<int>   prev(n, -1);
-    using QN = std::pair<float, int>;
-    std::priority_queue<QN, std::vector<QN>, std::greater<QN>> pq;
-    dist[size_t(v_from)] = 0.f;
-    pq.push({ 0.f, v_from });
-    while (!pq.empty()) {
-        const auto [d, u] = pq.top();
-        pq.pop();
-        if (d > dist[size_t(u)])
-            continue;
-        if (u == v_to)
-            break;
-        for (const auto &[w, ew] : adj[size_t(u)]) {
-            const float nd = d + ew;
-            if (nd < dist[size_t(w)]) {
-                dist[size_t(w)] = nd;
-                prev[size_t(w)] = u;
-                pq.push({ nd, w });
-            }
-        }
-    }
-    if (prev[size_t(v_to)] < 0)
-        return; // unreachable (disconnected components)
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Mark texture seam path"), UndoRedo::SnapshotType::GizmoAction);
     auto &seams = layer->lscm_seam_edges;
-    for (int v = v_to; v != v_from && v >= 0; v = prev[size_t(v)]) {
-        const int p = prev[size_t(v)];
-        if (p < 0)
-            break;
-        const std::pair<int, int> e{ std::min(v, p), std::max(v, p) };
+    for (const std::pair<int, int> &e : path)
         if (std::find(seams.begin(), seams.end(), e) == seams.end())
             seams.push_back(e);
-    }
     rebuild_preview();
 }
 
@@ -3020,34 +2979,18 @@ void GLGizmoTextureDisplacement::run_uv_command(int cmd, float value)
             show_error(nullptr, _u8L("Select an island in the UV editor first."));
             return;
         }
-        // Join to whichever neighbouring island (one it shares an edge with) is currently placed
-        // nearest - i.e. the one it was dragged up against.
-        const Eigen::Matrix<float, 2, 3> sel_m = island_transform_matrix(chart, m_uv_editor_unwrap, layer->islands);
-        const Vec2f sel_c = sel_m.block<2, 2>(0, 0) * m_uv_editor_unwrap.chart_centroid[size_t(chart)] + sel_m.col(2);
-        int   best_parent = -1;
-        float best_d2     = std::numeric_limits<float>::max();
-        TextureIsland best_place, cand;
-        for (int p = 0; p < m_uv_editor_unwrap.chart_count; ++p) {
-            if (p == chart)
-                continue;
-            if (!join_chart_placement(m_uv_editor_unwrap, layer->islands, chart, p, cand))
-                continue; // not a neighbour
-            const Eigen::Matrix<float, 2, 3> pm = island_transform_matrix(p, m_uv_editor_unwrap, layer->islands);
-            const Vec2f pc = pm.block<2, 2>(0, 0) * m_uv_editor_unwrap.chart_centroid[size_t(p)] + pm.col(2);
-            const float d2 = (pc - sel_c).squaredNorm();
-            if (d2 < best_d2) { best_d2 = d2; best_parent = p; best_place = cand; }
-        }
-        if (best_parent < 0) {
+        const std::optional<std::pair<int, TextureIsland>> target = join_target(m_uv_editor_unwrap, layer->islands, chart);
+        if (!target) {
             show_error(nullptr, _u8L("This island has no neighbour it shares an edge with."));
             return;
         }
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Join texture island"), UndoRedo::SnapshotType::GizmoAction);
         if (layer->islands.size() <= size_t(chart))
             layer->islands.resize(size_t(chart) + 1);
-        layer->islands[size_t(chart)] = best_place;
+        layer->islands[size_t(chart)] = target->second;
         // Record the join so the two (and anything already grouped with either) move together from now
         // on, not just visually snap once.
-        join_island_groups(layer->island_groups, chart, best_parent, m_uv_editor_unwrap.chart_count);
+        join_island_groups(layer->island_groups, chart, target->first, m_uv_editor_unwrap.chart_count);
         rebuild_preview();
     } else if (cmd == int(UVEditorCanvas::Command::UnjoinSelected)) {
         UVEditorCanvas *canvas = wxGetApp().plater()->get_uv_editor_canvas();
@@ -3298,48 +3241,7 @@ void GLGizmoTextureDisplacement::cut_island(TextureDisplacementLayer &layer, int
     const ModelVolume *mv = texture_volume();
     if (mv == nullptr)
         return;
-    const std::vector<Vec3f> &verts = mv->mesh().its.vertices;
-    const PatchUnwrap        &u     = m_uv_editor_unwrap;
-
-    // Collect the chart's triangles back in mesh-vertex space, and its 3D bounding box.
-    std::vector<std::array<int, 3>> tris;
-    Vec3f lo(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
-    Vec3f hi(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest());
-    for (const stl_triangle_vertex_indices &t : u.indices) {
-        if (t[0] < 0 || size_t(t[0]) >= u.vertex_chart.size() || u.vertex_chart[size_t(t[0])] != chart)
-            continue;
-        std::array<int, 3> bt{};
-        bool               ok = true;
-        for (int k = 0; k < 3; ++k) {
-            const int uvv = t[k];
-            if (uvv < 0 || size_t(uvv) >= u.source_vertex.size()) { ok = false; break; }
-            const int base = u.source_vertex[size_t(uvv)];
-            if (base < 0 || size_t(base) >= verts.size()) { ok = false; break; }
-            bt[k] = base;
-            lo    = lo.cwiseMin(verts[size_t(base)]);
-            hi    = hi.cwiseMax(verts[size_t(base)]);
-        }
-        if (ok)
-            tris.push_back(bt);
-    }
-    if (tris.empty())
-        return;
-
-    // Cut perpendicular to the longest axis, through the centroid - a long thin island is split
-    // across its narrow middle, which is exactly the "islands might be very long" case.
-    const Vec3f  ext  = hi - lo;
-    const int    axis = (ext.x() >= ext.y() && ext.x() >= ext.z()) ? 0 : (ext.y() >= ext.z() ? 1 : 2);
-    const float  mid  = 0.5f * (lo[axis] + hi[axis]);
-
-    std::set<std::pair<int, int>> seams(layer.lscm_seam_edges.begin(), layer.lscm_seam_edges.end());
-    for (const std::array<int, 3> &bt : tris)
-        for (int i = 0; i < 3; ++i) {
-            const int a = bt[i], b = bt[(i + 1) % 3];
-            // Endpoints on opposite sides of the plane -> this edge crosses it -> make it a seam.
-            if ((verts[size_t(a)][axis] < mid) != (verts[size_t(b)][axis] < mid))
-                seams.insert({ std::min(a, b), std::max(a, b) });
-        }
-    layer.lscm_seam_edges.assign(seams.begin(), seams.end());
+    layer.lscm_seam_edges = cut_island_seams(mv->mesh().its, m_uv_editor_unwrap, chart, layer.lscm_seam_edges);
 }
 
 // unwrap mm -> texture uv, per island: the island's own hand placement, then the layer's
@@ -3787,12 +3689,7 @@ bool GLGizmoTextureDisplacement::on_mouse_adjust_texture(const wxMouseEvent &mou
 ModelVolume* GLGizmoTextureDisplacement::texture_volume()
 {
     ModelObject *mo = m_c->selection_info()->model_object();
-    if (!mo)
-        return nullptr;
-    for (ModelVolume *mv : mo->volumes)
-        if (mv->is_model_part())
-            return mv;
-    return nullptr;
+    return mo != nullptr ? texture_stack_owner(*mo) : nullptr;
 }
 
 const ModelVolume* GLGizmoTextureDisplacement::texture_volume() const
@@ -3802,23 +3699,14 @@ const ModelVolume* GLGizmoTextureDisplacement::texture_volume() const
 
 std::vector<ModelVolume *> GLGizmoTextureDisplacement::texture_parts()
 {
-    std::vector<ModelVolume *> out;
-    ModelObject               *mo = m_c->selection_info()->model_object();
-    if (mo == nullptr)
-        return out;
-    for (ModelVolume *mv : mo->volumes)
-        if (mv->is_model_part())
-            out.push_back(mv);
-    return out;
+    ModelObject *mo = m_c->selection_info()->model_object();
+    return mo != nullptr ? Slic3r::GUI::texture_parts(*mo) : std::vector<ModelVolume *>{};
 }
 
 std::vector<ModelVolume *> GLGizmoTextureDisplacement::painted_parts()
 {
-    std::vector<ModelVolume *> out;
-    for (ModelVolume *mv : texture_parts())
-        if (mv->is_texture_displacement_painted())
-            out.push_back(mv);
-    return out;
+    ModelObject *mo = m_c->selection_info()->model_object();
+    return mo != nullptr ? painted_texture_parts(*mo) : std::vector<ModelVolume *>{};
 }
 
 bool GLGizmoTextureDisplacement::any_part_painted() const
@@ -3831,49 +3719,26 @@ bool GLGizmoTextureDisplacement::any_part_painted() const
 
 std::vector<TextureDisplacementLayer> GLGizmoTextureDisplacement::layers_for_part(const ModelVolume &part) const
 {
-    const ModelVolume *owner = texture_volume();
-    if (owner == nullptr)
-        return {};
-    std::vector<TextureDisplacementLayer> out = owner->texture_displacement_layers;
-    if (&part == owner)
-        return out;
-    for (TextureDisplacementLayer &layer : out) {
-        layer.lscm_seam_edges.clear();
-        layer.islands.clear();
-        layer.island_groups.clear();
-        layer.lscm_uv_overrides.clear();
-    }
-    return out;
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    return mo != nullptr ? Slic3r::GUI::layers_for_part(*mo, part) : std::vector<TextureDisplacementLayer>{};
 }
 
 Vec3d GLGizmoTextureDisplacement::texture_anchor() const
 {
-    const ModelVolume *owner = texture_volume();
-    return owner != nullptr ? Vec3d(texture_displacement_volume_to_world(*owner).translation()) : Vec3d::Zero();
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    return mo != nullptr ? Slic3r::GUI::texture_anchor(*mo) : Vec3d::Zero();
 }
 
 std::vector<float> GLGizmoTextureDisplacement::resting_drops(const std::vector<ModelVolume *> &parts)
 {
-    const auto bottom = [](const ModelVolume &part) {
-        return part.mesh().transformed_bounding_box(texture_displacement_volume_to_world(part)).min.z();
-    };
-    // Each part's bottom is measured the same way as the object's, so the lowest part's drop is exactly
-    // 0 and a single-part object bakes against its own bottom as it always has.
-    double object_bottom = std::numeric_limits<double>::max();
-    for (const ModelVolume *part : texture_parts())
-        object_bottom = std::min(object_bottom, bottom(*part));
-    std::vector<float> out;
-    out.reserve(parts.size());
-    for (const ModelVolume *part : parts)
-        out.push_back(float(bottom(*part) - object_bottom));
-    return out;
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    return mo != nullptr ? Slic3r::GUI::resting_drops(*mo, parts) : std::vector<float>(parts.size(), 0.f);
 }
 
 Transform3d GLGizmoTextureDisplacement::prepare_texture_frame(const ModelVolume &part)
 {
-    if (texture_parts().size() < 2)
-        return Transform3d::Identity();
-    return texture_displacement_bake_frame(texture_displacement_volume_to_world(part), texture_anchor());
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    return mo != nullptr ? Slic3r::GUI::prepare_texture_frame(*mo, part) : Transform3d::Identity();
 }
 
 void GLGizmoTextureDisplacement::update_model_object()
@@ -5145,21 +5010,14 @@ void GLGizmoTextureDisplacement::render_image_adjust_window(const ImVec2 &panel_
 
 void GLGizmoTextureDisplacement::remove_texture_layer(int slot)
 {
-    ModelVolume *mv = texture_volume();
-    if (!mv)
+    ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr || texture_stack_owner(*mo) == nullptr)
         return;
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Remove texture displacement layer"), UndoRedo::SnapshotType::GizmoAction);
 
-    auto &layers = mv->texture_displacement_layers;
-    layers.erase(std::remove_if(layers.begin(), layers.end(),
-                                 [slot](const TextureDisplacementLayer &l) { return l.slot == slot; }),
-                 layers.end());
+    Slic3r::GUI::remove_texture_layer(*mo, slot);
     if (slot >= 0 && slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS)) {
-        // Every model part: paint left in the slot on another part would still bake, and the next layer
-        // added reuses the slot.
-        for (ModelVolume *part : texture_parts())
-            part->texture_displacement_facet(slot).reset();
         m_thumbnails[size_t(slot)].reset();
         m_thumbnail_source[size_t(slot)].reset();
         m_layer_expanded[size_t(slot)] = false;
@@ -5178,26 +5036,8 @@ void GLGizmoTextureDisplacement::remove_texture_layer(int slot)
 void GLGizmoTextureDisplacement::swap_layer_slots(int slot_a, int slot_b)
 {
     ModelObject *mo = m_c->selection_info()->model_object();
-    ModelVolume *mv = texture_volume();
-    const int    n  = int(TEXTURE_DISPLACEMENT_MAX_LAYERS);
-    if (mo == nullptr || mv == nullptr || slot_a == slot_b || slot_a < 0 || slot_b < 0 || slot_a >= n || slot_b >= n)
+    if (mo == nullptr || !swap_texture_layer_slots(*mo, slot_a, slot_b))
         return;
-
-    // Every model part, not only the texture volume: the selectors paint the active slot on all of them.
-    for (ModelVolume *v : mo->volumes) {
-        if (!v->is_model_part())
-            continue;
-        TriangleSelector::TriangleSplittingData data_a = v->texture_displacement_facet(slot_a).get_data();
-        TriangleSelector::TriangleSplittingData data_b = v->texture_displacement_facet(slot_b).get_data();
-        v->texture_displacement_facet(slot_a).set_data(std::move(data_b));
-        v->texture_displacement_facet(slot_b).set_data(std::move(data_a));
-    }
-    for (TextureDisplacementLayer &l : mv->texture_displacement_layers) {
-        if (l.slot == slot_a)
-            l.slot = slot_b;
-        else if (l.slot == slot_b)
-            l.slot = slot_a;
-    }
 
     const size_t a = size_t(slot_a), b = size_t(slot_b);
     std::swap(m_thumbnails[a], m_thumbnails[b]);
@@ -5216,30 +5056,18 @@ void GLGizmoTextureDisplacement::swap_layer_slots(int slot_a, int slot_b)
 
 void GLGizmoTextureDisplacement::move_texture_layer(int slot, int to_index)
 {
-    ModelVolume *mv = texture_volume();
-    if (mv == nullptr)
+    ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr)
         return;
-
-    std::vector<int> slots;
-    for (const TextureDisplacementLayer &l : mv->texture_displacement_layers)
-        slots.push_back(l.slot);
-    std::sort(slots.begin(), slots.end());
-    const auto it = std::find(slots.begin(), slots.end(), slot);
-    if (it == slots.end())
-        return;
-    const int from = int(it - slots.begin());
-    // An insertion index counts the moved layer's own position, which is gone once it is lifted out.
-    const int to = std::clamp(to_index > from ? to_index - 1 : to_index, 0, int(slots.size()) - 1);
-    if (to == from)
+    const std::vector<std::pair<int, int>> swaps = texture_layer_move_swaps(*mo, slot, to_index);
+    if (swaps.empty())
         return;
 
     update_model_object(); // flush the active layer's strokes into its slot before slots are exchanged
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Reorder texture displacement layers"),
                                   UndoRedo::SnapshotType::GizmoAction);
-    // Walked one neighbour at a time, so every layer in between shifts by one and keeps its order.
-    const int step = to > from ? 1 : -1;
-    for (int i = from; i != to; i += step)
-        swap_layer_slots(slots[size_t(i)], slots[size_t(i + step)]);
+    for (const auto &[a, b] : swaps)
+        swap_layer_slots(a, b);
 
     // The active layer's mask now sits in a different slot, so the selectors are reloaded from there.
     update_from_model_object(false); // also rebuilds the preview
@@ -5698,7 +5526,12 @@ TextureDisplacementFacetsData GLGizmoTextureDisplacement::facets_data_of(const M
 
 bool GLGizmoTextureDisplacement::any_layer_colors(const ModelVolume &mv)
 {
-    for (const TextureDisplacementLayer &layer : mv.texture_displacement_layers)
+    return any_layer_colors(mv.texture_displacement_layers);
+}
+
+bool GLGizmoTextureDisplacement::any_layer_colors(const std::vector<TextureDisplacementLayer> &layers)
+{
+    for (const TextureDisplacementLayer &layer : layers)
         if (layer.color_enabled && !layer.empty() && height_texture_has_color(layer))
             return true;
     return false;
@@ -5715,6 +5548,49 @@ TextureColorSettings GLGizmoTextureDisplacement::color_settings_for(const ModelV
     return out;
 }
 
+GLGizmoTextureDisplacement::PaletteInputs GLGizmoTextureDisplacement::palette_inputs(
+    const TextureDisplacementOptions &options, const PresetBundle &bundle, const std::vector<ColorRGBA> &extruder_colors)
+{
+    PaletteInputs out;
+    out.filaments  = filament_palette(extruder_colors, bundle);
+    out.mixing     = options.color_mix_enabled;
+    out.mix_count  = std::max(0, options.color_mix_count);
+    // Which mixes the project can still print: those it has a fixed slot for, plus as many new ones as
+    // there are free slots.
+    out.free_slots = std::max(0, int(EnforcerBlockerType::ExtruderMax) - int(bundle.filament_presets.size()));
+    return out;
+}
+
+std::vector<GLGizmoTextureDisplacement::PaletteEntry> GLGizmoTextureDisplacement::compose_palette(
+    const PaletteInputs &inputs, const std::optional<std::vector<PaletteEntry>> &ranking,
+    const DynamicPrintConfig &project_config)
+{
+    std::vector<PaletteEntry> mixes;
+    if (inputs.mixing && ranking)
+        mixes = pick_mixes(*ranking, inputs.mix_count, inputs.free_slots, [&project_config](const PaletteEntry &e) {
+            return find_fixed_mixed_filament(project_config, {unsigned(e.a + 1), unsigned(e.b + 1)},
+                                             {e.a_percent(), 100 - e.a_percent()}) >= 0;
+        });
+    return make_palette(inputs.filaments, mixes);
+}
+
+TextureColorSettings GLGizmoTextureDisplacement::color_settings(const std::vector<TextureDisplacementLayer> &layers,
+                                                                const TextureDisplacementOptions &options,
+                                                                const PaletteInputs &inputs,
+                                                                const DynamicPrintConfig &project_config)
+{
+    TextureColorSettings out;
+    if (!any_layer_colors(layers))
+        return out; // nothing is colouring: every colour path stays switched off
+    std::optional<std::vector<PaletteEntry>> ranking;
+    if (inputs.mixing)
+        ranking = rank_mixes(inputs.filaments, mix_targets(layers), int(EnforcerBlockerType::ExtruderMax) - int(inputs.filaments.size()));
+    out.palette          = compose_palette(inputs, ranking, project_config);
+    out.palette_pure     = make_palette(inputs.filaments, {});
+    out.despeckle_passes = options.color_despeckle;
+    return out;
+}
+
 const std::vector<GLGizmoTextureDisplacement::PaletteEntry> &GLGizmoTextureDisplacement::cached_palette()
 {
     // Rebuilt only when something it depends on actually changes. The shaded preview rebuilds on every
@@ -5725,10 +5601,17 @@ const std::vector<GLGizmoTextureDisplacement::PaletteEntry> &GLGizmoTextureDispl
     // Two levels. The ranking depends only on the filaments and the images, so dragging the count, or a
     // bake creating slots, re-picks from it without ranking again; the palette and its quantizers depend
     // on that pick as well.
-    const ModelVolume     *mv        = texture_volume();
-    const bool             mixing    = mv != nullptr && mv->texture_displacement_options.color_mix_enabled;
-    const int              mix_count = mv != nullptr ? std::max(0, mv->texture_displacement_options.color_mix_count) : 0;
-    std::vector<ColorRGBA> filaments = filament_palette();
+    const ModelVolume *mv = texture_volume();
+    // Without a volume nothing mixes, as before.
+    TextureDisplacementOptions no_options;
+    no_options.color_mix_enabled = false;
+    no_options.color_mix_count   = 0;
+    const PresetBundle    &bundle    = *wxGetApp().preset_bundle;
+    const PaletteInputs    inputs    = palette_inputs(mv != nullptr ? mv->texture_displacement_options : no_options, bundle,
+                                                      wxGetApp().plater()->get_extruders_colors());
+    const bool             mixing    = inputs.mixing;
+    const int              mix_count = inputs.mix_count;
+    std::vector<ColorRGBA> filaments = inputs.filaments;
     // The images themselves rather than their addresses, so a freed and reallocated image can never
     // pass for the old one. Whether one has colour, and whether its colours are flat, follows from it.
     std::vector<std::shared_ptr<std::vector<unsigned char>>> images;
@@ -5749,8 +5632,7 @@ const std::vector<GLGizmoTextureDisplacement::PaletteEntry> &GLGizmoTextureDispl
 
     // Which mixes the project can still print: those it has a fixed slot for, plus as many new ones as
     // there are free slots.
-    const PresetBundle            &bundle     = *wxGetApp().preset_bundle;
-    const int                      free_slots = std::max(0, int(EnforcerBlockerType::ExtruderMax) - int(bundle.filament_presets.size()));
+    const int                      free_slots = inputs.free_slots;
     const std::vector<std::string> slots      = mixed_slot_signature(bundle.project_config);
     if (ranking_stale || m_palette_cache.empty() || mixing != m_palette_mixing || mix_count != m_palette_mix_count ||
         free_slots != m_palette_free_slots || slots != m_palette_slots) {
@@ -5758,13 +5640,9 @@ const std::vector<GLGizmoTextureDisplacement::PaletteEntry> &GLGizmoTextureDispl
         m_palette_mix_count  = mix_count;
         m_palette_free_slots = free_slots;
         m_palette_slots      = slots;
-        std::vector<PaletteEntry> mixes;
-        if (mixing && m_mix_ranking)
-            mixes = pick_mixes(*m_mix_ranking, mix_count, free_slots, [&bundle](const PaletteEntry &e) {
-                return find_fixed_mixed_filament(bundle.project_config, {unsigned(e.a + 1), unsigned(e.b + 1)},
-                                                 {e.a_percent(), 100 - e.a_percent()}) >= 0;
-            });
-        std::vector<PaletteEntry> palette = make_palette(m_palette_filaments, mixes);
+        PaletteInputs cached = inputs;
+        cached.filaments     = m_palette_filaments;
+        std::vector<PaletteEntry> palette = compose_palette(cached, m_mix_ranking, bundle.project_config);
         // The previews keep what they were drawn with, so a palette that really changed under them -
         // a filament or a mixed slot edited in the sidebar - has to send them round again.
         m_palette_changed        = m_palette_changed || (!m_palette_cache.empty() && !same_palette(palette, m_palette_cache));
@@ -5788,13 +5666,16 @@ std::pair<ColorQuantizeFn, ColorQuantizeFn> GLGizmoTextureDisplacement::palette_
 
 std::vector<ColorRGBA> GLGizmoTextureDisplacement::filament_palette()
 {
-    std::vector<ColorRGBA> all = wxGetApp().plater()->get_extruders_colors();
+    return filament_palette(wxGetApp().plater()->get_extruders_colors(), *wxGetApp().preset_bundle);
+}
 
+std::vector<ColorRGBA> GLGizmoTextureDisplacement::filament_palette(const std::vector<ColorRGBA> &all, const PresetBundle &bundle)
+{
     // Physical filaments only. A mix bakes into a mixed filament slot of its own, and those slots are
     // extruders too - mixing them again would hand a blend components naming a virtual slot, where it
     // can only name physical ones ("Mixed filament has invalid or mismatched components"). Mixed slots
     // are kept after the physical ones, so filament i here is extruder i.
-    const auto *is_mixed = wxGetApp().preset_bundle->project_config.option<ConfigOptionBools>("filament_is_mixed");
+    const auto *is_mixed = bundle.project_config.option<ConfigOptionBools>("filament_is_mixed");
     std::vector<ColorRGBA> palette;
     palette.reserve(all.size());
     for (size_t i = 0; i < all.size(); ++i)
@@ -6318,46 +6199,21 @@ void GLGizmoTextureDisplacement::smooth_model()
 
     update_model_object(); // flush any in-progress stroke, so the painted region below is current
 
-    // Movable = the vertices of the painted triangles, so the first ring of purely unpainted vertices
-    // outside them stays put and anchors the result. Restricted rather than whole-model on purpose:
-    // this runs on geometry that has already been baked, and relaxing the whole thing would quietly
-    // round off every unrelated feature on the part. With "Ignore outer ring" the patch's own rim is
-    // held as well - see TextureDisplacementOptions::smooth_skip_border.
-    const indexed_triangle_set &its = mv->mesh().its;
-    std::vector<uint8_t>        painted_face(its.indices.size(), 0);
-    bool                        any = false;
-    for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
-        for (const TriangleSelector::TriangleBitStreamMapping &m : mv->texture_displacement_facet(slot).get_data().triangles_to_split)
-            if (size_t(m.triangle_idx) < its.indices.size()) {
-                painted_face[size_t(m.triangle_idx)] = 1;
-                any                                  = true;
-            }
-    if (!any) {
-        show_error(nullptr, _u8L("Paint the area you want to smooth first - smoothing only touches the "
-                                 "painted part of the model."));
-        return;
-    }
-    std::vector<uint8_t> movable(its.vertices.size(), 0);
-    for (size_t i = 0; i < its.indices.size(); ++i)
-        if (painted_face[i])
-            for (int k = 0; k < 3; ++k)
-                movable[size_t(its.indices[i][k])] = 1;
-    if (opts.smooth_skip_border)
-        for (size_t i = 0; i < its.indices.size(); ++i)
-            if (!painted_face[i])
-                for (int k = 0; k < 3; ++k)
-                    movable[size_t(its.indices[i][k])] = 0; // also used by unpainted geometry -> the rim
-    if (std::none_of(movable.begin(), movable.end(), [](uint8_t m) { return m != 0; })) {
-        // Every painted vertex is on the patch's rim, so "Ignore outer ring" leaves nothing to move.
-        show_error(nullptr, _u8L("Nothing to smooth - the painted area is only one triangle deep, so with "
-                                 "\"Ignore outer ring\" on there are no interior vertices to relax."));
-        return;
-    }
-
-    indexed_triangle_set smoothed = its;
+    TextureSmoothSkip                   why = TextureSmoothSkip::None;
+    std::optional<indexed_triangle_set> smoothed;
     {
         wxBusyCursor wait;
-        smooth_mesh_vertices(smoothed, movable, opts.smooth_strength, opts.smooth_iterations);
+        smoothed = smoothed_baked_mesh(*mv, opts, &why);
+    }
+    if (!smoothed) {
+        if (why == TextureSmoothSkip::NothingPainted)
+            show_error(nullptr, _u8L("Paint the area you want to smooth first - smoothing only touches the "
+                                     "painted part of the model."));
+        else if (why == TextureSmoothSkip::NoInteriorVertices)
+            // Every painted vertex is on the patch's rim, so "Ignore outer ring" leaves nothing to move.
+            show_error(nullptr, _u8L("Nothing to smooth - the painted area is only one triangle deep, so with "
+                                     "\"Ignore outer ring\" on there are no interior vertices to relax."));
+        return;
     }
 
     Plater *plater = wxGetApp().plater();
@@ -6372,7 +6228,7 @@ void GLGizmoTextureDisplacement::smooth_model()
     for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
         saved_texture[size_t(i)] = mv->texture_displacement_facet(i).get_data();
 
-    mv->set_mesh(TriangleMesh(std::move(smoothed)));
+    mv->set_mesh(TriangleMesh(std::move(*smoothed)));
     mv->set_new_unique_id();
     mv->calculate_convex_hull();
     mv->restore_painting(saved_painting);
@@ -6609,25 +6465,19 @@ void GLGizmoTextureDisplacement::bake(bool own_snapshot)
     // baking, otherwise the most recent, not-yet-committed strokes would be silently skipped.
     update_model_object();
 
-    // Every painted part, not only the one holding the layer stack: the brush paints across all of
-    // them (see update_model_object()), so baking one would leave the user's paint on the others
-    // untouched and their geometry flat.
-    const std::vector<ModelVolume *> parts = painted_parts();
-    if (parts.empty()) {
+    // Every painted part, not only the one holding the layer stack (capture_texture_bake()): the brush
+    // paints across all of them (see update_model_object()), so baking one would leave the user's paint
+    // on the others untouched and their geometry flat.
+    if (painted_parts().empty()) {
         show_error(nullptr, _u8L("Nothing is painted, there is nothing to bake."));
         return;
     }
 
-    const Vec3d                                anchor = texture_anchor();
-    const std::vector<float>                   drops  = resting_drops(parts);
-    std::vector<TextureDisplacementBakeVolume> volumes;
-    volumes.reserve(parts.size());
-    for (size_t i = 0; i < parts.size(); ++i)
-        volumes.push_back(texture_displacement_bake_volume(*parts[i], layers_for_part(*parts[i]),
-                                                           owner->texture_displacement_options, anchor, drops[i]));
+    TextureDisplacementBakeInput input = capture_texture_bake(*m_c->selection_info()->model_object(),
+                                                              color_settings_for(*owner), own_snapshot);
 
     m_bake_in_progress = true;
-    queue_texture_displacement_bake(std::move(volumes), color_settings_for(*owner), [this]() {
+    queue_texture_displacement_bake(std::move(input), [this]() {
         m_bake_in_progress = false;
         // Baking replaces each baked part's mesh (new id, new topology) without changing the object's
         // id or volume count, so GLGizmoPainterBase::data_changed()'s usual change-detection never
@@ -6637,7 +6487,7 @@ void GLGizmoTextureDisplacement::bake(bool own_snapshot)
         if (m_state == On && m_c->selection_info() && m_c->selection_info()->model_object())
             update_from_model_object(false);
         m_parent.set_as_dirty();
-    }, own_snapshot);
+    });
 }
 
 // Standard mode's fixed recipe. These are both the values the hidden controls are pinned to and what
@@ -6935,27 +6785,12 @@ void GLGizmoTextureDisplacement::queue_prepare(const TextureDisplacementPrepareP
     // Preparing only the layer stack's own part would hand the displacement a coarse mesh everywhere
     // else - a height map can only move vertices that already exist, so on a multibody object that is
     // the difference between relief and a flat face. See PrepareScope for which parts that means.
-    const std::vector<ModelVolume *> parts = scope == PrepareScope::AllParts ? texture_parts() : painted_parts();
-    if (parts.empty())
+    TextureDisplacementPrepareInput input =
+        capture_texture_prepare(*m_c->selection_info()->model_object(), params, scope,
+                                params.subdiv_color_edge_mm > 0.f ? color_settings_for(*owner) : TextureColorSettings{},
+                                snapshot_name);
+    if (input.volumes.empty())
         return;
-
-    TextureDisplacementPrepareInput input;
-    input.params        = params;
-    input.snapshot_name = snapshot_name;
-    input.volumes.reserve(parts.size());
-    for (const ModelVolume *part : parts) {
-        TextureDisplacementPrepareVolume entry;
-        entry.volume_id = part->id();
-        entry.base_mesh = part->mesh().its;
-        entry.masks     = facets_data_of(*part);
-        entry.layers    = layers_for_part(*part);
-        if (part->has_texture_uv())
-            entry.model_uv = part->texture_uv;
-        entry.texture_frame = prepare_texture_frame(*part);
-        input.volumes.push_back(std::move(entry));
-    }
-    if (params.subdiv_color_edge_mm > 0.f)
-        input.color = color_settings_for(*owner);
 
     m_prepare_in_progress = true;
     queue_texture_displacement_prepare(std::move(input), [this, then_bake, unchanged_msg](

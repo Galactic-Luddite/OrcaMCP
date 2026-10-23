@@ -1394,6 +1394,8 @@ echo "BS an agent's launch gets startup dialogs: the Linux SSL prompt and the pl
 echo "BT replies end their head lines with a bare LF / a request line is read up to its CR, so an LF that arrives later begins the next line (2026-10-02, Streamable HTTP): $(U src/slic3r/GUI/HttpServer.cpp | grep -c 'ssOut << std::endl') / $(U src/slic3r/GUI/HttpServer.cpp | grep -c "async_read_until(socket, buff, '\\\\r'")"
 echo "BU Windows CI's compiler cache keeps objects built with the old version after a bump (depend mode cannot see the precompiled header; 0 = bug): $(U .github/workflows/build_orca.yml | grep -c 'CCACHE_EXTRAFILES')"
 echo "BV two classes named Slic3r::IslandLocator (ConnectedBodies.hpp, MultiMaterialSegmentation.cpp) share one destructor symbol, aborting every painted slice (PR #16774; 0 = bug): $(U src/libslic3r/MultiMaterialSegmentation.cpp | grep -B6 '^class IslandLocator' | grep -c 'namespace {')"
+echo "BW the texture bake and prepare jobs run their work inline in process()/finalize(), which MCP's bake runs as capture / plan / apply (a move: 0 = keep ours): $(U src/slic3r/GUI/Jobs/TextureDisplacementBakeJob.cpp | grep -c 'plan_texture_bake') / $(U src/slic3r/GUI/Jobs/TextureDisplacementPrepareJob.cpp | grep -c 'plan_texture_prepare')"
+echo "BX the texture panel's bake inputs, palette, layer moves, seams and island joins are gizmo members over its selection (a move: 0 = keep ours): $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'texture_stack_owner(') / $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.hpp | grep -c 'compose_palette')"
 ```
 
 Items M and N: upstream's `HttpServer::stop` closes every connection at once, so a reply still being
@@ -2082,6 +2084,31 @@ kept `ConnectedBodies`', and `merge_segmented_layers` freed its grid as a `vecto
 aborted ("pointer being freed was not allocated", 2026-10-23, the dev build). Ours puts the segmentation's class in an
 unnamed namespace (e81a88ab9e); offered upstream as PR https://github.com/OrcaSlicer/OrcaSlicer/pull/16774. On a non-zero
 count, or once either class is renamed, take upstream's.
+
+Item BW is a move: upstream's texture displacement jobs (`TextureDisplacementBakeJob`, `TextureDisplacementPrepareJob`) do
+their work inline -- `process()` runs the displacement or the prepare loop against the job's own copies, and `finalize()`
+commits it to the live model, shows the "produced no displacement" error and the budget notification. MCP's bake needs the
+same three steps apart, as `repair_mesh` has them (`FixModelByCgal.hpp`). Ours moves each body, unchanged, into free
+functions the job and MCP both call: `capture_texture_bake` / `plan_texture_bake` / `texture_bake_applies_to` /
+`texture_bake_moved` / `apply_texture_bake` and `capture_texture_prepare` / `plan_texture_prepare` /
+`apply_texture_prepare`, with `queue_texture_displacement_bake` taking the captured input. The apply steps show no dialog and
+push no notification (`finalize()` still does both, from the outcome); a prepare applied with an empty `snapshot_name` takes no
+undo step, so a bake can share the step of the prepare before it; `TexturePrepareScope` moves out of the gizmo into the prepare
+job's header. On a 0, upstream has split the jobs itself: take its split and re-run `slic3rutils_tests "[TextureObject]"`.
+
+Item BX is a move: the texture panel's bake inputs and layer logic were members of the gizmo over its selection
+(`texture_volume()`, `texture_parts()`, `painted_parts()`, `layers_for_part()`, `texture_anchor()`, `resting_drops()`,
+`prepare_texture_frame()`, `remove_texture_layer()`, `swap_layer_slots()`, `move_texture_layer()`, `mark_seam_path()`,
+`cut_island()`, Join, `smooth_model()`), and the palette composition lived in `cached_palette()` and `color_settings_for()`.
+Ours moves the model half of each into `GUI/TextureDisplacementObject.{hpp,cpp}` (no wx, no app: `texture_stack_owner`,
+`texture_parts`, `painted_texture_parts`, `layers_for_part`, `texture_anchor`, `resting_drops`, `prepare_texture_frame`,
+`remove_texture_layer`, `swap_texture_layer_slots`, `texture_layer_move_swaps` / `move_texture_layer`, `seam_path_edges`,
+`cut_island_seams`, `join_target`, `smoothed_baked_mesh`), keeping the gizmo's members as one-line callers over
+`m_c->selection_info()->model_object()` plus the panel's own caches (thumbnails, expanded flags, active and picker slots), and
+adds the public statics `palette_inputs` / `compose_palette` / `color_settings` beside `make_palette` (the panel's two-level
+cache stays: `cached_palette()` calls `compose_palette`, `color_settings_for()` keeps its cache). `filament_palette()` gained
+an overload taking the extruder colours and the bundle, so a caller reads the app on the main thread itself. On a 0, upstream
+moved those functions: take its versions and re-run `slic3rutils_tests "[TextureObject],[TextureColorPalette]"`.
 
 Item I is not a fork patch -- we deliberately carry nothing for it (see
 `docs/superpowers/plans/2026-09-17-next-release-plan.md`, Stage 3). It is here so the sync notices
