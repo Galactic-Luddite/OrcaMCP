@@ -13,6 +13,33 @@
 
 This document tracks the process of syncing OrcaMCP with upstream OrcaSlicer and serves as a guide for future syncs.
 
+## Every sync, in this order
+
+The details of each step are in CLAUDE.md, "Syncing with Upstream".
+
+1. **Merge in a worktree** (`git worktree add ... mcp`, then `git merge --no-commit upstream/main`), so the main
+   checkout and its build stay usable. Resolve with diff3 markers; `--ours` plus a deliberate port for any file the
+   fork rebrands, never `--theirs`.
+2. **Run the carried-fix probes against the old merge base and against `upstream/main`, and diff the outputs.** A
+   probe greps our spelling, so an upstream fix written its own way still reads "bug": also check the upstream issues
+   we filed (`gh issue list -R OrcaSlicer/OrcaSlicer --author okets --state all`) and read upstream's side of every
+   conflict that sits on a carried fix. Rewrite each probe that missed.
+3. **Review the change list for MCP tools to add, update or remove**: three read-only reviews in parallel (GUI;
+   libslic3r; printers, network and CI), reported major features first, each in its own paragraph with effort and a
+   recommendation (CLAUDE.md, "Every sync: review the change list for MCP tools"). Report the Design tab's state too.
+4. **Rebuild the deps** when `deps/` changed: the fork carries nothing there, so `git restore --source=upstream/main
+   --worktree -- deps` in the main checkout lets `./build_release_macos.sh -d -x -j 12` rebuild them in place while
+   the merge goes on.
+5. **Build, then compile the fork's own sources with the precompiled header off** (a `build/nopch` tree configured
+   with `-DSLIC3R_PCH=OFF`, building only the objects of files upstream does not have). Upstream builds Windows clang
+   without the PCH, so a header it used to supply fails there first, and Windows stops at the first error per round.
+6. **Run the tests the way CI does** (`ctest -C Release -j 12`): one process per case. The whole binary in one process
+   shares one Python interpreter and fails plugin tests that pass alone.
+7. **Bump the external regression suite's pin** (`test_repo_sha` in `build_orca.yml`) to the revision upstream's
+   green run of the merged commit used.
+8. **Live-check in a test instance** with its own `--datadir`, never the user's window (`list_instances` first).
+9. `scripts/check-fork-customizations.sh`, then push `main` (cancel the Build all it starts: upstream's code) and `mcp`.
+
 ## Current Sync: March 2026
 
 ### Overview
@@ -293,6 +320,46 @@ offers only a fallback `start_orca`.
 
 ---
 
+## Sync: October 2026
+
+| Metric | Value |
+|--------|-------|
+| Sync dates | 2026-10-22 (e5bb802378), 2026-10-23 (373ffaa13f) |
+| Upstream commits | 1,310 + 47 since 72cfe71b81 |
+| Conflicts | 56 files, then 1 |
+| OrcaMCP version | 2.5.0.12-dev (RC 85354f01a7) |
+
+**What upstream fixed for us**, taken from upstream and our patches dropped: small binary STLs that loaded empty
+(BL, our issue #15993), settings saved as "true" (BQ, #15994), the CLI thumbnail crash (BR), the vendor printer name
+(E), the locale message (BS's second part). The spiral vase fix (AN, #15995) is upstream's; our extraction stays as a
+move. Several probes still said "bug" for these: they matched our spelling.
+
+**What took real work**
+
+- **Mesh repair.** Upstream rewrote it (#16366, `Slic3r::repair_mesh`, CGAL 6.2): each volume repaired in place, no
+  split. Our capture / plan / apply steps were ported onto it, and `repair_mesh`'s answer changed from split / dropped
+  counts to `repair` (upstream's `MeshRepairStats`).
+- **Web strings** moved to the .po catalogs (`resources/web/data/text.js` is gone): the home page's Connect AI entry
+  now uses `data-i18n` keys from `WebViewDialog.cpp`'s table. Fork strings stay English-only and the catalogs stay
+  exactly upstream's: hand-edited .po entries break the orca-translations skill's rules and conflict at every sync.
+- **API moves** upstream made: `ModelInstance::auto_drop` to `ModelObject::auto_drop`, the printer-agent
+  `connect_printer(PrinterConnectionParams)`, `seed_fill_select_triangles`' new `up_direction`,
+  `Preset::load_external_config`, `PrinterWebView::create_browser`, camera stream modes in `MediaPlayCtrl`.
+- **A fork bug upstream's tests found:** OrcaMCP refused G-code that OrcaSlicer wrote (`SLIC3R_APP_NAME` is ours).
+
+**CI after the merge**
+
+- Windows: `wxTheApp` undeclared (a header the PCH used to supply), then upstream's new test writing `Polygon`
+  unqualified, ambiguous against `<windows.h>`'s GDI function under our force-include (carried fix X).
+- Linux: three regression-suite cases failed because the suite was still pinned to 2026-09-25.
+- macOS: runners starved twice (macos-14 and macos-15 capacity), not code: rerun the failed jobs.
+
+**New tools from the review:** `drop_to_bed`, `repair_mesh` Fix All (`plate_index` / `all_plates`), bed exclusion
+volumes in `get_scene_info` and the renders (planned by Opus, written by Sonnet, audited by Opus, live-tested). The
+rest of the review's list, texture displacement first, is in the project memory and the roadmap discussion.
+
+---
+
 ## Post-Sync Tasks
 
 - [ ] Update CLAUDE.md if any MCP patterns changed
@@ -332,6 +399,10 @@ offers only a fallback `start_orca`.
    - Our MCP includes + their new includes
    - Our MCP classes + their new classes
 4. **Test before release**: Always run full CI build before creating release tag
+5. **Review for tools every time** (October 2026): the sync's largest new feature was missed because the report
+   listed it as one line among a dozen. Lead with each major feature, explain it, and recommend.
+6. **Another session may share the checkout**: check `git status` and `ListAgents` before committing, never stage
+   files you did not change, and agree the push order with that session.
 
 ---
 
