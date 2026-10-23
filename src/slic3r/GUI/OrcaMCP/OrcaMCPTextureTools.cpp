@@ -7,6 +7,8 @@
 #include "OrcaMCPServer.hpp"
 #include "OrcaMCPCommon.hpp"
 #include "OrcaMCPNextSteps.hpp"
+#include "OrcaMCPPaintModel.hpp"
+#include "OrcaMCPPaintSelect.hpp"
 #include "OrcaMCPPartEdits.hpp"
 #include "OrcaMCPPartTools.hpp"
 #include "OrcaMCPTextureDisplacement.hpp"
@@ -121,6 +123,7 @@ nlohmann::json delete_user_texture(const nlohmann::json& params)
         std::string          error;
         if (!remove_user_texture(entry.path, error))
             return guard.fail_on_errors(error_response(error));
+        bump_texture_library_generation(); // the panel's cache of images by path forgets the deleted one
 
         nlohmann::json answer = {{"status", "success"},
                                  {"deleted", {{"texture", id}, {"name", entry.name}, {"path", entry.path}}},
@@ -148,6 +151,11 @@ std::optional<ImageRead> read_image(const std::string& path, std::string& error)
     out.data = load_texture_image_data(path, error);
     if (!out.data)
         return std::nullopt;
+    if (const auto size = png_dimensions(out.data->data(), out.data->size()); size && std::max(size->first, size->second) > max_texture_side_px) {
+        error = path + " is " + std::to_string(size->first) + " x " + std::to_string(size->second) + " px; a texture layer takes images up to " +
+                std::to_string(max_texture_side_px) + " px a side";
+        return std::nullopt;
+    }
     Slic3r::TextureDisplacementLayer probe;
     probe.image_data = out.data;
     out.decoded      = Slic3r::decode_height_texture(probe, /*keep_decoded=*/false);
@@ -155,46 +163,20 @@ std::optional<ImageRead> read_image(const std::string& path, std::string& error)
         error = path + " is not an image a texture layer can use (a grayscale or RGB picture)";
         return std::nullopt;
     }
+    drop_grey_colour(out.decoded); // the library keeps such an image as grayscale
     return out;
 }
 
-// What a library file decoded to is cached by (size, mtime) so a second look at the library reads no file.
-struct CachedIdentity
+// The library texture whose decoded image is `wanted` (same size and pixels, same colours or none), with the
+// image read from its file. A PNG whose header size differs is not opened.
+std::optional<std::pair<Slic3r::GUI::TextureLibraryEntry, ImageRead>> find_identical_texture(const DecodedHeightTexture& wanted)
 {
-    std::uintmax_t           size  = 0;
-    std::filesystem::file_time_type mtime;
-    TextureIdentity          identity;
-    bool                     readable = false;
-};
-
-std::map<std::string, CachedIdentity>& identity_cache()
-{
-    static std::map<std::string, CachedIdentity> cache; // main thread only
-    return cache;
-}
-
-// The library texture whose decoded image is `wanted`: same size and pixels, and the same colours (or none).
-std::optional<Slic3r::GUI::TextureLibraryEntry> find_identical_texture(const DecodedHeightTexture& wanted)
-{
-    const TextureIdentity id = texture_identity(wanted);
     for (const Slic3r::GUI::TextureLibraryEntry& entry : texture_library()) {
-        std::error_code ec;
-        const std::filesystem::path file = std::filesystem::u8path(entry.path);
-        const auto size  = std::filesystem::file_size(file, ec);
-        const auto mtime = ec ? std::filesystem::file_time_type{} : std::filesystem::last_write_time(file, ec);
-        if (ec)
-            continue;
-        CachedIdentity& cached = identity_cache()[entry.path];
-        if (cached.size != size || cached.mtime != mtime || (!cached.readable && cached.size == 0)) {
-            std::string error;
-            const auto  read = read_image(entry.path, error);
-            cached           = CachedIdentity{size, mtime, read ? texture_identity(read->decoded) : TextureIdentity{}, read.has_value()};
-        }
-        if (!cached.readable || cached.identity.hash != id.hash || cached.identity.width != id.width || cached.identity.height != id.height)
+        if (const auto size = png_dimensions_from_file(entry.path); size && (size->first != wanted.width || size->second != wanted.height))
             continue;
         std::string error;
-        if (const auto read = read_image(entry.path, error); read && same_texture(read->decoded, wanted))
-            return entry;
+        if (auto read = read_image(entry.path, error); read && same_texture(read->decoded, wanted))
+            return std::make_pair(entry, std::move(*read));
     }
     return std::nullopt;
 }
@@ -217,11 +199,16 @@ std::optional<LibraryImage> library_image(const Slic3r::GUI::TextureLibraryEntry
     return out;
 }
 
+LibraryImage reused_image(std::pair<Slic3r::GUI::TextureLibraryEntry, ImageRead>&& found)
+{
+    return LibraryImage{std::move(found.first), std::move(found.second.data), true};
+}
+
 // An image file given to a layer: the identical texture the library holds, else imported into it.
 std::optional<LibraryImage> import_or_reuse(const std::string& path, const DecodedHeightTexture& decoded, std::string& error)
 {
-    if (const auto same = find_identical_texture(decoded))
-        return library_image(*same, true, error);
+    if (auto same = find_identical_texture(decoded))
+        return reused_image(std::move(*same));
     const auto entry = import_texture_to_library(path, error);
     if (!entry)
         return std::nullopt;
@@ -231,8 +218,8 @@ std::optional<LibraryImage> import_or_reuse(const std::string& path, const Decod
 // An edited image (adjust_image): the identical texture the library holds, else saved into it.
 std::optional<LibraryImage> save_or_reuse(const DecodedHeightTexture& image, const std::string& stem, std::string& error)
 {
-    if (const auto same = find_identical_texture(image))
-        return library_image(*same, true, error);
+    if (auto same = find_identical_texture(image))
+        return reused_image(std::move(*same));
     const auto entry = save_texture_to_library(image, stem, error);
     if (!entry)
         return std::nullopt;
@@ -277,6 +264,7 @@ struct EditPlan
     std::optional<DecodedHeightTexture>      adjusted;                    // adjust_image: the image after it
     std::string                              adjust_stem;
     bool                                     image_changed = false;
+    std::optional<VisibleView>               frame_view;                  // a frame set by this call: what paints inside it
     bool                                     changed       = false;
     int                                      move_from = 0, move_to = 0;
     std::string                              snapshot;
@@ -416,6 +404,19 @@ std::optional<std::string> plan_edit(const nlohmann::json& params, const LayerRe
                                              : Slic3r::Vec3d(plan.object->instance_bounding_box(0).center());
             const auto matrix = orthographic_frame_matrix(frame_axes.first, frame_axes.second, center, frame.width_mm, frame.height_mm, to_world);
             axes = frame_axes;
+            const Slic3r::Transform3d owner_to_plate = volume_to_plate(*plan.object, *plan.owner, 0);
+            if (!plate_transform_is_invertible(owner_to_plate))
+                return "Object " + std::to_string(plan.object_id) + " is collapsed on an axis, so a frame cannot project through it";
+            VisibleView view;
+            view.forward = (-(frame_axes.first.cross(frame_axes.second))).normalized();
+            if (frame.view && *frame.view == "current") {
+                const Slic3r::GUI::Camera& camera = wxGetApp().plater()->get_camera();
+                view.ortho = camera.get_type() == Slic3r::GUI::Camera::EType::Ortho;
+                view.eye   = camera.get_position();
+            }
+            view.frame          = matrix;
+            view.plate_to_frame = owner_to_plate.inverse();
+            plan.frame_view     = view;
             view_changed |= !plan.after.view_project_projective || plan.after.view_project_matrix != matrix || plan.after.tile_enabled ||
                             plan.after.projection_method != Slic3r::TextureProjectionMethod::ViewProjected;
             plan.after.projection_method       = Slic3r::TextureProjectionMethod::ViewProjected;
@@ -436,6 +437,8 @@ std::optional<std::string> plan_edit(const nlohmann::json& params, const LayerRe
             plan.after.view_project_right = right;
             plan.after.view_project_up    = up;
         }
+        if (plan.frame_view && !view_changed)
+            plan.frame_view.reset();
         if (settings.adjust_image) {
             const DecodedHeightTexture* given = given_image(plan);
             const DecodedHeightTexture  source = given != nullptr ? *given : raw_image_of(plan.after);
@@ -525,11 +528,28 @@ PendingLayer capture_layer(const Slic3r::ModelObject& object, const Slic3r::Mode
     return out;
 }
 
-bool slot_painted_anywhere(const Slic3r::ModelObject& object, int slot)
+// The faces visible through the frame this call set, painted onto the layer in `slot` as the panel's Apply does (every
+// model part, one part hiding another). Returns the number of facets painted.
+int paint_frame(const EditPlan& plan, int slot)
 {
-    return std::any_of(object.volumes.begin(), object.volumes.end(), [&](const Slic3r::ModelVolume* v) {
-        return v->is_model_part() && !v->texture_displacement_facet(slot).empty();
-    });
+    PaintTarget everything;
+    everything.object       = plan.object;
+    everything.object_id    = plan.object_id;
+    everything.instance_idx = 0;
+    for (int i = 0; i < int(plan.object->volumes.size()); ++i)
+        if (plan.object->volumes[size_t(i)]->is_model_part()) {
+            everything.volumes.push_back(plan.object->volumes[size_t(i)]);
+            everything.volume_ids.push_back(i);
+        }
+    const PaintPlan                    paint_plan  = capture_paint_plan(everything);
+    const std::vector<FacetAssignment> assignments = assign_visible(paint_plan.volumes, paint_plan.volumes, *plan.frame_view, 1);
+    int                                painted     = 0;
+    for (size_t i = 0; i < paint_plan.volumes.size() && i < assignments.size(); ++i) {
+        const PaintPlanVolume& pv = paint_plan.volumes[i];
+        apply_facet_states(*everything.volumes[size_t(pv.index)], PaintChannel::texture(slot), assignments[i].states, /*replace=*/false);
+        painted += int(assignments[i].states.size()) - assignments[i].unassigned;
+    }
+    return painted;
 }
 
 // Writes the plan into the model. Main thread, after the snapshot. Returns the slot the layer is in now (-1 after a remove).
@@ -599,16 +619,31 @@ nlohmann::json edit_stack(const nlohmann::json& params, const LayerRequest& requ
 
     int  slot = plan.slot;
     bool had_paint = false;
+    int  facets_painted = -1;
     std::string removed_name;
     if (plan.changed) {
-        // The images go to the library first: a file that cannot be written leaves the scene as it was.
+        // Every check is behind us and the call changes something: close an open panel, as the user would. Closing takes
+        // the panel's own undo step and resets its live image adjustment, so the model is read again as it is now, and
+        // the checks run again on it, before the library or the scene is touched.
+        if (const auto failed = close_toolbar_tool_for_change(*plater, plan.object_id, plan.object->volumes.size(), closed_tool))
+            return guard.report(with_closed_tool(*failed, closed_tool));
+        if (!closed_tool.empty()) {
+            plan = EditPlan{};
+            if (const auto refusal = plan_edit(params, request, plan))
+                return fail(*refusal);
+            answer["changed"] = plan.changed;
+            slot              = plan.slot;
+        }
+    }
+    if (plan.changed) {
+        // The images go to the library: a file that cannot be written leaves the scene as it was. With adjust_image
+        // only the adjusted copy is kept, not the original it came from.
         std::optional<LibraryImage> stored;
         std::string                 error;
-        if (plan.file) {
-            stored    = import_or_reuse(*request.file_path, plan.file->decoded, error);
-        }
         if (plan.adjusted)
             stored = save_or_reuse(*plan.adjusted, plan.adjust_stem, error);
+        else if (plan.file)
+            stored = import_or_reuse(*request.file_path, plan.file->decoded, error);
         if ((plan.file || plan.adjusted) && !stored)
             return fail(error);
         if (stored) {
@@ -628,14 +663,16 @@ nlohmann::json edit_stack(const nlohmann::json& params, const LayerRequest& requ
         if (stored && stored->entry.source == TextureSource::User)
             touch_user_texture(stored->entry.path);
 
-        had_paint = request.action == LayerAction::remove && slot_painted_anywhere(*plan.object, plan.slot);
+        had_paint = request.action == LayerAction::remove && slot_painted_fast(*plan.object, plan.slot);
         removed_name = plan.before ? plan.before->name : std::string();
 
-        // Every check is behind us and the call changes something: close an open panel, as the user would, right before the step.
-        if (const auto failed = close_toolbar_tool_for_change(*plater, plan.object_id, plan.object->volumes.size(), closed_tool))
-            return guard.report(with_closed_tool(*failed, closed_tool));
         plater->take_snapshot(plan.snapshot);
         slot = write_edit(plan);
+        // As the panel does on applying a frame: what is visible inside it is painted onto the layer.
+        if (plan.frame_view) {
+            facets_painted = paint_frame(plan, slot);
+            answer["facets_painted"] = facets_painted;
+        }
         if (Slic3r::GUI::GLCanvas3D* canvas = plater->get_view3D_canvas3D())
             canvas->set_as_dirty();
     }
@@ -806,7 +843,8 @@ void OrcaMCPServer::register_texture_tools()
         "layer at to_position in slot order, its paint with it (it may take another slot: layer in the answer); remove "
         "drops it and its paint. projection view projects from view_direction (a named view, or current: the 3D view's "
         "camera now) or view_axes; projection_frame projects once through a rectangle (view or right and up, center, "
-        "width_mm, height_mm) with tiling off, false clears it; adjust_image saves an adjusted copy of the texture into "
+        "width_mm, height_mm) with tiling off, as the panel's Apply does it also paints the layer where the frame sees the "
+        "surface (facets_painted); false clears it; adjust_image saves an adjusted copy of the texture into "
         "the library and uses it. One undo step; nothing to change is changed: false. Refused while an arrange, orient "
         "or bake runs; an open toolbar tool is closed first when the call changes something.",
         set_texture_displacement_schema(),

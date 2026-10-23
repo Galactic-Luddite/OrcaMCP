@@ -983,3 +983,36 @@ TEST_CASE("every bound of a layer setting is the registered schema's minimum and
         CHECK_THAT(property.at("maximum").get<double>(), WithinAbs(bound.max, 1e-9));
     }
 }
+
+TEST_CASE("a PNG's size is read from its header", "[McpTexture][orcamcp]")
+{
+    unsigned char head[33] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13, 'I', 'H', 'D', 'R', 0, 0, 0x20, 0, 0, 0, 0x10, 0, 8, 0};
+    const auto    size     = png_dimensions(head, sizeof head);
+    REQUIRE(size.has_value());
+    CHECK(size->first == 8192);
+    CHECK(size->second == 4096);
+    CHECK(size->first <= max_texture_side_px);
+    head[1] = 'X';
+    CHECK_FALSE(png_dimensions(head, sizeof head).has_value());
+    CHECK_FALSE(png_dimensions(head, 10).has_value());
+}
+
+TEST_CASE("an RGB image of grey pixels is the grayscale texture the library would store", "[McpTexture][orcamcp]")
+{
+    DecodedHeightTexture grey;
+    grey.width  = 2;
+    grey.height = 1;
+    grey.pixels = {100, 101};
+    grey.rgb    = {100, 100, 100, 102, 102, 102};
+    REQUIRE(grey.has_color());
+    drop_grey_colour(grey);
+    CHECK_FALSE(grey.has_color());
+    CHECK(grey.pixels == std::vector<std::uint8_t>{100, 102});
+
+    DecodedHeightTexture coloured = grey;
+    coloured.pixels               = {100, 101};
+    coloured.rgb                  = {100, 100, 100, 102, 103, 102};
+    drop_grey_colour(coloured);
+    CHECK(coloured.has_color());
+    CHECK(coloured.pixels == std::vector<std::uint8_t>{100, 101});
+}

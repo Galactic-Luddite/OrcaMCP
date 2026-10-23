@@ -4013,7 +4013,7 @@ call changes something, an open paint or texture panel is closed first, right be
 | `blend` | string | No | `add`, `override`, `subtract`, `multiply`, `divide` |
 | `view_direction` | string | No | With `projection: view`: a named view, or `current` (the 3D view's camera now). Choosing `view` without one captures `current` |
 | `view_axes` | object | No | With `projection: view`: `{right, up}` in plate axes, as a layer reports them. Not with `view_direction` |
-| `projection_frame` | object / false | No | Project once through a rectangle: `{view or right+up, center (default: the object's centre), width_mm, height_mm}`, tiling off. `false` clears it. Not with `view_direction`, `view_axes` or a projection other than `view` |
+| `projection_frame` | object / false | No | Project once through a rectangle: `{view or right+up, center (default: the object's centre), width_mm, height_mm}`, tiling off; also paints the layer where the frame sees the surface (`facets_painted`, in the same undo step). `false` clears it. Not with `view_direction`, `view_axes` or a projection other than `view` |
 | `adjust_image` | object | No | `{brightness, contrast, sharpness, blur, hue_deg}`: saves an adjusted copy into the library and uses it |
 | `color_mix`, `color_mix_count`, `color_denoise` | boolean / integer | No | Stack-wide colour options |
 
@@ -4027,7 +4027,8 @@ under a projection frame.
 
 **Response:** `changed`, `action`, `object_id`, `layer` (the layer's whole state: image, settings, `view_axes`,
 `paint` per part, `painted`, `inactive_settings`, `warnings`; for `remove`, `removed_layer` instead), `stack_options`,
-`imported_texture` (`texture`, `name`, `path`, `reused`) when a file or an adjusted copy went to the library,
+`imported_texture` (`texture`, `name`, `path`, `reused`) when a file or an adjusted copy went to the library (with `adjust_image` only the adjusted copy is kept; an image over 8192 px a side is refused),
+`facets_painted` when a frame was set,
 `needs_bake` (some layer is painted), `next_steps` (paint a layer that is painted nowhere).
 
 ```json

@@ -63,7 +63,16 @@ std::optional<int> library_index_of(const std::vector<TextureLibraryEntry>&, con
 // the 8-bit RGB and RGBA it takes as colour, nullopt for anything it cannot decode (a jpg in the user folder,
 // a palette, grayscale-with-alpha or 16-bit PNG).
 std::optional<bool> png_has_color(const unsigned char* bytes, std::size_t size);
+// A PNG's width and height from its header, nullopt for anything else.
+std::optional<std::pair<int, int>> png_dimensions(const unsigned char* bytes, std::size_t size);
 // I/O: the first 33 bytes of the file.
+std::optional<std::pair<int, int>> png_dimensions_from_file(const std::string& path);
+// An image stored as RGB whose every pixel is grey is a grayscale texture: the import stores it as one
+// (the library's image_has_color), so a candidate is compared and checked as the file it would become.
+// The height becomes the grey value and the colour channels go.
+void drop_grey_colour(DecodedHeightTexture&);
+// The most pixels a side of an image given to a layer may have: larger is refused, not decoded.
+constexpr int max_texture_side_px = 8192;
 std::optional<bool> png_color_from_file(const std::string& path);
 // {id, name, source, pack?, file, path, color (true / false / null: not read)}
 nlohmann::json library_entry_json(const TextureLibraryEntry&, const std::string& id, std::optional<bool> color);

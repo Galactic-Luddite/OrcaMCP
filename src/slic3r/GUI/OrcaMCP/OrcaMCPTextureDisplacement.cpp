@@ -203,6 +203,40 @@ std::optional<bool> png_color_from_file(const std::string& path)
     return png_has_color(head, size_t(in.gcount()));
 }
 
+std::optional<std::pair<int, int>> png_dimensions(const unsigned char* bytes, std::size_t size)
+{
+    static const unsigned char signature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+    if (bytes == nullptr || size < 24 || !std::equal(signature, signature + 8, bytes) || std::string(bytes + 12, bytes + 16) != "IHDR")
+        return std::nullopt;
+    const auto be32 = [&](size_t at) { return (std::uint32_t(bytes[at]) << 24) | (std::uint32_t(bytes[at + 1]) << 16) | (std::uint32_t(bytes[at + 2]) << 8) | bytes[at + 3]; };
+    const std::uint32_t w = be32(16), h = be32(20);
+    if (w == 0 || h == 0 || w > 0x7fffffffu || h > 0x7fffffffu)
+        return std::nullopt;
+    return std::make_pair(int(w), int(h));
+}
+
+std::optional<std::pair<int, int>> png_dimensions_from_file(const std::string& path)
+{
+    std::ifstream in(std::filesystem::u8path(path), std::ios::binary);
+    if (!in)
+        return std::nullopt;
+    unsigned char head[33] = {};
+    in.read(reinterpret_cast<char*>(head), sizeof head);
+    return png_dimensions(head, size_t(in.gcount()));
+}
+
+void drop_grey_colour(DecodedHeightTexture& t)
+{
+    if (!t.has_color())
+        return;
+    for (size_t i = 0; i < t.pixels.size(); ++i)
+        if (t.rgb[i * 3] != t.rgb[i * 3 + 1] || t.rgb[i * 3 + 1] != t.rgb[i * 3 + 2])
+            return;
+    for (size_t i = 0; i < t.pixels.size(); ++i)
+        t.pixels[i] = t.rgb[i * 3];
+    t.rgb.clear();
+}
+
 json library_entry_json(const TextureLibraryEntry& entry, const std::string& id, std::optional<bool> color)
 {
     json out = {{"id", id}, {"name", entry.name}, {"source", texture_source_name(entry.source)}};
