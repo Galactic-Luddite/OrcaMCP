@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "libslic3r/Point.hpp"
+#include "TextureBakeCancel.hpp"
 #include "TextureBakeIndex.hpp"
 
 namespace Slic3r {
@@ -78,6 +79,8 @@ struct SubdivideResult
 // graded refinement reaches it (see `within`). Its edges still split when an included neighbour marks
 // them, so no T-junction appears at the boundary.
 // `fast` selects the cheap position-only indexer for previews.
+// `stop`, when it answers true (asked within a pass, from the calling thread), ends the refinement at the
+// last whole pass; the caller that asked for it discards the result.
 // `within`, when given, grades the refinement: an edge splits only while it is longer than
 // max_edge_length plus SUBDIVIDE_GRADE times its distance from the region. Away from the region the
 // triangles are then left as whole pieces of the input's own 1->4 grid rather than refined throughout.
@@ -87,7 +90,7 @@ SubdivideResult subdivide(const TriSoup &geometry, double max_edge_length,
                           const std::vector<uint8_t> &face_excluded = {}, bool fast = false,
                           int safety_cap = SUBDIVIDE_SAFETY_CAP,
                           const SubdivideProgressFn &on_progress = {},
-                          const SubdivideWithinFn &within = {});
+                          const SubdivideWithinFn &within = {}, const StopFn &stop = {});
 
 // Displacement needs the same welding and sharp-edge clustering.
 IndexedMesh to_indexed(const TriSoup &geometry);

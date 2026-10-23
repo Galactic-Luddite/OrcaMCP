@@ -112,6 +112,15 @@ DecimateResult decimate(const TriSoup &geometry, size_t target_triangles, bool h
         result.geometry = geometry;
         return result;
     }
+    // The setup below is most of the time of a run that ends at its budget, and the pop loop's own
+    // poll is not reached until it is done, so the setup asks the hook too (fraction 0, which a hook
+    // that only cancels ignores). A stop there hands the geometry back unchanged.
+    const StopFn stop = on_progress ? StopFn([&on_progress]() { return !on_progress(0.0); }) : StopFn{};
+    StopPoll     poll(&stop);
+    const auto   stopped_in_setup = [&]() {
+        result.geometry = geometry;
+        return result;
+    };
 
     // The finest grid. Anything coarser fuses distinct fine-feature vertices on a displaced mesh,
     // leaving it non-manifold before decimation starts and producing open edges afterwards.
@@ -119,6 +128,8 @@ DecimateResult decimate(const TriSoup &geometry, size_t target_triangles, bool h
     std::vector<Vec3d> pos;
     std::vector<int>   remap(n);
     for (size_t i = 0; i < n; ++i) {
+        if (poll.tick())
+            return stopped_in_setup();
         const int idx = vert_map.get_or_set(geometry.pos[i], int(pos.size()));
         if (vert_map.inserted())
             pos.push_back(geometry.pos[i].cast<double>());
@@ -163,19 +174,21 @@ DecimateResult decimate(const TriSoup &geometry, size_t target_triangles, bool h
         // The plane per face is independent; accumulating it into the three incident vertices is not,
         // so only the first half is parallel.
         std::vector<Vec4d> planes(face_count, Vec4d::Zero());
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, face_count),
-                          [&](const tbb::blocked_range<size_t> &range) {
-                              for (size_t f = range.begin(); f < range.end(); ++f) {
-                                  const int a = faces[f * 3], b = faces[f * 3 + 1], c = faces[f * 3 + 2];
-                                  if (a < 0)
-                                      continue;
-                                  const Vec3d nrm = face_normal_unit(pos, a, b, c);
-                                  if (nrm.isZero())
-                                      continue;
-                                  planes[f] = Vec4d(nrm.x(), nrm.y(), nrm.z(), -nrm.dot(pos[size_t(a)]));
-                              }
-                          });
+        if (!parallel_chunks(face_count, CANCEL_CHUNK * 4, poll, [&](const tbb::blocked_range<size_t> &range) {
+                for (size_t f = range.begin(); f < range.end(); ++f) {
+                    const int a = faces[f * 3], b = faces[f * 3 + 1], c = faces[f * 3 + 2];
+                    if (a < 0)
+                        continue;
+                    const Vec3d nrm = face_normal_unit(pos, a, b, c);
+                    if (nrm.isZero())
+                        continue;
+                    planes[f] = Vec4d(nrm.x(), nrm.y(), nrm.z(), -nrm.dot(pos[size_t(a)]));
+                }
+            }))
+            return stopped_in_setup();
         for (size_t f = 0; f < face_count; ++f) {
+            if (poll.tick())
+                return stopped_in_setup();
             const Vec4d &pl = planes[f];
             if (pl.head<3>().isZero())
                 continue;
@@ -191,6 +204,8 @@ DecimateResult decimate(const TriSoup &geometry, size_t target_triangles, bool h
         std::vector<EdgeRec> edges;
         QuantizedPointMap    edge_idx(1.0, std::min(face_count * 3, size_t(1) << 22));
         for (size_t f = 0; f < face_count; ++f) {
+            if (poll.tick())
+                return stopped_in_setup();
             if (faces[f * 3] < 0)
                 continue;
             for (int e = 0; e < 3; ++e) {
@@ -211,6 +226,8 @@ DecimateResult decimate(const TriSoup &geometry, size_t target_triangles, bool h
 
         const double sqrt_w = std::sqrt(DECIMATE_CREASE_WEIGHT);
         for (const EdgeRec &er : edges) {
+            if (poll.tick())
+                return stopped_in_setup();
             if (er.count != 2)
                 continue; // boundary or non-manifold
             const Vec3d n0 = face_normal_unit(pos, faces[size_t(er.f0) * 3], faces[size_t(er.f0) * 3 + 1],
@@ -246,7 +263,9 @@ DecimateResult decimate(const TriSoup &geometry, size_t target_triangles, bool h
     const size_t     S = face_count * 3;
     std::vector<int> vf_head(vert_count, -1), vf_count(vert_count, 0), slot_face(S), slot_vert(S),
         slot_next(S, -1), slot_prev(S, -1), face_slot(S, -1);
-    for (size_t f = 0; f < face_count; ++f)
+    for (size_t f = 0; f < face_count; ++f) {
+        if (poll.tick())
+            return stopped_in_setup();
         for (int k = 0; k < 3; ++k) {
             const int s = int(f) * 3 + k;
             const int v = faces[size_t(s)];
@@ -260,6 +279,7 @@ DecimateResult decimate(const TriSoup &geometry, size_t target_triangles, bool h
             face_slot[size_t(s)] = s;
             ++vf_count[size_t(v)];
         }
+    }
     const auto unlink_slot = [&](int s) {
         const int p = slot_prev[size_t(s)], nx = slot_next[size_t(s)], v = slot_vert[size_t(s)];
         if (p >= 0) slot_next[size_t(p)] = nx;
@@ -353,6 +373,8 @@ DecimateResult decimate(const TriSoup &geometry, size_t target_triangles, bool h
     {
         QuantizedPointMap seed_seen(1.0, std::min(face_count * 3, size_t(1) << 22));
         for (size_t f = 0; f < face_count; ++f) {
+            if (poll.tick())
+                return stopped_in_setup();
             if (faces[f * 3] < 0)
                 continue;
             for (int e = 0; e < 3; ++e) {

@@ -5995,7 +5995,11 @@ TextureDisplacementPrepareResult GLGizmoTextureDisplacement::prepare_mesh(
     //    stopping here, before anything is committed, leaves the user's model exactly as it was.
     if (params.remesh_edge_mm > 0.f) {
         indexed_triangle_set remeshed;
-        if (plan_remesh(mesh.its, params.remesh_edge_mm, params.remesh_sharp_deg, remeshed)) {
+        // The remesh asks the progress hook from this thread, so a cancel (or a quit) ends it within a moment
+        // instead of after minutes; the check that follows turns that into the cancelled result.
+        const std::function<bool()> remesh_stop = progress ? std::function<bool()>([&report]() { return !report(1); }) :
+                                                              std::function<bool()>{};
+        if (plan_remesh(mesh.its, params.remesh_edge_mm, params.remesh_sharp_deg, remeshed, remesh_stop)) {
             TriangleMesh                   new_mesh(std::move(remeshed));
             const AABBTreeIndirect::Tree3f old_tree =
                 AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(mesh.its.vertices, mesh.its.indices);
@@ -6227,7 +6231,8 @@ void GLGizmoTextureDisplacement::smooth_model()
 }
 
 bool GLGizmoTextureDisplacement::plan_remesh(const indexed_triangle_set &src, float target_edge_mm,
-                                             float sharp_angle_deg, indexed_triangle_set &out)
+                                             float sharp_angle_deg, indexed_triangle_set &out,
+                                             const std::function<bool()> &stop)
 {
     if (target_edge_mm <= 0.f)
         return false;
@@ -6259,7 +6264,7 @@ bool GLGizmoTextureDisplacement::plan_remesh(const indexed_triangle_set &src, fl
     // nowhere near enough. Fifteen costs proportionally more, but only on an explicit Remesh.
     indexed_triangle_set remeshed = MeshBoolean::cgal::remesh_isotropic(
         src, double(target_edge_mm), /* iterations */ 5, double(sharp_angle_deg),
-        /* relaxation steps */ 3);
+        /* relaxation steps */ 3, stop);
     // remesh_isotropic() signals failure by handing the input straight back, so compare against it
     // structurally. Vertex count alone is not enough: a remesh that only redistributes triangles at
     // roughly the current density legitimately lands on the same count, and treating that as failure

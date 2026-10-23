@@ -1,5 +1,6 @@
 #include "TextureBakeDisplace.hpp"
 #include "libslic3r/TextureBake/TextureBakeIndex.hpp"
+#include "libslic3r/TextureBake/TextureBakeCancel.hpp"
 #include "libslic3r/Point.hpp"
 
 #include <algorithm>
@@ -29,6 +30,12 @@ TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample
     out.pos.resize(count);
     out.nrm.resize(count);
 
+    // The hook is asked from this thread only (see TextureBakeCancel.hpp), with the fraction reached so
+    // far, so a progress bar never steps back. A stop returns the half-built output: the caller discards it.
+    double       fraction = 0.0;
+    const StopFn stop     = on_progress ? StopFn([&]() { return !on_progress(fraction); }) : StopFn{};
+    StopPoll     poll(&stop);
+
     // Everything below is keyed by this id, which is what makes one vector per position expressible.
     const bool need_id_positions = settings.boundary_falloff > 0.f;
     QuantizedPointMap dedup(WELD_GRID_GEOMETRY, std::min(count, size_t(1) << 22));
@@ -36,6 +43,8 @@ TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample
     std::vector<Vec3f> id_pos;
     int                next_id = 0;
     for (size_t i = 0; i < count; ++i) {
+        if (poll.tick())
+            return out;
         const int id = dedup.get_or_set(geometry.pos[i], next_id);
         if (dedup.inserted()) {
             ++next_id;
@@ -53,7 +62,10 @@ TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample
     std::vector<uint8_t> user_excluded_face(have_weights ? count / 3 : 0, 0);
     std::vector<uint8_t> excluded_pos(have_weights ? unique_count : 0, 0);
 
+    fraction = 0.1;
     for (size_t t = 0; t + 2 < count; t += 3) {
+        if (poll.tick())
+            return out;
         const Vec3d a = geometry.pos[t].cast<double>();
         const Vec3d face_n = (geometry.pos[t + 1].cast<double>() - a).cross(geometry.pos[t + 2].cast<double>() - a);
         const double face_area = face_n.norm(); // twice the triangle area, so weighting is natural
@@ -91,6 +103,8 @@ TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample
     // near 1 they do, near 0 they cancelled, meaning a knife edge with no usable surface direction.
     std::vector<double> reliability(unique_count, 0.0);
     for (size_t id = 0; id < unique_count; ++id) {
+        if (poll.tick())
+            return out;
         const double len = smooth_nrm[id].norm();
         reliability[id]  = (len > 0.0 && total_area[id] > 0.0) ? len / total_area[id] : 0.0;
         smooth_nrm[id]   = (len > 0.0) ? Vec3d(smooth_nrm[id] / len) : Vec3d(0.0, 0.0, 1.0);
@@ -106,6 +120,8 @@ TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample
             if (a != b) { ++degree[size_t(a)]; ++degree[size_t(b)]; }
         };
         for (size_t t = 0; t + 2 < count; t += 3) {
+            if (poll.tick())
+                return out;
             const int a = vertex_id[t], b = vertex_id[t + 1], c = vertex_id[t + 2];
             add_degree(a, b); add_degree(b, c); add_degree(c, a);
         }
@@ -121,12 +137,17 @@ TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample
             neighbors[csr_start[size_t(b)] + cursor[size_t(b)]++] = uint32_t(a);
         };
         for (size_t t = 0; t + 2 < count; t += 3) {
+            if (poll.tick())
+                return out;
             const int a = vertex_id[t], b = vertex_id[t + 1], c = vertex_id[t + 2];
             add_edge(a, b); add_edge(b, c); add_edge(c, a);
         }
 
         std::vector<Vec3d> cur = smooth_nrm, nxt(unique_count, Vec3d::Zero());
+        fraction = 0.2;
         for (int iter = 0; iter < settings.blend_normal_smoothing; ++iter) {
+            if (poll.now())
+                return out;
             // Jacobi, so every vertex reads the previous iteration and the rows are independent.
             tbb::parallel_for(tbb::blocked_range<size_t>(0, unique_count, 4096), [&](const tbb::blocked_range<size_t> &r) {
                 for (size_t id = r.begin(); id < r.end(); ++id) {
@@ -189,6 +210,8 @@ TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample
 
             const double radius = double(settings.boundary_falloff);
             for (size_t id = 0; id < unique_count; ++id) {
+                if (poll.tick())
+                    return out;
                 const Vec3f &p = id_pos[id];
                 const Vec3i32 c = cell_of(p);
                 double       best = std::numeric_limits<double>::max();
@@ -222,24 +245,28 @@ TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample
     // far the most expensive thing in this stage.
     std::vector<double> grey(unique_count, 0.0);
     std::vector<int>    representative(unique_count, -1);
-    for (size_t i = 0; i < count; ++i)
+    fraction = 0.4;
+    for (size_t i = 0; i < count; ++i) {
+        if (poll.tick())
+            return out;
         if (representative[size_t(vertex_id[i])] < 0)
             representative[size_t(vertex_id[i])] = int(i);
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, unique_count),
-                      [&](const tbb::blocked_range<size_t> &range) {
-                          for (size_t vid = range.begin(); vid < range.end(); ++vid) {
-                              const int rep = representative[vid];
-                              if (rep < 0)
-                                  continue;
-                              grey[vid] = double(sample(geometry.pos[size_t(rep)],
-                                                        smooth_nrm[vid].cast<float>(),
-                                                        blend_nrm[vid].cast<float>()));
-                          }
-                      });
+    }
+    if (!parallel_chunks(unique_count, CANCEL_CHUNK, poll, [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t vid = range.begin(); vid < range.end(); ++vid) {
+                const int rep = representative[vid];
+                if (rep < 0)
+                    continue;
+                grey[vid] = double(sample(geometry.pos[size_t(rep)], smooth_nrm[vid].cast<float>(),
+                                          blend_nrm[vid].cast<float>()));
+            }
+        }))
+        return out;
+    fraction = 0.9;
 
     // Pass 3: move every copy of a position by the identical vector. Each iteration writes only its
     // own output slot, so the loop is independent per corner.
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, count), [&](const tbb::blocked_range<size_t> &range) {
+    if (!parallel_chunks(count, CANCEL_CHUNK, poll, [&](const tbb::blocked_range<size_t> &range) {
     for (size_t i = range.begin(); i < range.end(); ++i) {
         const Vec3f &p   = geometry.pos[i];
         const size_t vid = size_t(vertex_id[i]);
@@ -273,17 +300,19 @@ TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample
 
         out.pos[i] = moved.cast<float>();
     }
-    });
+    }))
+        return out;
 
     // Per-face, not averaged across shared positions: averaging can flip an excluded face's normal
     // when its neighbours moved outward.
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, count / 3), [&](const tbb::blocked_range<size_t> &r) {
-        for (size_t f = r.begin(); f < r.end(); ++f) {
-            const size_t t = f * 3;
-            const Vec3f  n = (out.pos[t + 1] - out.pos[t]).cross(out.pos[t + 2] - out.pos[t]).normalized();
-            out.nrm[t] = out.nrm[t + 1] = out.nrm[t + 2] = n;
-        }
-    });
+    if (!parallel_chunks(count / 3, CANCEL_CHUNK * 4, poll, [&](const tbb::blocked_range<size_t> &r) {
+            for (size_t f = r.begin(); f < r.end(); ++f) {
+                const size_t t = f * 3;
+                const Vec3f  n = (out.pos[t + 1] - out.pos[t]).cross(out.pos[t + 2] - out.pos[t]).normalized();
+                out.nrm[t] = out.nrm[t + 1] = out.nrm[t + 2] = n;
+            }
+        }))
+        return out;
     out.exclude_weight = geometry.exclude_weight;
     return out;
 }

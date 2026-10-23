@@ -15,6 +15,7 @@
 #include <array>
 #include <vector>
 #include "libslic3r/Point.hpp"
+#include <functional>
 #include <memory>
 #include <CGAL/boost/graph/graph_traits_Surface_mesh.h>
 #include <CGAL/boost/graph/helpers.h>
@@ -288,9 +289,59 @@ indexed_triangle_set cgal_to_indexed_triangle_set(const CGALMesh &cgalmesh)
 // Isotropic remeshing
 // /////////////////////////////////////////////////////////////////////////////
 
+namespace {
+
+// Thrown by PollingEdgeMap to leave CGAL's remeshing at once. Not a std::exception, so the handler
+// below that treats CGAL's own exceptions as "the input cannot be remeshed" never takes it for one.
+struct RemeshStopped
+{};
+
+// An edge-constraint map that asks `stop` now and then. None of the remesher's stages (splitting,
+// collapsing, flipping, relaxing, projecting) reports progress or takes a callback, but every one asks
+// this map about edges all the way through, on the calling thread, so a stop can end it within a few
+// thousand edge lookups. What it holds behaves as the plain map does; only the throw is added. The mesh
+// being remeshed is left half-edited, which is why this is only used on the private copy.
+template<class Map, class Key> class PollingEdgeMap
+{
+public:
+    using key_type   = Key;
+    using value_type = bool;
+    using reference  = bool;
+    using category   = boost::read_write_property_map_tag;
+
+    PollingEdgeMap(Map map, const std::function<bool()> *stop) : m_map(std::move(map)), m_stop(stop) {}
+
+    friend bool get(const PollingEdgeMap &map, const Key &key)
+    {
+        map.poll();
+        return map.m_map[key];
+    }
+    friend void put(PollingEdgeMap &map, const Key &key, bool value)
+    {
+        map.poll();
+        map.m_map[key] = value;
+    }
+
+private:
+    void poll() const
+    {
+        if (m_stop == nullptr || !*m_stop || ++m_count < 4096)
+            return;
+        m_count = 0;
+        if ((*m_stop)())
+            throw RemeshStopped{};
+    }
+
+    mutable Map                        m_map;
+    const std::function<bool()>       *m_stop;
+    mutable uint32_t                   m_count = 0;
+};
+
+} // namespace
+
 indexed_triangle_set remesh_isotropic(const indexed_triangle_set &mesh, double target_edge_length,
                                       unsigned n_iterations, double sharp_angle_deg,
-                                      unsigned n_relaxation_steps)
+                                      unsigned n_relaxation_steps, const std::function<bool()> &stop)
 {
     if (mesh.indices.empty() || target_edge_length <= 0.0)
         return mesh;
@@ -315,7 +366,8 @@ indexed_triangle_set remesh_isotropic(const indexed_triangle_set &mesh, double t
         // requires each constrained edge to already be shorter than 4/3 * target, hence the split
         // first (passing the map so the halves inherit the constraint). This mirrors CGAL's own
         // isotropic_remeshing example.
-        auto ecm = cgal_mesh.add_property_map<edge_descriptor, bool>("e:is_constrained", false).first;
+        auto plain_ecm = cgal_mesh.add_property_map<edge_descriptor, bool>("e:is_constrained", false).first;
+        PollingEdgeMap<decltype(plain_ecm), edge_descriptor> ecm(plain_ecm, &stop);
         if (sharp_angle_deg > 0.0)
             CGALProc::detect_sharp_edges(cgal_mesh, sharp_angle_deg, ecm);
         for (edge_descriptor e : edges(cgal_mesh)) {
@@ -337,6 +389,8 @@ indexed_triangle_set remesh_isotropic(const indexed_triangle_set &mesh, double t
                                           .number_of_relaxation_steps(n_relaxation_steps)
                                           .edge_is_constrained_map(ecm)
                                           .protect_constraints(true));
+    } catch (const RemeshStopped &) {
+        return mesh; // stopped by the caller, who knows it asked: nothing to report
     } catch (const std::exception &) {
         return mesh; // CGAL throws on some non-manifold / degenerate inputs; leave the mesh untouched
     }

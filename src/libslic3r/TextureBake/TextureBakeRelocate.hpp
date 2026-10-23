@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "TextureBakeDisplace.hpp"
+#include "TextureBakeCancel.hpp"
 #include "TextureBakeIndex.hpp"
 
 namespace Slic3r {
@@ -67,7 +68,7 @@ struct RelocateResult
 // never moved, so an excluded region keeps its exact vertex positions.
 RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleFn &sample,
                                     const RelocateSettings &settings = {},
-                                    const std::vector<uint8_t> &locked = {});
+                                    const std::vector<uint8_t> &locked = {}, const StopFn &stop = {});
 
 } // namespace TextureBake
 } // namespace Slic3r

@@ -1,6 +1,7 @@
 #include "TextureBakeFlip.hpp"
 #include "libslic3r/TextureBake/TextureBakeIndex.hpp"
 #include "libslic3r/TextureBake/TextureBakeDisplace.hpp"
+#include "libslic3r/TextureBake/TextureBakeCancel.hpp"
 #include "libslic3r/Point.hpp"
 
 #include <algorithm>
@@ -21,7 +22,7 @@ namespace TextureBake {
 
 FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> &face_parent_id,
                                 const HeightSampleFn &sample, const FlipSettings &settings,
-                                const std::vector<uint8_t> &locked)
+                                const std::vector<uint8_t> &locked, const StopFn &stop)
 {
     FlipResult result;
     result.geometry       = geometry;
@@ -30,6 +31,8 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
     const size_t tri_ct   = count / 3;
     if (count == 0 || !sample || settings.passes <= 0)
         return result;
+    // A stop leaves `result` as the unflipped input; the caller that asked for it discards the stage.
+    StopPoll poll(&stop);
 
     // Weld, so a flip rewrites triangles in terms of shared vertices rather than positions.
     QuantizedPointMap  weld(WELD_GRID_GEOMETRY, std::min(count, size_t(1) << 22));
@@ -38,6 +41,8 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
     std::vector<float> weight; // exclude weight per unique vertex, the max over its copies
     const bool         has_weight = !geometry.exclude_weight.empty();
     for (size_t i = 0; i < count; ++i) {
+        if (poll.tick())
+            return result;
         vid[i] = weld.get_or_set(geometry.pos[i], int(pos.size()));
         if (weld.inserted()) {
             pos.push_back(geometry.pos[i]);
@@ -52,6 +57,8 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
     std::vector<std::array<int, 3>> tri(tri_ct);
     std::vector<uint8_t>            fixed(tri_ct, 0);
     for (size_t t = 0; t < tri_ct; ++t) {
+        if (poll.tick())
+            return result;
         tri[t] = { vid[t * 3], vid[t * 3 + 1], vid[t * 3 + 2] };
         if (!locked.empty() && t < locked.size() && locked[t])
             fixed[t] = 1;
@@ -65,6 +72,8 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
     const auto rebuild_normals = [&]() {
         std::fill(nrm.begin(), nrm.end(), Vec3f::Zero());
         for (size_t t = 0; t < tri_ct; ++t) {
+            if (poll.tick())
+                return;
             const Vec3f fn = (pos[size_t(tri[t][1])] - pos[size_t(tri[t][0])]).cross(pos[size_t(tri[t][2])] - pos[size_t(tri[t][0])]);
             face_n[t]      = fn;
             for (int k = 0; k < 3; ++k)
@@ -76,11 +85,14 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
         }
     };
     rebuild_normals();
+    if (poll.stopped())
+        return result;
     std::vector<float> h(nv, 0.f);
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, nv), [&](const tbb::blocked_range<size_t> &r) {
-        for (size_t v = r.begin(); v < r.end(); ++v)
-            h[v] = sample(pos[v], nrm[v], nrm[v]);
-    });
+    if (!parallel_chunks(nv, CANCEL_CHUNK, poll, [&](const tbb::blocked_range<size_t> &r) {
+            for (size_t v = r.begin(); v < r.end(); ++v)
+                h[v] = sample(pos[v], nrm[v], nrm[v]);
+        }))
+        return result;
     float h_lo = std::numeric_limits<float>::max(), h_hi = -h_lo;
     for (const float x : h) { h_lo = std::min(h_lo, x); h_hi = std::max(h_hi, x); }
     const float range = h_hi - h_lo;
@@ -103,19 +115,26 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
         struct Half { uint64_t key; uint32_t corner; };
         std::vector<Half> half;
         half.reserve(count);
-        for (size_t t = 0; t < tri_ct; ++t)
+        for (size_t t = 0; t < tri_ct; ++t) {
+            if (poll.tick())
+                return result;
             for (int k = 0; k < 3; ++k) {
                 const int from = tri[t][size_t(k)], to = tri[t][size_t((k + 1) % 3)];
                 if (from == to) continue;
                 const uint32_t lo = uint32_t(std::min(from, to)), hi = uint32_t(std::max(from, to));
                 half.push_back({ (uint64_t(lo) << 32) | hi, uint32_t(t * 3 + size_t(k)) });
             }
+        }
+        if (poll.now())
+            return result;
         tbb::parallel_sort(half.begin(), half.end(), [](const Half &x, const Half &y) {
             return x.key != y.key ? x.key < y.key : x.corner < y.corner;
         });
         std::vector<std::pair<uint32_t, uint32_t>> edges; // (corner in t1, corner in t2), t1 < t2
         edges.reserve(half.size() / 2);
         for (size_t i = 0; i < half.size();) {
+            if (poll.tick())
+                return result;
             size_t j = i + 1;
             while (j < half.size() && half[j].key == half[i].key) ++j;
             if (j - i == 2) {
@@ -129,7 +148,7 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
         }
         std::vector<Candidate> cands(edges.size());
         std::vector<uint8_t>   valid(edges.size(), 0);
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, edges.size()), [&](const tbb::blocked_range<size_t> &r) {
+        if (!parallel_chunks(edges.size(), CANCEL_CHUNK, poll, [&](const tbb::blocked_range<size_t> &r) {
             for (size_t i = r.begin(); i < r.end(); ++i) {
                 const uint32_t c1 = uint32_t(edges[i].first), c2 = uint32_t(edges[i].second);
                 const uint32_t t1 = c1 / 3, t2 = c2 / 3;
@@ -170,10 +189,14 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
                 cands[i] = { t1, t2, uint8_t(k1), uint8_t(k2), gain };
                 valid[i] = 1;
             }
-        });
+        }))
+            return result;
         std::vector<Candidate> chosen;
-        for (size_t i = 0; i < cands.size(); ++i)
+        for (size_t i = 0; i < cands.size(); ++i) {
+            if (poll.tick())
+                return result;
             if (valid[i]) chosen.push_back(cands[i]);
+        }
         std::sort(chosen.begin(), chosen.end(), [](const Candidate &x, const Candidate &y) {
             return x.gain != y.gain ? x.gain > y.gain : (x.t1 != y.t1 ? x.t1 < y.t1 : x.t2 < y.t2);
         });
@@ -181,6 +204,8 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
         std::vector<uint8_t> touched(tri_ct, 0);
         size_t               applied = 0;
         for (const Candidate &cd : chosen) {
+            if (poll.tick())
+                return result;
             if (touched[cd.t1] || touched[cd.t2]) continue;
             const int a = tri[cd.t1][cd.k1], c = tri[cd.t1][size_t((cd.k1 + 1) % 3)], b = tri[cd.t1][size_t((cd.k1 + 2) % 3)];
             const int d = tri[cd.t2][size_t((cd.k2 + 2) % 3)];
@@ -193,6 +218,8 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
         if (applied == 0)
             break;
         rebuild_normals(); // face normals feed the planarity test of the next pass
+        if (poll.stopped())
+            return result;
     }
 
     if (result.flipped == 0)
@@ -200,6 +227,8 @@ FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> 
 
     // Back to the soup: positions, weights and per-face normals from the (possibly rewritten) triangles.
     for (size_t t = 0; t < tri_ct; ++t) {
+        if (poll.tick())
+            return result;
         for (int k = 0; k < 3; ++k) {
             const size_t i = t * 3 + size_t(k);
             const int    v = tri[t][size_t(k)];

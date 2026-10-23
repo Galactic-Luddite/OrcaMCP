@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "TextureBakeCancel.hpp"
 #include "TextureBakeIndex.hpp"
 
 namespace Slic3r {
@@ -48,7 +49,7 @@ struct RepairOptions
 // the way takes its entry with it. Without this the caller would have no way to keep a per-face colour
 // across this pass, which changes the triangle count.
 TriSoup resolve_t_junctions(const TriSoup &geometry, const RepairOptions &opts = {},
-                            std::vector<int> *face_color = nullptr);
+                            std::vector<int> *face_color = nullptr, const StopFn &stop = {});
 
 } // namespace TextureBake
 } // namespace Slic3r

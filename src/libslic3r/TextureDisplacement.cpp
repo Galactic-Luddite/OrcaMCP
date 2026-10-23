@@ -43,6 +43,7 @@
 #include "PNGReadWrite.hpp"
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
+#include "TextureBake/TextureBakeCancel.hpp"
 #include "TextureBake/TextureBakeDisplace.hpp"
 #include "TriangleSelector.hpp"
 #include "TextureBake/TextureBakeDebug.hpp"
@@ -2727,7 +2728,15 @@ indexed_triangle_set build_texture_displacement_v2(const indexed_triangle_set   
                                                    const std::vector<Vec2f>                    *model_uv,
                                                    float                                        resting_drop)
 {
+    // The hook is asked from this thread only (a worker's thread-local cancel check would answer for
+    // another thread), here and between the chunks of the colour pass below. An aborted run returns {}.
+    const TextureBake::StopFn stop = progress ? TextureBake::StopFn([&progress]() { return !progress(0); }) :
+                                                TextureBake::StopFn{};
+    TextureBake::StopPoll     poll(&stop);
+
     HeightFieldSampler combined = make_combined_displacement_sampler(mesh, layers, facets_data, model_uv);
+    if (poll.now())
+        return {};
     if (!combined)
         return mesh; // nothing decodable to displace with
 
@@ -2745,6 +2754,8 @@ indexed_triangle_set build_texture_displacement_v2(const indexed_triangle_set   
         for (const TriangleSelector::TriangleSplittingData &data : facets_data) {
             if (data.triangles_to_split.empty())
                 continue;
+            if (poll.now())
+                return {};
             selector.deserialize(data, dirty);
             dirty = true;
             std::vector<int> piece_src;
@@ -2768,6 +2779,8 @@ indexed_triangle_set build_texture_displacement_v2(const indexed_triangle_set   
 
     // Distance to the nearest painted piece. Built once here; the tree is read-only afterwards, so
     // the parallel stages below share it freely.
+    if (poll.now())
+        return {};
     const AABBTreeIndirect::Tree3f painted_tree =
         AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(painted_pieces.vertices, painted_pieces.indices);
     // `foot`/`normal`, when asked for, are the closest point on the painted pieces and that piece's
@@ -2893,15 +2906,21 @@ indexed_triangle_set build_texture_displacement_v2(const indexed_triangle_set   
             std::swap(t[1], t[2]);
 
     // 0 means no simplification, i.e. Bake mode.
+    if (poll.now())
+        return {};
     const TextureBake::PipelineMode mode = settings.max_triangles > 0 ? TextureBake::PipelineMode::Export
                                                                       : TextureBake::PipelineMode::Bake;
     // Colour, when asked for. The sampler is built now so the simplification can see the colour
     // boundaries: a simplified triangle must not span two colours, or its one colour is wrong over
     // part of it (half a tile in the neighbour's colour, a tile edge that wanders).
     const bool              want_color = color != nullptr && color->out_triangle != nullptr && bool(color->quantize);
+    if (poll.now())
+        return {};
     const ColorFieldSampler color_sampler =
         want_color ? make_combined_color_sampler(mesh, layers, facets_data, color->quantize, color->quantize_pure, model_uv) :
                      ColorFieldSampler{};
+    if (poll.now())
+        return {};
     //
     // The *palette* index, not the printed filament. The decimation treats any edge whose two faces
     // differ as a crease (TextureBakeDecimate.cpp), so it must only ever see where the **perceived**
@@ -2947,6 +2966,10 @@ indexed_triangle_set build_texture_displacement_v2(const indexed_triangle_set   
     // centroid, and takes colour only where the paint is - measured against the painted pieces, which
     // an output centroid is never further from than the relief depth. Then the same despeckle and
     // filament resolution as the classic path.
+    // The colour pass is linear in the output, and a stop there ends the bake with nothing: {} as above.
+    const TextureBake::StopFn color_stop = progress ? TextureBake::StopFn([&progress]() { return !progress(99); }) :
+                                                      TextureBake::StopFn{};
+    TextureBake::StopPoll     color_poll(&color_stop);
     if (want_color) {
         std::vector<uint8_t>     out_color(out.indices.size(), 0);
         const ColorFieldSampler &sampler = color_sampler;
@@ -2958,7 +2981,7 @@ indexed_triangle_set build_texture_displacement_v2(const indexed_triangle_set   
             std::vector<int> palette(out.indices.size(), -1);
             const std::vector<int> &face_mask      = result.face_color;
             const bool              have_face_mask = face_mask.size() == out.indices.size();
-            tbb::parallel_for(tbb::blocked_range<size_t>(0, out.indices.size()), [&](const tbb::blocked_range<size_t> &r) {
+            if (!TextureBake::parallel_chunks(out.indices.size(), TextureBake::CANCEL_CHUNK, color_poll, [&](const tbb::blocked_range<size_t> &r) {
                 for (size_t i = r.begin(); i < r.end(); ++i) {
                     const stl_triangle_vertex_indices &t = out.indices[i];
                     const Vec3f &a = out.vertices[size_t(t[0])], &b = out.vertices[size_t(t[1])], &c = out.vertices[size_t(t[2])];
@@ -2988,7 +3011,8 @@ indexed_triangle_set build_texture_displacement_v2(const indexed_triangle_set   
                     }
                     palette[i] = sampler(foot, base_n);
                 }
-            });
+            }))
+                return {};
             // The despeckle filter is for a fine, uniform mesh, where one facet flipping colour is
             // noise. A simplified mesh is neither: its triangles are as large as the colour regions
             // themselves and already end on the colour boundaries, so a majority vote among three
@@ -2996,9 +3020,15 @@ indexed_triangle_set build_texture_displacement_v2(const indexed_triangle_set   
             // Not "did a collapse run": a flat-face harvest leaves the mesh as fine as it was, and
             // reading it as simplified switched the despeckle off for every bake that harvested.
             const bool simplified = result.simplified;
+            if (color_poll.now())
+                return {};
             despeckle_triangle_colors(out, palette, simplified ? 0 : color->despeckle_passes);
+            if (color_poll.now())
+                return {};
             merge_small_color_regions(out, palette, color->min_color_region_mm2);
             for (size_t i = 0; i < out.indices.size(); ++i) {
+                if (color_poll.tick())
+                    return {};
                 if (palette[i] < 0)
                     continue;
                 const stl_triangle_vertex_indices &t = out.indices[i];
@@ -3041,7 +3071,18 @@ static indexed_triangle_set build_texture_displacement_in_place(
     (void) stats;
     // Returns true to keep going. An aborted run returns {} (see the header): an empty mesh is the
     // one result no caller can mistake for a finished bake and commit onto the volume.
-    const auto report = [&progress](int percent) { return !progress || progress(percent); };
+    int         reported_percent = 0;
+    const auto report = [&progress, &reported_percent](int percent) {
+        reported_percent = percent;
+        return !progress || progress(percent);
+    };
+    // The classic path's loops ask the hook again from this thread (see TextureBakeCancel.hpp), with the
+    // percent last reported, and give up with {} like the checks between its stages. The calls into the
+    // triangle selector and the unwrap are single calls and are not interrupted.
+    const TextureBake::StopFn stop = progress ? TextureBake::StopFn([&progress, &reported_percent]() {
+                                         return !progress(reported_percent);
+                                     }) : TextureBake::StopFn{};
+    TextureBake::StopPoll     poll(&stop);
 
     // Stage capture for the debug view. A stage is timed from the end of the previous one, so the
     // capture itself - a copy plus an edge scan - sits outside every measurement it reports.
@@ -3110,6 +3151,8 @@ static indexed_triangle_set build_texture_displacement_in_place(
         if (any_paint) {
             std::vector<Vec3f> painted_normals(mesh.vertices.size(), Vec3f::Zero());
             for (size_t i = 0; i < mesh.indices.size(); ++i) {
+                if (poll.tick())
+                    return {};
                 if (!painted_face[i])
                     continue;
                 const stl_triangle_vertex_indices &t = mesh.indices[i];
@@ -3161,6 +3204,8 @@ static indexed_triangle_set build_texture_displacement_in_place(
     if (want_color)
         triangle_palette.assign(mesh.indices.size(), -1);
 
+    if (poll.now())
+        return {};
     const TriangleMesh selector_mesh(mesh);
     // One selector for the whole stack, re-deserialized per layer. Its constructor computes
     // its_face_neighbors() and its_face_normals() over the *entire* mesh, which on a subdivided model
@@ -3169,6 +3214,8 @@ static indexed_triangle_set build_texture_displacement_in_place(
     // arrays; the neighbour and face-normal tables are immutable members and survive it.
     TriangleSelector selector(selector_mesh);
     bool             selector_dirty = false;
+    if (poll.now())
+        return {};
 
     const int layer_count = std::max(int(ordered_layers.size()), 1);
     int       layer_index = 0;
@@ -3184,10 +3231,14 @@ static indexed_triangle_set build_texture_displacement_in_place(
         const DecodedHeightTexture height = decode_height_texture(*layer);
         if (height.empty())
             continue;
+        if (poll.now())
+            return {};
 
         // needs_reset only from the second layer on: the selector is already pristine on the first.
         selector.deserialize(data, selector_dirty);
         selector_dirty = true;
+        if (poll.now())
+            return {};
 
         const bool       color_this_layer = want_color && layer->color_enabled;
         // The model's own channel is per base-mesh *triangle*, so reading it needs to know which base
@@ -3209,6 +3260,8 @@ static indexed_triangle_set build_texture_displacement_in_place(
         // triangles are filtered), so `patch` and `rest` share one indexing - and, per the
         // compactify above, it is our own.
         const indexed_triangle_set rest = selector.get_facets_strict(EnforcerBlockerType::NONE);
+        if (poll.now())
+            return {};
 
         // A vertex used by even one *unpainted* triangle sits on this layer's boundary. It is still
         // needed either way - the edge-smoothing falloff measures distance from it - but whether it is
@@ -3216,12 +3269,15 @@ static indexed_triangle_set build_texture_displacement_in_place(
         // nothing can tear: the bake is topology-preserving, so a border vertex is one vertex shared
         // by both regions and moving it just tilts the unpainted triangles that use it.
         std::vector<bool> is_boundary(patch.vertices.size(), false);
-        for (const stl_triangle_vertex_indices &tri : rest.indices)
+        for (const stl_triangle_vertex_indices &tri : rest.indices) {
+            if (poll.tick())
+                return {};
             for (int i = 0; i < 3; ++i) {
                 is_boundary[tri[i]] = true;
                 if (tri[i] < int(mesh.vertices.size()))
                     on_patch_border[size_t(tri[i])] = true;
             }
+        }
         const bool pin_boundary = !options.displace_border;
 
         // Only the Cylindrical/Spherical methods need the centroid and axis; Triplanar blends each
@@ -3229,6 +3285,8 @@ static indexed_triangle_set build_texture_displacement_in_place(
         // normal the colour pass below uses for a degenerate triangle.
         Vec3f average_normal, patch_centroid, patch_axis;
         texture_displacement_patch_frame(patch, vertex_normals, patch_centroid, patch_axis, average_normal);
+        if (poll.now())
+            return {};
 
         // A real unwrap of the whole patch, computed once here rather than per vertex - it is a
         // per-chart solve over the whole patch, not a per-point formula. Cached, so repeating this
@@ -3252,6 +3310,8 @@ static indexed_triangle_set build_texture_displacement_in_place(
                                                         std::vector<Vec2f>{};
         const bool               corner_uv_ok     = !patch_corner_uvs.empty() &&
                                                     patch_corner_uvs.size() == patch.indices.size() * 3;
+        if (poll.now())
+            return {};
 
         // Colour, if this layer carries any. Area-weighted over each base triangle's *painted* part,
         // so a triangle the brush only clipped a corner off takes the colour of that corner rather
@@ -3264,6 +3324,8 @@ static indexed_triangle_set build_texture_displacement_in_place(
                 std::vector<Vec3f> sum(mesh.indices.size(), Vec3f::Zero());
                 std::vector<float> sum_area(mesh.indices.size(), 0.f);
                 for (size_t j = 0; j < patch.indices.size() && j < patch_source.size(); ++j) {
+                    if (poll.tick())
+                        return {};
                     const size_t S = size_t(patch_source[j]);
                     if (S >= mesh.indices.size())
                         continue;
@@ -3321,7 +3383,11 @@ static indexed_triangle_set build_texture_displacement_in_place(
         // flat. k = (1-a)/a turns the normalized boundary distance into that weight (see the header).
         std::vector<float> edge_weight;
         if (layer->edge_smoothing && layer->edge_smoothing_amount > 0.f) {
+            if (poll.now())
+                return {};
             const std::vector<float> bdist = patch_boundary_distance(patch, is_boundary);
+            if (poll.now())
+                return {};
             float max_d = 0.f;
             for (const float d : bdist)
                 if (std::isfinite(d))
@@ -3347,7 +3413,9 @@ static indexed_triangle_set build_texture_displacement_in_place(
         std::vector<int>  layer_vertices;
         std::vector<char> visited(patch.vertices.size(), 0);
         layer_vertices.reserve(patch.vertices.size());
-        for (const stl_triangle_vertex_indices &tri : patch.indices)
+        for (const stl_triangle_vertex_indices &tri : patch.indices) {
+            if (poll.tick())
+                return {};
             for (int i = 0; i < 3; ++i) {
                 const int vi = tri[i];
                 // Split vertices the brush introduced live past the end of our own vertex array;
@@ -3357,12 +3425,13 @@ static indexed_triangle_set build_texture_displacement_in_place(
                 visited[vi] = 1;
                 layer_vertices.push_back(vi);
             }
+        }
         if (layer_vertices.empty())
             continue;
 
         std::vector<float> sampled(layer_vertices.size(), 0.f);
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, layer_vertices.size()),
-                          [&](const tbb::blocked_range<size_t> &range) {
+        if (!TextureBake::parallel_chunks(layer_vertices.size(), TextureBake::CANCEL_CHUNK, poll,
+                                          [&](const tbb::blocked_range<size_t> &range) {
             for (size_t k = range.begin(); k < range.end(); ++k) {
                 const size_t vi      = size_t(layer_vertices[k]);
                 const Vec2f *lscm_uv = patch_uvs.empty() ? nullptr : &patch_uvs[vi];
@@ -3373,9 +3442,12 @@ static indexed_triangle_set build_texture_displacement_in_place(
                 // exactly the old outward-only behaviour.
                 sampled[k] = (h - layer->midlevel) * layer->depth_mm * sign;
             }
-        });
+        }))
+            return {};
 
         for (size_t k = 0; k < layer_vertices.size(); ++k) {
+            if (poll.tick())
+                return {};
             const size_t vi = size_t(layer_vertices[k]);
             // The first layer to reach a vertex has nothing underneath it to blend with, so it
             // always starts the total off additively - a Multiply/Divide against an implicit
@@ -3904,12 +3976,20 @@ HeightFieldSampler make_combined_displacement_sampler(const indexed_triangle_set
     };
 }
 
-indexed_triangle_set subdivide_mesh_uniform(const indexed_triangle_set &mesh, float max_edge_length_mm, int max_iterations)
+indexed_triangle_set subdivide_mesh_uniform(const indexed_triangle_set &mesh, float max_edge_length_mm, int max_iterations,
+                                            const DisplacementProgressFn &progress)
 {
+    int                       percent = 0;
+    const TextureBake::StopFn stop    = progress ? TextureBake::StopFn([&progress, &percent]() { return !progress(percent); }) :
+                                                   TextureBake::StopFn{};
+    TextureBake::StopPoll     poll(&stop);
     indexed_triangle_set current   = mesh;
     const float          max_edge_sq = max_edge_length_mm * max_edge_length_mm;
 
     for (int iter = 0; iter < max_iterations; ++iter) {
+        percent = 100 * iter / std::max(max_iterations, 1);
+        if (poll.now())
+            return {};
         // One vertex-index pair (always stored low-index-first) -> the midpoint vertex already
         // created for it in this pass, so the two triangles sharing that edge both get the exact
         // same new vertex instead of two separate, coincident-but-distinct ones (which would leave
@@ -3935,6 +4015,8 @@ indexed_triangle_set subdivide_mesh_uniform(const indexed_triangle_set &mesh, fl
         new_indices.reserve(current.indices.size());
         bool any_split = false;
         for (const stl_triangle_vertex_indices &tri : current.indices) {
+            if (poll.tick())
+                return {};
             const Vec3f &a = current.vertices[tri[0]];
             const Vec3f &b = current.vertices[tri[1]];
             const Vec3f &c = current.vertices[tri[2]];
@@ -4486,11 +4568,17 @@ indexed_triangle_set subdivide_mesh_adaptive(const indexed_triangle_set &mesh,
         // likewise per triangle, so there is nothing shared to guard. The heap is then built from the
         // finished array in index order, which is exactly the order the serial loop pushed in.
         std::vector<float> initial(tris.size(), 0.f);
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, tris.size()),
-                          [&](const tbb::blocked_range<size_t> &range) {
-                              for (size_t ti = range.begin(); ti < range.end(); ++ti)
-                                  initial[ti] = priority(int(ti));
-                          });
+        // In chunks, the hook asked between them from this thread: with a texture sampler behind
+        // priority() this is the longest stretch before the refinement loop's own polls begin.
+        const TextureBake::StopFn score_stop = progress ? TextureBake::StopFn([&progress]() { return !progress(0); }) :
+                                                          TextureBake::StopFn{};
+        TextureBake::StopPoll     score_poll(&score_stop);
+        if (!TextureBake::parallel_chunks(tris.size(), TextureBake::CANCEL_CHUNK, score_poll,
+                                          [&](const tbb::blocked_range<size_t> &range) {
+                                              for (size_t ti = range.begin(); ti < range.end(); ++ti)
+                                                  initial[ti] = priority(int(ti));
+                                          }))
+            return emit(); // cancelled: whole bisections only so far, and none yet - the input as it came
         for (int ti = 0; ti < int(tris.size()); ++ti)
             if (initial[size_t(ti)] > 1.f)
                 queue.emplace(heap_key(ti, initial[size_t(ti)]), ti);

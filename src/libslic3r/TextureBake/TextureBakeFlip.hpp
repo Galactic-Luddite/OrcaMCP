@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "TextureBakeCancel.hpp"
 #include "TextureBakeDisplace.hpp"
 #include "TextureBakeIndex.hpp"
 
@@ -50,9 +51,10 @@ struct FlipResult
 
 // `face_parent_id` may be empty; when given it is carried through unchanged (a flip never crosses a
 // parent boundary). `locked` flags triangles that must not change (per triangle, may be empty).
+// `stop`, when it answers true, ends the pass at once with the geometry unflipped: the caller discards it.
 FlipResult flip_edges_to_height(const TriSoup &geometry, const std::vector<int> &face_parent_id,
                                 const HeightSampleFn &sample, const FlipSettings &settings,
-                                const std::vector<uint8_t> &locked);
+                                const std::vector<uint8_t> &locked, const StopFn &stop = {});
 
 } // namespace TextureBake
 } // namespace Slic3r

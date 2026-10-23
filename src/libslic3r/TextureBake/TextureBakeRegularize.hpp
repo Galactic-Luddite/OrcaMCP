@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "TextureBakeCancel.hpp"
 #include "TextureBakeIndex.hpp"
 
 namespace Slic3r {
@@ -68,7 +69,8 @@ struct RegularizeResult
 };
 
 RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int> &face_parent_id,
-                                 double max_edge_length, const RegularizeOptions &opts = {});
+                                 double max_edge_length, const RegularizeOptions &opts = {},
+                                 const StopFn &stop = {});
 
 } // namespace TextureBake
 } // namespace Slic3r

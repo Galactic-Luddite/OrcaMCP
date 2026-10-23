@@ -54,9 +54,12 @@ struct SlotLists
 } // namespace
 
 RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int> &face_parent_id,
-                                 double max_edge_length, const RegularizeOptions &opts)
+                                 double max_edge_length, const RegularizeOptions &opts, const StopFn &stop)
 {
     RegularizeResult result;
+    // A stop returns what the pass has (not a valid mesh to use): the caller that asked for it
+    // discards the stage.
+    StopPoll poll(&stop);
     const size_t     tri_count = geometry.triangle_count();
     if (tri_count == 0 || max_edge_length <= 0.0) {
         result.geometry       = geometry;
@@ -77,6 +80,8 @@ RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int>
     std::vector<int>   corners(tri_count * 3);
     vert.reserve(tri_count);
     for (size_t i = 0; i < tri_count * 3; ++i) {
+        if (poll.tick())
+            return result;
         const Vec3f &p  = geometry.pos[i];
         const int    id = pos_map.get_or_set(p, int(vert.size()));
         if (pos_map.inserted())
@@ -99,8 +104,11 @@ RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int>
         const double len = n.norm();
         tri_nrm[t] = (len > 0.0) ? Vec3d(n / len) : Vec3d::Zero();
     };
-    for (size_t t = 0; t < tri_count; ++t)
+    for (size_t t = 0; t < tri_count; ++t) {
+        if (poll.tick())
+            return result;
         recompute_face_normal(t);
+    }
 
     // Never updated - the normal gate measures against these, so drift cannot compound across rounds.
     const std::vector<Vec3d> orig_nrm = tri_nrm;
@@ -123,8 +131,11 @@ RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int>
 
     SlotLists slots;
     slots.init(vert_count, tri_count * 3);
-    for (size_t s = 0; s < tri_count * 3; ++s)
+    for (size_t s = 0; s < tri_count * 3; ++s) {
+        if (poll.tick())
+            return result;
         slots.link(int(s), corners);
+    }
 
     // O(1) membership without clearing a set per collapse.
     std::vector<uint32_t> vert_stamp(vert_count, 0), tri_stamp(tri_count, 0);
@@ -140,10 +151,15 @@ RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int>
     std::vector<uint8_t> frozen_vert(vert_count, 0);
     {
         std::vector<double> tri_thin2(tri_count);
-        for (size_t t = 0; t < tri_count; ++t)
+        for (size_t t = 0; t < tri_count; ++t) {
+            if (poll.tick())
+                return result;
             tri_thin2[t] = tri_aspect_sq(t);
+        }
         QuantizedPointMap edge_seen(1.0, std::min(tri_count * 3, size_t(1) << 22));
-        for (size_t t = 0; t < tri_count; ++t)
+        for (size_t t = 0; t < tri_count; ++t) {
+            if (poll.tick())
+                return result;
             for (int e = 0; e < 3; ++e) {
                 const int u = corners[t * 3 + size_t(e)];
                 const int v = corners[t * 3 + size_t((e + 1) % 3)];
@@ -158,6 +174,7 @@ RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int>
                     frozen_vert[size_t(v)] = 1;
                 }
             }
+        }
     }
 
     // Exclusion freeze. The weight is constant across a face's corners, so the first one answers.
@@ -300,7 +317,7 @@ RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int>
     std::vector<double> round_aspect(tri_count);
     for (int round = 0; round < opts.maxrounds; ++round) {
         // Rebuilt each round so earlier collapses inform the priorities.
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, tri_count), [&](const tbb::blocked_range<size_t> &r) {
+        if (!parallel_chunks(tri_count, CANCEL_CHUNK * 4, poll, [&](const tbb::blocked_range<size_t> &r) {
             for (size_t t = r.begin(); t < r.end(); ++t) {
                 round_aspect[t] = -1.0;
                 if (tri_deleted[t])
@@ -312,20 +329,26 @@ RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int>
                 if (aspect2 >= aspect_thr2)
                     round_aspect[t] = aspect2;
             }
-        });
+        }))
+            return result;
         // Worst first; ties keep ascending triangle order so the pass is deterministic. Sorting the
         // (thinness, triangle) pairs themselves gives exactly the order the index sort with its
         // indirect comparator did, without that comparator's extra lookup on every comparison.
         std::vector<std::pair<double, int>> cand;
-        for (size_t t = 0; t < tri_count; ++t)
+        for (size_t t = 0; t < tri_count; ++t) {
+            if (poll.tick())
+                return result;
             if (round_aspect[t] >= 0.0)
                 cand.emplace_back(round_aspect[t], int(t));
+        }
         std::sort(cand.begin(), cand.end(), [](const std::pair<double, int> &x, const std::pair<double, int> &y) {
             return x.first != y.first ? x.first > y.first : x.second < y.second;
         });
 
         size_t round_collapses = 0;
         for (const std::pair<double, int> &entry : cand) {
+            if (poll.tick())
+                return result;
             const size_t t = size_t(entry.second);
             if (tri_deleted[t])
                 continue;
@@ -356,6 +379,8 @@ RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int>
     if (have_weights)
         out.exclude_weight.reserve(survivors * 3);
     for (size_t t = 0; t < tri_count; ++t) {
+        if (poll.tick())
+            return result;
         if (tri_deleted[t])
             continue;
         for (int k = 0; k < 3; ++k)
@@ -376,12 +401,16 @@ RegularizeResult regularize_mesh(const TriSoup &geometry, const std::vector<int>
         std::vector<int>   vid(out.pos.size());
         int                next = 0;
         for (size_t i = 0; i < out.pos.size(); ++i) {
+            if (poll.tick())
+                return result;
             vid[i] = weld.get_or_set(out.pos[i], next);
             if (weld.inserted())
                 ++next;
         }
         std::vector<Vec3d> vn(size_t(next), Vec3d::Zero());
         for (size_t t = 0; t * 3 < out.pos.size(); ++t) {
+            if (poll.tick())
+                return result;
             const Vec3d a = out.pos[t * 3].cast<double>();
             const Vec3d n = (out.pos[t * 3 + 1].cast<double>() - a).cross(out.pos[t * 3 + 2].cast<double>() - a);
             for (int k = 0; k < 3; ++k)

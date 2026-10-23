@@ -530,6 +530,7 @@ set(lisbslic3r_sources
     TextureBake/TextureBakeRelocate.hpp
     TextureBake/TextureBakeFlip.cpp
     TextureBake/TextureBakeFlip.hpp
+    TextureBake/TextureBakeCancel.hpp
     TextureBake/TextureBakeDebug.cpp
     TextureBake/TextureBakeDebug.hpp
     TextureBake/TextureBakeDisplace.cpp

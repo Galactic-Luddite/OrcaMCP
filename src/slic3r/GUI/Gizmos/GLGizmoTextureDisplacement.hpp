@@ -454,8 +454,10 @@ private:
     // False means the remesh failed or changed nothing (CGAL signals failure by handing the input back),
     // and `out` must not be used. `target_edge_mm` is a request rather than a promise: it is clamped
     // against the part's surface area first, because CGAL's cost grows with the square of 1/target.
+    // `stop`, when it answers true (asked from this thread all through the remesh), ends it at once and
+    // answers false like a failure; the caller that supplied it knows which it was.
     static bool plan_remesh(const indexed_triangle_set &src, float target_edge_mm, float sharp_angle_deg,
-                            indexed_triangle_set &out);
+                            indexed_triangle_set &out, const std::function<bool()> &stop = {});
 
     // Marks every facet of every model-part volume as painted for the currently active layer -
     // "whole model" as an alternative to brushing/clicking every triangle by hand.

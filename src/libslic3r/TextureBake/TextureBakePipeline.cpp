@@ -8,6 +8,7 @@
 #include <tbb/parallel_for.h>
 
 #include "libslic3r/TextureBake/TextureBakeIndex.hpp"
+#include "libslic3r/TextureBake/TextureBakeCancel.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TextureBake/TextureBakeDisplace.hpp"
 #include "libslic3r/TextureBake/TextureBakeSubdivide.hpp"
@@ -133,9 +134,27 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
                             const ColorSampleFn &color_sample)
 {
     PipelineResult result;
+    // The last fraction reported and the stage it belongs to: what the stages' own polls report again,
+    // so a bar neither jumps nor steps back while a stage that reports nothing of its own runs.
+    const char *poll_stage = "subdivide";
+    double      poll_fraction = 0.0;
     const auto     report = [&](const char *stage, double f) {
+        poll_stage    = stage;
+        poll_fraction = f;
         return !on_progress || on_progress(stage, f);
     };
+    // Asked by the stages from this thread only (see TextureBakeCancel.hpp). Sticky: once the hook has
+    // said stop, every later ask says it too, and `result.canceled` is set for the caller to read.
+    const StopFn stop = [&]() {
+        if (result.canceled)
+            return true;
+        if (on_progress && !on_progress(poll_stage, poll_fraction))
+            result.canceled = true;
+        return result.canceled;
+    };
+    StopPoll     poll(&stop);
+    // A stage that was stopped leaves unusable output; the run ends there with the cancelled result.
+    const auto stopped = [&]() { return on_progress && stop(); };
     // Per-stage wall time. The stages differ in cost by orders of magnitude depending on the model, so
     // without this it is guesswork which one to attack.
     auto       clock_now = [] { return std::chrono::steady_clock::now(); };
@@ -164,10 +183,10 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
     // 1. Refine to the target edge length.
     SubdivideResult sub = subdivide(
         input, settings.refine_length, face_excluded, /* fast */ false, settings.safety_cap,
-        [&](double f, size_t, double) { return report("subdivide", f); }, settings.paint_within);
+        [&](double f, size_t, double) { return report("subdivide", f); }, settings.paint_within, stop);
     result.safety_cap_hit = sub.safety_cap_hit;
     lap("subdivide", sub.geometry);
-    if (!report("subdivide", 1.0)) {
+    if (!report("subdivide", 1.0) || stopped()) {
         result.canceled = true;
         return result;
     }
@@ -177,10 +196,10 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
         RegularizeOptions ropts = settings.regularize_opts;
         ropts.preserve_excluded = settings.preserve_untextured;
         RegularizeResult reg = regularize_mesh(sub.geometry, sub.face_parent_id,
-                                               settings.refine_length, ropts);
+                                               settings.refine_length, ropts, stop);
         result.collapse_count = reg.collapse_count;
         lap("regularize", reg.geometry, std::to_string(reg.collapse_count) + " collapses");
-        if (!report("regularize", 1.0)) {
+        if (!report("regularize", 1.0) || stopped()) {
             result.canceled = true;
             return result;
         }
@@ -196,8 +215,12 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
             sub = subdivide(reg.geometry, settings.refine_length * settings.regularize_second_pass_mul,
                             excl, false, settings.safety_cap,
                             [&](double f, size_t, double) { return report("re-subdivide", f); },
-                            settings.paint_within);
+                            settings.paint_within, stop);
             result.safety_cap_hit = result.safety_cap_hit || sub.safety_cap_hit;
+            if (stopped()) {
+                result.canceled = true;
+                return result;
+            }
             // The second pass renumbers faces, so the parent map has to be composed through it.
             std::vector<int> composed(sub.face_parent_id.size());
             for (size_t i = 0; i < composed.size(); ++i) {
@@ -221,15 +244,18 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
         const size_t         nf     = sub.geometry.triangle_count();
         const bool           have_w = !sub.geometry.exclude_weight.empty();
         std::vector<uint8_t> unpainted(nf, 0);
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, nf), [&](const tbb::blocked_range<size_t> &r) {
-            for (size_t t = r.begin(); t < r.end(); ++t) {
-                if (have_w && sub.geometry.exclude_weight[t * 3] > 0.99f)
-                    continue; // excluded from the start, never asked
-                const Vec3f &a = sub.geometry.pos[t * 3], &b = sub.geometry.pos[t * 3 + 1], &c = sub.geometry.pos[t * 3 + 2];
-                if (!settings.painted((a + b + c) / 3.f))
-                    unpainted[t] = 1;
-            }
-        });
+        if (!parallel_chunks(nf, CANCEL_CHUNK, poll, [&](const tbb::blocked_range<size_t> &r) {
+                for (size_t t = r.begin(); t < r.end(); ++t) {
+                    if (have_w && sub.geometry.exclude_weight[t * 3] > 0.99f)
+                        continue; // excluded from the start, never asked
+                    const Vec3f &a = sub.geometry.pos[t * 3], &b = sub.geometry.pos[t * 3 + 1], &c = sub.geometry.pos[t * 3 + 2];
+                    if (!settings.painted((a + b + c) / 3.f))
+                        unpainted[t] = 1;
+                }
+            })) {
+            result.canceled = true;
+            return result;
+        }
         size_t switched = 0;
         for (size_t t = 0; t < nf; ++t)
             switched += unpainted[t];
@@ -256,7 +282,11 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
             for (size_t t = 0; t < locked.size(); ++t)
                 locked[t] = sub.geometry.exclude_weight[t * 3] > 0.99f ? 1 : 0;
         }
-        RelocateResult rel = relocate_to_contours(sub.geometry, sample, settings.relocate_opts, locked);
+        RelocateResult rel = relocate_to_contours(sub.geometry, sample, settings.relocate_opts, locked, stop);
+        if (stopped()) {
+            result.canceled = true;
+            return result;
+        }
         BOOST_LOG_TRIVIAL(info) << "TextureBake relocate: moved=" << rel.moved
                                 << " rejected=" << rel.rejected;
         sub.geometry = std::move(rel.geometry);
@@ -272,7 +302,11 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
             for (size_t t = 0; t < locked.size(); ++t)
                 locked[t] = sub.geometry.exclude_weight[t * 3] > 0.99f ? 1 : 0;
         }
-        FlipResult fl = flip_edges_to_height(sub.geometry, sub.face_parent_id, sample, settings.flip_opts, locked);
+        FlipResult fl = flip_edges_to_height(sub.geometry, sub.face_parent_id, sample, settings.flip_opts, locked, stop);
+        if (stopped()) {
+            result.canceled = true;
+            return result;
+        }
         sub.geometry       = std::move(fl.geometry);
         sub.face_parent_id = std::move(fl.face_parent_id);
         lap("align edges", sub.geometry, std::to_string(fl.flipped) + " flips");
@@ -285,7 +319,7 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
     TriSoup displaced = apply_displacement(sub.geometry, sample, settings.displace, bounds,
                                            [&](double f) { return report("displace", f); });
     lap("displace", displaced);
-    if (!report("displace", 1.0)) {
+    if (!report("displace", 1.0) || stopped()) {
         result.canceled = true;
         return result;
     }
@@ -301,7 +335,7 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
         const size_t nf = displaced.triangle_count();
         result.face_color.assign(nf, -1);
         const bool have_w = !displaced.exclude_weight.empty();
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, nf), [&](const tbb::blocked_range<size_t> &r) {
+        if (!parallel_chunks(nf, CANCEL_CHUNK, poll, [&](const tbb::blocked_range<size_t> &r) {
             for (size_t t = r.begin(); t < r.end(); ++t) {
                 // Unpainted faces take no colour at all, which is what stops the texture appearing on
                 // surfaces the paint never covered.
@@ -315,7 +349,10 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
                 // colour" - which must not be confused with "not painted".
                 result.face_color[t] = (sampled >= 0) ? sampled : FACE_NO_COLOUR;
             }
-        });
+        })) {
+            result.canceled = true;
+            return result;
+        }
     }
 
     // 4. Decimate - export only. A bake needs the face-parent map, which a collapse destroys.
@@ -370,7 +407,7 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
         }
         result.triangles_refined = displaced_before_decimate;
         result.triangles_budget  = target;
-        if (!report("decimate", 1.0)) {
+        if (!report("decimate", 1.0) || stopped()) {
             result.canceled = true;
             return result;
         }
@@ -390,8 +427,12 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
 
     // 6. Close the T-junctions decimation left behind. Only meaningful when it ran.
     if (mode == PipelineMode::Export && parent.empty()) {
-        displaced = resolve_t_junctions(displaced, {}, &result.face_color);
+        displaced = resolve_t_junctions(displaced, {}, &result.face_color, stop);
         lap("repair", displaced);
+        if (stopped()) {
+            result.canceled = true;
+            return result;
+        }
     }
 
     result.geometry       = std::move(displaced);

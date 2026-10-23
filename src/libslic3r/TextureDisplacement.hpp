@@ -1153,7 +1153,11 @@ HeightFieldSampler make_combined_displacement_sampler(const indexed_triangle_set
 // applying everywhere rather than just where texture detail is actually wanted - meant to be run
 // once, deliberately, before painting (see the gizmo's "Subdivide model" button), not automatically
 // during baking.
-indexed_triangle_set subdivide_mesh_uniform(const indexed_triangle_set &mesh, float max_edge_length_mm, int max_iterations = 6);
+// `progress`, when given, is asked from the calling thread every few thousand triangles (with a percent
+// of the steps done) and returns false to cancel: the result is then an empty mesh, which no finished
+// subdivision can be, so a caller tells the two apart by `progress` having said no.
+indexed_triangle_set subdivide_mesh_uniform(const indexed_triangle_set &mesh, float max_edge_length_mm, int max_iterations = 6,
+                                            const DisplacementProgressFn &progress = {});
 
 // Adaptive subdivision by Rivara longest-edge bisection, restricted to a region.
 //

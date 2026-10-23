@@ -591,7 +591,11 @@ PreparePlanned plan_prepare(PrepareRun& run, const std::function<bool()>& stop)
                 planned.timed_out = true;
                 return planned;
             }
-            part.result = Slic3r::subdivide_mesh_uniform(part.its, 0.f, *run.request.steps);
+            part.result = Slic3r::subdivide_mesh_uniform(part.its, 0.f, *run.request.steps, [&stop](int) { return !stop(); });
+            if (part.result.indices.empty() && !part.its.indices.empty()) { // only a cancel returns no triangles
+                planned.timed_out = true;
+                return planned;
+            }
         }
         return planned;
     }

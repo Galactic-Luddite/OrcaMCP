@@ -3,6 +3,7 @@
 
 #include <Eigen/Core>
 #include "libslic3r/Point.hpp"
+#include <functional>
 #include <memory>
 #include <exception>
 #include <optional>
@@ -94,9 +95,14 @@ std::optional<std::vector<Vec2f>> parameterize_lscm(const indexed_triangle_set &
 // relaxation is what actually evens out the triangle distribution - splitting and collapsing alone
 // only bring edge *lengths* near the target, leaving the vertices wherever they happened to land. CGAL
 // defaults it to 1, which on a few iterations is not enough to look uniform.
+// `stop`, when it answers true (asked from the calling thread every few thousand edge lookups, which is
+// all through the remeshing), ends the remeshing at once and returns the input unchanged, as a failure
+// does: the caller that asked for the stop knows which it was. Without it nothing is asked and the
+// result is the same.
 indexed_triangle_set remesh_isotropic(const indexed_triangle_set &mesh, double target_edge_length,
                                       unsigned n_iterations = 3, double sharp_angle_deg = 40.0,
-                                      unsigned n_relaxation_steps = 1);
+                                      unsigned n_relaxation_steps = 1,
+                                      const std::function<bool()> &stop = {});
 }
 
 namespace mcut {

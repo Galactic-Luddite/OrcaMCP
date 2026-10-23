@@ -58,7 +58,8 @@ struct DisplaceBounds
     Vec3f max = Vec3f::Zero();
 };
 
-// Returns false to cancel.
+// Returns false to cancel. Asked throughout the stage (every few thousand items of a serial loop, between
+// chunks of a parallel one), from the calling thread only; a cancel returns the half-built output.
 using DisplaceProgressFn = std::function<bool(double fraction)>;
 
 TriSoup apply_displacement(const TriSoup &geometry, const HeightSampleFn &sample,

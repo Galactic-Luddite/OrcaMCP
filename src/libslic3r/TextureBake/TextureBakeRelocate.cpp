@@ -1,4 +1,5 @@
 #include "TextureBakeRelocate.hpp"
+#include "TextureBakeCancel.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TextureBake/TextureBakeIndex.hpp"
 #include "libslic3r/TextureBake/TextureBakeDisplace.hpp"
@@ -30,7 +31,8 @@ void tangent_basis(const Vec3f &n, Vec3f &t1, Vec3f &t2)
 } // namespace
 
 RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleFn &sample,
-                                    const RelocateSettings &settings, const std::vector<uint8_t> &locked)
+                                    const RelocateSettings &settings, const std::vector<uint8_t> &locked,
+                                    const StopFn &stop)
 {
     RelocateResult result;
     result.geometry     = geometry;
@@ -38,12 +40,16 @@ RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleF
     const size_t tri_ct = count / 3;
     if (count == 0 || !sample || settings.iterations <= 0)
         return result;
+    // A stop returns the input unmoved (counts partial): the caller that asked for it discards the stage.
+    StopPoll poll(&stop);
 
     // Weld, so every copy of a position moves together and the mesh cannot come apart.
     QuantizedPointMap  weld(WELD_GRID_GEOMETRY, std::min(count, size_t(1) << 22));
     std::vector<int>   vid(count);
     std::vector<Vec3f> pos;
     for (size_t i = 0; i < count; ++i) {
+        if (poll.tick())
+            return result;
         vid[i] = weld.get_or_set(geometry.pos[i], int(pos.size()));
         if (weld.inserted())
             pos.push_back(geometry.pos[i]);
@@ -53,13 +59,19 @@ RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleF
     // Incident corners per position, CSR style, plus the mean incident edge length that sets the scale
     // for both the finite difference and the move limit.
     std::vector<uint32_t> start(nv + 1, 0);
-    for (size_t i = 0; i < count; ++i)
+    for (size_t i = 0; i < count; ++i) {
+        if (poll.tick())
+            return result;
         ++start[size_t(vid[i]) + 1];
+    }
     for (size_t v = 0; v < nv; ++v)
         start[v + 1] += start[v];
     std::vector<uint32_t> inc(count), cursor(nv, 0);
-    for (size_t i = 0; i < count; ++i)
+    for (size_t i = 0; i < count; ++i) {
+        if (poll.tick())
+            return result;
         inc[start[size_t(vid[i])] + cursor[size_t(vid[i])]++] = uint32_t(i);
+    }
 
     std::vector<uint8_t> frozen(nv, 0);
     if (!locked.empty())
@@ -75,6 +87,8 @@ RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleF
         std::fill(edge_len.begin(), edge_len.end(), 0.f);
         std::vector<uint32_t> deg(nv, 0);
         for (size_t t = 0; t < tri_ct; ++t) {
+            if (poll.tick())
+                return;
             const int a = vid[t * 3], b = vid[t * 3 + 1], c = vid[t * 3 + 2];
             const Vec3f fn = (pos[size_t(b)] - pos[size_t(a)]).cross(pos[size_t(c)] - pos[size_t(a)]);
             for (int k = 0; k < 3; ++k) {
@@ -91,6 +105,8 @@ RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleF
         }
     };
     rebuild_frames();
+    if (poll.stopped())
+        return result;
 
     // The level to snap onto, taken from the height actually present on this patch rather than assumed.
     // A texture that never reaches full black or white would otherwise be measured against a range it
@@ -98,10 +114,11 @@ RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleF
     double h_lo = std::numeric_limits<double>::max(), h_hi = -h_lo;
     {
         std::vector<float> h0(nv, 0.f);
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, nv), [&](const tbb::blocked_range<size_t> &r) {
-            for (size_t v = r.begin(); v < r.end(); ++v)
-                h0[v] = sample(pos[v], nrm[v], nrm[v]);
-        });
+        if (!parallel_chunks(nv, CANCEL_CHUNK, poll, [&](const tbb::blocked_range<size_t> &r) {
+                for (size_t v = r.begin(); v < r.end(); ++v)
+                    h0[v] = sample(pos[v], nrm[v], nrm[v]);
+            }))
+            return result;
         for (const float h : h0) {
             h_lo = std::min(h_lo, double(h));
             h_hi = std::max(h_hi, double(h));
@@ -120,7 +137,7 @@ RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleF
         std::vector<Vec3f> proposal(nv);
         std::vector<uint8_t> want(nv, 0);
 
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, nv), [&](const tbb::blocked_range<size_t> &r) {
+        if (!parallel_chunks(nv, CANCEL_CHUNK / 4, poll, [&](const tbb::blocked_range<size_t> &r) {
             for (size_t v = r.begin(); v < r.end(); ++v) {
                 if (frozen[v] || edge_len[v] <= 0.f)
                     continue;
@@ -157,12 +174,15 @@ RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleF
                 proposal[v] = pos[v] + d;
                 want[v]     = 1;
             }
-        });
+        }))
+            return result;
 
         // Apply one at a time: a move is only valid against the neighbourhood as it stands, and two
         // adjacent vertices moving together can invert a triangle neither would have on its own.
         size_t applied = 0;
         for (size_t v = 0; v < nv; ++v) {
+            if (poll.tick())
+                return result;
             if (!want[v])
                 continue;
             const Vec3f old = pos[v];
@@ -188,6 +208,8 @@ RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleF
         if (applied == 0)
             break;
         rebuild_frames();
+        if (poll.stopped())
+            return result;
     }
 
     for (size_t v = 0; v < nv; ++v)
@@ -195,9 +217,14 @@ RelocateResult relocate_to_contours(const TriSoup &geometry, const HeightSampleF
             ++result.moved;
 
     // Write the relocated positions back to every copy, and rebuild the per-face normals.
-    for (size_t i = 0; i < count; ++i)
+    for (size_t i = 0; i < count; ++i) {
+        if (poll.tick())
+            return result;
         result.geometry.pos[i] = pos[size_t(vid[i])];
+    }
     for (size_t t = 0; t < tri_ct; ++t) {
+        if (poll.tick())
+            return result;
         Vec3f       n   = (result.geometry.pos[t * 3 + 1] - result.geometry.pos[t * 3])
                         .cross(result.geometry.pos[t * 3 + 2] - result.geometry.pos[t * 3]);
         const float len = n.norm();

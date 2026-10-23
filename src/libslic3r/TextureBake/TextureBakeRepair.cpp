@@ -73,8 +73,11 @@ size_t count_area_slivers(const TriSoup &geometry)
 }
 
 TriSoup resolve_t_junctions(const TriSoup &geometry, const RepairOptions &opts,
-                            std::vector<int> *face_color)
+                            std::vector<int> *face_color, const StopFn &stop)
 {
+    // A stop returns the geometry as it came (`face_color` may be half rewritten): the caller that asked
+    // for it discards the stage.
+    StopPoll poll(&stop);
     const size_t n_tri  = geometry.triangle_count();
     const double on_tol2 = opts.on_seg_tol * opts.on_seg_tol;
     const double Q       = opts.weld_quant;
@@ -86,6 +89,8 @@ TriSoup resolve_t_junctions(const TriSoup &geometry, const RepairOptions &opts,
     std::vector<Vec3d> vert;
     std::vector<int>   vid(n_tri * 3);
     for (size_t i = 0; i < n_tri * 3; ++i) {
+        if (poll.tick())
+            return geometry;
         const Vec3f &p  = geometry.pos[i];
         const int    id = vmap.get_or_set(p, int(vert.size()));
         if (vmap.inserted())
@@ -106,6 +111,8 @@ TriSoup resolve_t_junctions(const TriSoup &geometry, const RepairOptions &opts,
     if (track_color)
         colors.reserve(n_tri);
     for (size_t t = 0; t < n_tri; ++t) {
+        if (poll.tick())
+            return geometry;
         const int a = vid[t * 3], b = vid[t * 3 + 1], c = vid[t * 3 + 2];
         if (a == b || b == c || a == c)
             continue;
@@ -120,9 +127,12 @@ TriSoup resolve_t_junctions(const TriSoup &geometry, const RepairOptions &opts,
 
     for (int iter = 0; iter < opts.max_iters; ++iter) {
         std::unordered_map<uint64_t, int> e_count;
-        for (const auto &f : faces)
+        for (const auto &f : faces) {
+            if (poll.tick())
+                return geometry;
             for (int e = 0; e < 3; ++e)
                 ++e_count[edge_key(f[size_t(e)], f[size_t((e + 1) % 3)])];
+        }
 
         std::unordered_set<int> bverts;
         for (const auto &[key, c] : e_count) {
@@ -138,6 +148,8 @@ TriSoup resolve_t_junctions(const TriSoup &geometry, const RepairOptions &opts,
         struct Split { int a, b; std::vector<int> mids; };
         std::unordered_map<size_t, Split> splits;
         for (size_t fi = 0; fi < faces.size(); ++fi) {
+            if (poll.tick())
+                return geometry;
             const auto &f = faces[fi];
             for (int e = 0; e < 3; ++e) {
                 const int a = f[size_t(e)], b = f[size_t((e + 1) % 3)];
@@ -150,6 +162,8 @@ TriSoup resolve_t_junctions(const TriSoup &geometry, const RepairOptions &opts,
                     continue;
                 std::vector<std::pair<double, int>> found;
                 for (const int c : bv) {
+                    if (poll.tick())
+                        return geometry;
                     if (c == a || c == b)
                         continue;
                     const Vec3d  cv = vert[size_t(c)] - A;
@@ -179,6 +193,8 @@ TriSoup resolve_t_junctions(const TriSoup &geometry, const RepairOptions &opts,
         if (track_color)
             next_colors.reserve(next.capacity());
         for (size_t fi = 0; fi < faces.size(); ++fi) {
+            if (poll.tick())
+                return geometry;
             const auto it = splits.find(fi);
             if (it == splits.end()) {
                 next.push_back(faces[fi]);
@@ -225,6 +241,8 @@ TriSoup resolve_t_junctions(const TriSoup &geometry, const RepairOptions &opts,
     out.pos.reserve(faces.size() * 3);
     out.nrm.reserve(faces.size() * 3);
     for (const auto &f : faces) {
+        if (poll.tick())
+            return geometry;
         const Vec3f a = vert[size_t(f[0])].cast<float>();
         const Vec3f b = vert[size_t(f[1])].cast<float>();
         const Vec3f c = vert[size_t(f[2])].cast<float>();

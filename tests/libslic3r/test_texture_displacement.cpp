@@ -3536,3 +3536,324 @@ TEST_CASE("an unpainted part of the source carries no paint onto the rebuilt mes
             CHECK(state[t] == uint8_t(EnforcerBlockerType::NONE));
     }
 }
+
+// ---- Cancelling a bake -----------------------------------------------------------------------------------
+//
+// The progress hook of build_texture_displacement() (and of the prepare stages) is how a cancel, a quit or
+// a tool's wait cap reaches a bake that runs on a thread of its own. It may only be asked from the thread
+// that called the bake, so every long stage polls it itself, between chunks of its parallel loops and every
+// few thousand items of its serial ones. Before this, "align edges", "displace", the start of "decimate" and
+// "repair" each ran for seconds without asking (a 0.12 mm bake ran 128 s past a 30 s wait cap).
+//
+// The bound the tests hold a stage to: it asks again within a second. On the -O0 build of 2026-10-24 the
+// longest stretch of the scene below was 0.4 s (it was 6.6 s at three times the triangles before); the
+// bound leaves a slower machine and a loaded CI runner room, and the scene is large enough that a stage
+// without polls, at its former speed, takes several times that.
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include "libslic3r/MeshBoolean.hpp"
+
+namespace {
+using cancel_clock = std::chrono::steady_clock;
+
+struct CancelScene
+{
+    indexed_triangle_set                  mesh;
+    std::vector<TextureDisplacementLayer> layers;
+    TextureDisplacementFacetsData         facets;
+};
+
+// A cube painted all over, with a checkerboard (or, for the colour bake, a two-colour one) on it.
+CancelScene make_cancel_scene(bool colour, int uniform_steps = 6)
+{
+    CancelScene scene;
+    scene.mesh = subdivide_mesh_uniform(its_make_cube(30., 30., 30.), 0.f, uniform_steps);
+    TextureDisplacementLayer layer;
+    layer.slot         = 0;
+    layer.tiling_scale = 5.f;
+    layer.depth_mm     = 0.5f;
+    if (colour) {
+        std::vector<uint8_t> rgb;
+        for (size_t y = 0; y < 16; ++y)
+            for (size_t x = 0; x < 16; ++x) {
+                const bool a = ((x / 2 + y / 2) % 2) != 0;
+                rgb.insert(rgb.end(), { uint8_t(a ? 255 : 0), uint8_t(a ? 0 : 255), uint8_t(128) });
+            }
+        const boost::filesystem::path tmp = boost::filesystem::temp_directory_path() /
+                                            boost::filesystem::unique_path("cancel_scene_%%%%%%%%.png");
+        REQUIRE(Slic3r::png::write_rgb_to_file(tmp.string(), 16, 16, rgb));
+        std::vector<unsigned char> bytes;
+        {
+            std::ifstream ifs(tmp.string(), std::ios::binary);
+            bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+        }
+        boost::system::error_code ec;
+        boost::filesystem::remove(tmp, ec);
+        layer.image_data    = std::make_shared<std::vector<unsigned char>>(std::move(bytes));
+        layer.color_enabled = true;
+    } else {
+        layer.image_data = make_checkerboard_png(16, 16);
+    }
+    scene.layers.push_back(layer);
+    TriangleMesh     tm(scene.mesh);
+    TriangleSelector selector(tm);
+    for (size_t f = 0; f < scene.mesh.indices.size(); ++f)
+        selector.set_facet(int(f), EnforcerBlockerType::ENFORCER);
+    scene.facets[0] = selector.serialize();
+    return scene;
+}
+
+// Every stage of the default pipeline switched on: the ones that are off by default are the ones that
+// were not tested.
+TextureDisplacementOptions every_stage_options(float refine_mm)
+{
+    TextureDisplacementOptions options;
+    options.pipeline_v2        = true;
+    options.v2_refine_mm       = refine_mm;
+    options.v2_max_triangles_k = 100; // a budget below the refined count: the decimation runs
+    options.v2_regularize      = true;
+    options.v2_relocate        = true;
+    options.v2_flip_edges      = true;
+    return options;
+}
+
+TextureColorRequest two_colour_request(std::vector<uint8_t> &triangle_color)
+{
+    TextureColorRequest request;
+    request.out_triangle     = &triangle_color;
+    request.despeckle_passes = 2;
+    request.quantize         = [](const Vec3f &rgb) { return rgb.x() > 0.5f ? 0 : 1; };
+    return request;
+}
+
+// Sets a flag a given time after it is made, and says when.
+class CancelAfter
+{
+public:
+    explicit CancelAfter(double seconds)
+        : m_thread([this, seconds]() {
+              std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+              m_flagged_at = cancel_clock::now();
+              m_flag.store(true);
+          })
+    {}
+    ~CancelAfter() { join(); }
+    void join()
+    {
+        if (m_thread.joinable())
+            m_thread.join();
+    }
+    bool requested() const { return m_flag.load(); }
+    // Valid once joined.
+    cancel_clock::time_point flagged_at() const { return m_flagged_at; }
+
+private:
+    std::atomic<bool>        m_flag{false};
+    cancel_clock::time_point m_flagged_at;
+    std::thread              m_thread;
+};
+
+// The longest time between two asks of the hook, the start and the return of the call counted as asks.
+struct PollGaps
+{
+    double longest = 0.0;
+    size_t polls   = 0;
+    // Where the longest stretch began: the percent of the ask before it (-1: the call's start) and, for
+    // a message when it fails, how far into the call.
+    int    after_percent = -1;
+    double began_at      = 0.0;
+};
+
+template<class Run>
+PollGaps measure_poll_gaps(Run &&run)
+{
+    PollGaps    gaps;
+    const auto  start = cancel_clock::now();
+    auto        last  = start;
+    int         last_percent = -1;
+    const auto  note = [&](int percent) {
+        const auto   now = cancel_clock::now();
+        const double gap = std::chrono::duration<double>(now - last).count();
+        if (gap > gaps.longest) {
+            gaps.longest       = gap;
+            gaps.after_percent = last_percent;
+            gaps.began_at      = std::chrono::duration<double>(last - start).count();
+        }
+        last         = now;
+        last_percent = percent;
+    };
+    run([&](int percent) {
+        note(percent);
+        ++gaps.polls;
+        return true;
+    });
+    note(-2); // -2: the call's return
+    return gaps;
+}
+
+constexpr double CANCEL_BOUND_SECONDS = 1.0;
+} // namespace
+
+TEST_CASE("TextureDisplacement: no stage of the default pipeline runs for long without asking the progress hook",
+          "[TextureDisplacement][cancel]")
+{
+    const CancelScene    scene = make_cancel_scene(true);
+    std::vector<uint8_t> triangle_color;
+    const TextureColorRequest request = two_colour_request(triangle_color);
+    const PollGaps gaps = measure_poll_gaps([&](const DisplacementProgressFn &progress) {
+        const indexed_triangle_set out = build_texture_displacement(scene.mesh, scene.layers, scene.facets,
+                                                                    every_stage_options(0.5f), progress, &request);
+        REQUIRE(out.indices.size() > 50000);
+    });
+    INFO("longest stretch without a poll: " << gaps.longest << " s in " << gaps.polls << " polls, after the ask at "
+         << gaps.after_percent << " % (" << gaps.began_at << " s in; -1 the start, -2 the return)");
+    CHECK(gaps.polls > 100);
+    CHECK(gaps.longest < CANCEL_BOUND_SECONDS);
+}
+
+TEST_CASE("TextureDisplacement: a cancel is seen within a second wherever it lands in a default-pipeline bake",
+          "[TextureDisplacement][cancel]")
+{
+    const CancelScene    scene = make_cancel_scene(true);
+    std::vector<uint8_t> triangle_color;
+    const TextureColorRequest request = two_colour_request(triangle_color);
+    size_t cancelled = 0;
+    // From the first stage to the last of this scene on the -O0 build (everything is over by about 4.5 s);
+    // a faster build finishes first for the later ones, which then have nothing to check.
+    for (const double delay : { 0.3, 1.0, 2.0, 3.2 }) {
+        CancelAfter cancel(delay);
+        const indexed_triangle_set out = build_texture_displacement(
+            scene.mesh, scene.layers, scene.facets, every_stage_options(0.5f),
+            [&cancel](int) { return !cancel.requested(); }, &request);
+        const auto returned = cancel_clock::now();
+        cancel.join();
+        if (!cancel.requested() || !out.indices.empty())
+            continue; // finished before the cancel came
+        ++cancelled;
+        const double latency = std::chrono::duration<double>(returned - cancel.flagged_at()).count();
+        INFO("cancel after " << delay << " s took " << latency << " s to take effect");
+        CHECK(latency < CANCEL_BOUND_SECONDS);
+    }
+    CHECK(cancelled >= 3);
+}
+
+TEST_CASE("TextureDisplacement: asking the progress hook does not change the default pipeline's result",
+          "[TextureDisplacement][cancel]")
+{
+    const CancelScene    scene = make_cancel_scene(true, 5);
+    std::vector<uint8_t> color_asked, color_unasked;
+    const TextureColorRequest asked_request   = two_colour_request(color_asked);
+    const TextureColorRequest unasked_request = two_colour_request(color_unasked);
+    const TextureDisplacementOptions options  = every_stage_options(0.8f);
+    const indexed_triangle_set asked   = build_texture_displacement(scene.mesh, scene.layers, scene.facets, options,
+                                                                    [](int) { return true; }, &asked_request);
+    const indexed_triangle_set unasked = build_texture_displacement(scene.mesh, scene.layers, scene.facets, options, {},
+                                                                    &unasked_request);
+    REQUIRE(unasked.indices.size() > 1000);
+    CHECK(asked.vertices == unasked.vertices);
+    CHECK(asked.indices == unasked.indices);
+    CHECK(color_asked == color_unasked);
+}
+
+TEST_CASE("TextureDisplacement: a cancelled default-pipeline bake returns nothing to commit", "[TextureDisplacement][cancel]")
+{
+    const CancelScene scene = make_cancel_scene(false, 5);
+    // Said no before the first stage, and after every number of asks.
+    for (const int allowed : { 0, 1, 5, 40, 400 }) {
+        int asks = 0;
+        const indexed_triangle_set out = build_texture_displacement(
+            scene.mesh, scene.layers, scene.facets, every_stage_options(0.5f), [&asks, allowed](int) { return ++asks <= allowed; });
+        INFO("hook said no from ask " << allowed + 1);
+        CHECK(out.indices.empty());
+    }
+}
+
+TEST_CASE("TextureDisplacement: no stage of the classic pipeline runs for long without asking the progress hook",
+          "[TextureDisplacement][cancel]")
+{
+    // 196 k triangles, 98 k vertices, every one displaced and coloured.
+    const CancelScene    scene = make_cancel_scene(true, 7);
+    std::vector<uint8_t> triangle_color;
+    const TextureColorRequest request = two_colour_request(triangle_color);
+    TextureDisplacementOptions options;
+    options.pipeline_v2       = false;
+    options.smooth_enabled    = true;
+    options.smooth_iterations = 6;
+    const PollGaps gaps = measure_poll_gaps([&](const DisplacementProgressFn &progress) {
+        const indexed_triangle_set out = build_texture_displacement(scene.mesh, scene.layers, scene.facets, options, progress, &request);
+        REQUIRE(out.indices.size() == scene.mesh.indices.size());
+    });
+    INFO("longest stretch without a poll: " << gaps.longest << " s in " << gaps.polls << " polls, after the ask at "
+         << gaps.after_percent << " % (" << gaps.began_at << " s in; -1 the start, -2 the return)");
+    CHECK(gaps.longest < CANCEL_BOUND_SECONDS);
+}
+
+TEST_CASE("TextureDisplacement: asking the progress hook does not change the classic pipeline's result",
+          "[TextureDisplacement][cancel]")
+{
+    const CancelScene    scene = make_cancel_scene(true, 5);
+    std::vector<uint8_t> color_asked, color_unasked;
+    const TextureColorRequest asked_request   = two_colour_request(color_asked);
+    const TextureColorRequest unasked_request = two_colour_request(color_unasked);
+    TextureDisplacementOptions options;
+    options.pipeline_v2    = false;
+    options.smooth_enabled = true;
+    const indexed_triangle_set asked   = build_texture_displacement(scene.mesh, scene.layers, scene.facets, options,
+                                                                    [](int) { return true; }, &asked_request);
+    const indexed_triangle_set unasked = build_texture_displacement(scene.mesh, scene.layers, scene.facets, options, {},
+                                                                    &unasked_request);
+    REQUIRE(unasked.indices.size() == scene.mesh.indices.size());
+    CHECK(asked.vertices == unasked.vertices);
+    CHECK(asked.indices == unasked.indices);
+    CHECK(color_asked == color_unasked);
+}
+
+TEST_CASE("TextureDisplacement: a uniform subdivision can be cancelled, and asking does not change it",
+          "[TextureDisplacement][cancel]")
+{
+    const indexed_triangle_set cube = its_make_cube(60., 60., 60.);
+    const indexed_triangle_set plain = subdivide_mesh_uniform(cube, 0.f, 7);
+    const indexed_triangle_set asked = subdivide_mesh_uniform(cube, 0.f, 7, [](int) { return true; });
+    REQUIRE(plain.indices.size() == 12 * 16384);
+    CHECK(asked.vertices == plain.vertices);
+    CHECK(asked.indices == plain.indices);
+
+    // Said no at once, and after the first step: nothing comes back.
+    CHECK(subdivide_mesh_uniform(cube, 0.f, 7, [](int) { return false; }).indices.empty());
+    int asks = 0;
+    CHECK(subdivide_mesh_uniform(cube, 0.f, 7, [&asks](int) { return ++asks <= 20; }).indices.empty());
+
+    // A late cancel is seen within the bound: a cube taken to 3 M triangles is mostly the last step.
+    CancelAfter cancel(0.15);
+    const auto  started = cancel_clock::now();
+    const indexed_triangle_set cut = subdivide_mesh_uniform(cube, 0.f, 8, [&cancel](int) { return !cancel.requested(); });
+    const auto returned = cancel_clock::now();
+    cancel.join();
+    if (cancel.requested() && cut.indices.empty())
+        CHECK(std::chrono::duration<double>(returned - cancel.flagged_at()).count() < CANCEL_BOUND_SECONDS);
+    (void) started;
+}
+
+TEST_CASE("TextureDisplacement: an isotropic remesh can be stopped within a second, and asking does not change it",
+          "[TextureDisplacement][cancel]")
+{
+    // The small case must come back the same with a hook that never says stop. 2 mm on a 10 mm cube.
+    const indexed_triangle_set small = subdivide_mesh_uniform(its_make_cube(10., 10., 10.), 4.f, 6);
+    const indexed_triangle_set plain = MeshBoolean::cgal::remesh_isotropic(small, 2.0, 3, 40.0, 2);
+    const indexed_triangle_set asked = MeshBoolean::cgal::remesh_isotropic(small, 2.0, 3, 40.0, 2, []() { return false; });
+    REQUIRE(plain.indices.size() > small.indices.size());
+    CHECK(asked.vertices == plain.vertices);
+    CHECK(asked.indices == plain.indices);
+
+    // 60 mm to 0.5 mm takes 48 s on the -O0 build: a stop 0.4 s in hands the input back at once.
+    const indexed_triangle_set big = subdivide_mesh_uniform(its_make_cube(60., 60., 60.), 6.f, 6);
+    CancelAfter cancel(0.4);
+    const indexed_triangle_set out = MeshBoolean::cgal::remesh_isotropic(big, 0.5, 5, 40.0, 3, [&cancel]() { return cancel.requested(); });
+    const auto returned = cancel_clock::now();
+    cancel.join();
+    REQUIRE(cancel.requested());
+    CHECK(out.indices == big.indices);
+    CHECK(std::chrono::duration<double>(returned - cancel.flagged_at()).count() < CANCEL_BOUND_SECONDS);
+}
+

@@ -77,9 +77,18 @@ struct PassResult
 PassResult subdivide_pass(VertStore &verts, const std::vector<int> &indices, double max_edge_length,
                           int safety_cap, const std::vector<uint8_t> &face_excluded,
                           QuantizedPointMap *pos_canon_map, const std::vector<int> &face_parent_id,
-                          const SubdivideWithinFn &within)
+                          const SubdivideWithinFn &within, StopPoll &poll)
 {
     PassResult   out;
+    // A stop gives the pass back unchanged (the midpoints it had added stay in `verts`, unreferenced),
+    // so what the caller holds is still the crack-free mesh it started the pass with.
+    const auto unchanged = [&]() {
+        PassResult same;
+        same.indices        = indices;
+        same.face_excluded  = face_excluded;
+        same.face_parent_id = face_parent_id;
+        return same;
+    };
     const double max_sq     = max_edge_length * max_edge_length;
     const size_t tri_count  = indices.size() / 3;
     const bool   have_canon = !verts.canon.empty();
@@ -124,12 +133,13 @@ PassResult subdivide_pass(VertStore &verts, const std::vector<int> &indices, dou
     // outward. An earlier bake's relief meets the paint along edges already at the target length, so
     // it is never reached and stays as it was.
     std::vector<uint8_t> want(tri_count, 0);
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, tri_count), [&](const tbb::blocked_range<size_t> &range) {
-        for (size_t t = range.begin(); t < range.end(); ++t) {
-            const int a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
-            want[t] = uint8_t(too_long(a, b)) | uint8_t(too_long(b, c) << 1) | uint8_t(too_long(c, a) << 2);
-        }
-    });
+    if (!parallel_chunks(tri_count, CANCEL_CHUNK * 4, poll, [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t t = range.begin(); t < range.end(); ++t) {
+                const int a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
+                want[t] = uint8_t(too_long(a, b)) | uint8_t(too_long(b, c) << 1) | uint8_t(too_long(c, a) << 2);
+            }
+        }))
+        return unchanged();
     const auto mark_wanted = [&](size_t t) {
         const int a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
         if (want[t] & 1) mark_edge(a, b);
@@ -137,14 +147,19 @@ PassResult subdivide_pass(VertStore &verts, const std::vector<int> &indices, dou
         if (want[t] & 4) mark_edge(c, a);
     };
     std::vector<size_t> unreached;
-    for (size_t t = 0; t < tri_count; ++t)
+    for (size_t t = 0; t < tri_count; ++t) {
+        if (poll.tick())
+            return unchanged();
         if (face_excluded.empty() || !face_excluded[t])
             mark_wanted(t);
         else if (within && want[t] != 0)
             unreached.push_back(t);
+    }
     // Marks only accumulate, so the order the reached triangles are taken in does not matter.
     for (size_t n = 0; n != unreached.size();) {
         n = unreached.size();
+        if (poll.now())
+            return unchanged();
         unreached.erase(std::remove_if(unreached.begin(), unreached.end(), [&](size_t t) {
             const int  a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
             const bool reached = is_marked(a, b) || is_marked(b, c) || is_marked(c, a);
@@ -164,6 +179,8 @@ PassResult subdivide_pass(VertStore &verts, const std::vector<int> &indices, dou
     // triangle's three marks (bit 0 = ab, 1 = bc, 2 = ca), so the serial rebuild below reads a byte
     // instead of probing the hash map three more times per triangle.
     std::vector<uint8_t> tri_marks(tri_count);
+    if (poll.now())
+        return unchanged();
     const size_t         predicted = tbb::parallel_reduce(
         tbb::blocked_range<size_t>(0, tri_count), size_t(0),
         [&](const tbb::blocked_range<size_t> &range, size_t acc) {
@@ -205,6 +222,8 @@ PassResult subdivide_pass(VertStore &verts, const std::vector<int> &indices, dou
     };
 
     for (size_t t = 0; t < tri_count; ++t) {
+        if (poll.tick())
+            return unchanged();
         const int     a    = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
         const uint8_t excl = face_excluded.empty() ? uint8_t(0) : face_excluded[t];
         const int     pid  = face_parent_id.empty() ? 0 : face_parent_id[t];
@@ -425,8 +444,10 @@ TriSoup to_non_indexed(const VertStore &verts, const std::vector<int> &indices,
 
 SubdivideResult subdivide(const TriSoup &geometry, double max_edge_length,
                           const std::vector<uint8_t> &face_excluded, bool fast, int safety_cap,
-                          const SubdivideProgressFn &on_progress, const SubdivideWithinFn &within)
+                          const SubdivideProgressFn &on_progress, const SubdivideWithinFn &within,
+                          const StopFn &stop)
 {
+    StopPoll poll(&stop);
     SubdivideResult result;
     if (geometry.empty() || max_edge_length <= 0.0) {
         result.geometry = geometry;
@@ -450,7 +471,9 @@ SubdivideResult subdivide(const TriSoup &geometry, double max_edge_length,
         }
 
         PassResult pass = subdivide_pass(indexed.verts, current_indices, max_edge_length, safety_cap,
-                                         current_excluded, canon_map, current_parent, within);
+                                         current_excluded, canon_map, current_parent, within, poll);
+        if (poll.stopped())
+            break; // the pass was given back unchanged: what is held is the last whole pass
         current_indices = std::move(pass.indices);
         if (!pass.face_excluded.empty())
             current_excluded = std::move(pass.face_excluded);
