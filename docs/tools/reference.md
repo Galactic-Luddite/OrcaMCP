@@ -3753,7 +3753,8 @@ exporter numbered 1 to 3.
 | `object_id` | integer | Yes | Object index (0-based) |
 | `mapping` | object | Yes | Old filament → new filament, e.g. `{"1": 2, "2": 3, "3": 4}` |
 | `volume_id` | integer | No | Part index (0-based); omit or `-1` for every model part |
-| `mode` | string | No | `color` only (the default). For support, seam or fuzzy-skin states use `paint_object`'s `selection: state` |
+| `mode` | string | No | `color` (the default) or `texture`. For support, seam or fuzzy-skin states use `paint_object`'s `selection: state` |
+| `texture_layer` | integer | with `mode: texture` | The slot (0-7) of the texture layer whose mask is renumbered; the layer must exist. Texture states are `0` unpainted and `1` painted, so `{"1": 0}` unpaints the layer. Reordering layers is `set_texture_displacement`, action `move`. An open paint panel is closed first (`closed_toolbar_tool`), only when the mask changes |
 
 - Filaments the mapping does not list keep their facets; two mapped to one merge.
 - `0` means unpainted: as a key it paints the bare facets, as a value it unpaints.
@@ -3799,7 +3800,8 @@ Read back what is painted, plus the object's brim ears.
 | `object_id` | integer | Yes | Object index (0-based) |
 | `volume_id` | integer | No | Part index (0-based); omit or `-1` for every part |
 | `instance_id` | integer | No | Whose transform reports plate coordinates for paint (default 0). Brim ears always report through instance 0 regardless — see below |
-| `mode` | string | No | Report one mode; omit for all four |
+| `mode` | string | No | Report one mode (`color`, `support`, `seam`, `fuzzy_skin`, `texture`); omit for the four paint modes and the texture layers |
+| `texture_layer` | integer | No | With `mode: texture`: one layer slot (0-7); omit for every layer of the object's stack |
 
 **Response includes:** the object's plate-frame `bounding_box` and `original_facets_total`,
 then `volumes` — one entry per volume, in the shape all three painting tools that report
@@ -3813,6 +3815,8 @@ face. Brim ears are reported through instance 0 regardless of the requested `ins
 `Brim.cpp` resolves stored points through instance 0 only, so any other frame would silently
 misplace the ear — and the response says so explicitly with `brim_ears_instance_id: 0`.
 
+Texture displacement masks are reported per volume under `texture`: `{layers: [{layer, painted_facets, coverage_percent, stale}]}` (`stale` only when true: the mask points at facets the mesh no longer has). With `mode: texture` that is all `modes` leaves empty; without `mode`, `texture` lists the layers of the object's stack beside the four modes. The object's `get_texture_displacement` reports the same paint with the layers' settings.
+
 ---
 
 ### clear_object_paint
@@ -3823,7 +3827,8 @@ Reset an annotation, the equivalent of the gizmo's "Remove all".
 |-----------|------|----------|-------------|
 | `object_id` | integer | Yes | Object index (0-based) |
 | `volume_id` | integer | No | Part index (0-based); omit or `-1` for every part |
-| `mode` | string | No | Which annotation; omit to clear all four |
+| `mode` | string | No | Which annotation; omit to clear the four paint modes (texture masks are not print paint and stay) |
+| `texture_layer` | integer | No | With `mode: texture`: clear this slot's mask (0-7); omit to clear all eight. The layers stay |
 
 There is no `instance_id`: paint lives on the volume and every instance shares it, so
 clearing itself is instance-independent. The response's `bounding_box` still needs *some*
@@ -3845,7 +3850,7 @@ object keyed by mode name, for the mode(s) this call cleared, each value the sam
 read *after* the clear, so it shows the result rather than requiring a second
 `get_object_paint` call to confirm it); `cleared` (one entry per mode: `mode`,
 `volumes_cleared`, `cleared_volume_ids` — a subset reference back into `volumes` by id, not
-a second listing of the volumes themselves); `annotation_changed`; `info_messages` (only
+a second listing of the volumes themselves; a texture entry also has `texture_layer`); `texture` per volume after a texture clear, as `get_object_paint` reports it; `annotation_changed`; `closed_toolbar_tool` (a texture clear closes an open paint panel first, only when a mask changes); `info_messages` (only
 when nothing was cleared); `active_warnings`.
 
 ---
@@ -3936,7 +3941,7 @@ Give exactly one of `point`, `ray`, or `pixel` (+ `camera`).
 **Response includes:** `volume_id`, `volume_name`, `facet`, `point` (plate mm, on the
 surface), `normal` (unit vector, plate frame), `distance_mm` (from the query point or ray
 origin), `query` (which of `point`/`ray`/`pixel` was used), `coordinate_frame` (`"plate"`),
-`instance_id`; with `include_component`: `component` (the shell id) and `component_count`.
+`instance_id`; `texture_layers` (the slots of the texture displacement layers whose mask paints the facet, wholly or in part; empty when none); with `include_component`: `component` (the shell id) and `component_count`.
 
 The loop this closes: `render_plate_view` → read the image → `pick_facet {pixel, camera}` →
 `paint_object {selection: "connected", seed: {point}}`.

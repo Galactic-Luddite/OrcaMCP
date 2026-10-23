@@ -989,6 +989,42 @@ std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_report
     return out;
 }
 
+MaskInput mask_input_of(const ModelVolume& v, int volume_id)
+{
+    MaskInput input;
+    input.volume_id = volume_id;
+    input.name      = v.name;
+    input.mesh      = v.mesh_ptr();
+    for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
+        input.masks[size_t(slot)] = v.texture_displacement_facet(slot).get_data();
+    return input;
+}
+
+std::vector<int> layer_slots_of(const ModelVolume* owner)
+{
+    std::vector<int> slots;
+    if (owner != nullptr)
+        for (const TextureDisplacementLayer& layer : owner->texture_displacement_layers)
+            slots.push_back(layer.slot);
+    std::sort(slots.begin(), slots.end());
+    return slots;
+}
+
+nlohmann::json texture_paint_layers_json(const std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>& row, const std::vector<int>& slots)
+{
+    nlohmann::json out = nlohmann::json::array();
+    for (int slot : slots) {
+        if (slot < 0 || size_t(slot) >= row.size())
+            continue;
+        const MaskReport& rep   = row[size_t(slot)];
+        nlohmann::json    entry = {{"layer", slot}, {"painted_facets", rep.painted_facets}, {"coverage_percent", rep.area_ratio * 100.0}};
+        if (rep.stale)
+            entry["stale"] = true;
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
 bool needs_bake(const std::vector<TextureDisplacementLayer>& stack, const std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>>& reports)
 {
     for (const TextureDisplacementLayer& layer : stack) {

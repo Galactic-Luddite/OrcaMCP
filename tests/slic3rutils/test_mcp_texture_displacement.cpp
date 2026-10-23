@@ -686,6 +686,38 @@ TEST_CASE("mask reports count what each layer paints, and a stale mask apart", "
     }
 }
 
+TEST_CASE("a part's texture paint is told per layer slot, a stale mask apart", "[McpTexture][orcamcp]")
+{
+    Model        model;
+    ModelObject* object = cube_object(model);
+    ModelVolume* part   = object->volumes.front();
+    paint_facets(*part, 2, 4);
+    part->texture_displacement_layers = {layer_in(5), layer_in(2)};
+
+    MaskInput input = mask_input_of(*part, 3);
+    CHECK(input.volume_id == 3);
+    CHECK(input.name == part->name);
+    CHECK(input.masks[2] == part->texture_displacement_facet(2).get_data());
+    PaintData stale;
+    stale.triangles_to_split.emplace_back(40, 0);
+    input.masks[5] = stale;
+
+    CHECK(layer_slots_of(part) == std::vector<int>{2, 5});
+    CHECK(layer_slots_of(nullptr).empty());
+
+    const auto     reports = mask_reports({input});
+    nlohmann::json layers  = texture_paint_layers_json(reports[0], layer_slots_of(part));
+    REQUIRE(layers.size() == 2);
+    CHECK(layers[0]["layer"] == 2);
+    CHECK(layers[0]["painted_facets"] == 4);
+    CHECK_THAT(layers[0]["coverage_percent"].get<double>(), WithinAbs(100. / 3., 1e-6));
+    CHECK_FALSE(layers[0].contains("stale"));
+    CHECK(layers[1]["layer"] == 5);
+    CHECK(layers[1]["painted_facets"] == 0);
+    CHECK(layers[1]["stale"] == true);
+    CHECK(texture_paint_layers_json(reports[0], {9, -1}).empty());
+}
+
 TEST_CASE("what a mesh edit dropped is told from the state before", "[McpTexture][orcamcp]")
 {
     Model        model;

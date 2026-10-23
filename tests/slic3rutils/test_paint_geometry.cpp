@@ -479,6 +479,8 @@ TEST_CASE("parse_paint_mode covers the four FacetsAnnotation members", "[orcamcp
     CHECK(mode == PaintMode::Seam);
     REQUIRE(parse_paint_mode("fuzzy_skin", mode));
     CHECK(mode == PaintMode::FuzzySkin);
+    REQUIRE(parse_paint_mode("texture", mode));
+    CHECK(mode == PaintMode::Texture);
 
     CHECK(std::string(paint_mode_name(PaintMode::FuzzySkin)) == "fuzzy_skin");
 
@@ -491,7 +493,7 @@ TEST_CASE("parse_paint_mode covers the four FacetsAnnotation members", "[orcamcp
 TEST_CASE("every PaintMode round-trips through paint_mode_name and parse_paint_mode",
           "[orcamcp][paint]")
 {
-    for (PaintMode mode : {PaintMode::Color, PaintMode::Support, PaintMode::Seam, PaintMode::FuzzySkin}) {
+    for (PaintMode mode : {PaintMode::Color, PaintMode::Support, PaintMode::Seam, PaintMode::FuzzySkin, PaintMode::Texture}) {
         PaintMode parsed = PaintMode::Color;
         REQUIRE(parse_paint_mode(paint_mode_name(mode), parsed));
         CHECK(parsed == mode);
@@ -509,6 +511,10 @@ TEST_CASE("parse_paint_mode matches parse_paint_axis's case-insensitivity", "[or
     CHECK(mode == PaintMode::FuzzySkin);
     REQUIRE(parse_paint_mode("SeAm", mode));
     CHECK(mode == PaintMode::Seam);
+    REQUIRE(parse_paint_mode("TEXTURE", mode));
+    CHECK(mode == PaintMode::Texture);
+    REQUIRE(parse_paint_mode("Texture", mode));
+    CHECK(mode == PaintMode::Texture);
 }
 
 TEST_CASE("annotation_for_mode selects the member the GUI gizmo writes", "[orcamcp][paint]")

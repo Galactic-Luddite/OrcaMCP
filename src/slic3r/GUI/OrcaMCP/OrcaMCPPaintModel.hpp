@@ -51,7 +51,7 @@ struct PaintChannel
     }
 };
 
-// "color" | "support" | "seam" | "fuzzy_skin", any case (texture is not parsed here: it needs a layer, so its
+// "color" | "support" | "seam" | "fuzzy_skin" | "texture", any case (texture needs a layer, so its
 // callers read texture_layer too). Returns false and leaves `out` alone
 // otherwise. Case-insensitive to match parse_paint_axis: both parsers are reached from the same
 // MCP tool's parameters, and having them disagree about case costs a caller a wasted round trip.

@@ -30,6 +30,7 @@ bool parse_paint_mode(const std::string& name, PaintMode& out)
     if (lower == "support")    { out = PaintMode::Support;   return true; }
     if (lower == "seam")       { out = PaintMode::Seam;      return true; }
     if (lower == "fuzzy_skin") { out = PaintMode::FuzzySkin; return true; }
+    if (lower == "texture")    { out = PaintMode::Texture;   return true; }
     return false;
 }
 

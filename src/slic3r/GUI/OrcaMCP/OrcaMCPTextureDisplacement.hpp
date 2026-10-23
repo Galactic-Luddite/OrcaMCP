@@ -228,6 +228,12 @@ struct MaskReport
 };
 // Any thread, state 1 only: one report per slot for each part.
 std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_reports(const std::vector<MaskInput>&);
+// One part's eight masks and mesh, copied (volume_id: its position among the object's volumes).
+MaskInput mask_input_of(const ModelVolume&, int volume_id);
+// The slots of an owner's layers, ascending; none for no owner.
+std::vector<int> layer_slots_of(const ModelVolume* owner);
+// [{layer, painted_facets, coverage_percent, stale?}] for `slots` from one part's reports; stale only when true.
+nlohmann::json texture_paint_layers_json(const std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>& row, const std::vector<int>& slots);
 // Some layer of the stack is painted, readably, on some part.
 bool needs_bake(const std::vector<TextureDisplacementLayer>&, const std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>>&);
 // A readable mask (no triangle beyond the mesh's `facet_count`) with state 1 in it: what needs_bake counts as painted.

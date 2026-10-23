@@ -600,22 +600,29 @@
     },
     {
       "category": "Painting",
-      "description": "Reset a paint annotation on an object back to unpainted -- the equivalent of the paint gizmo's 'Remove all' button. mode picks which annotation; omit it to clear all four, which paint_object cannot do in one call. Clearing is instance-independent: paint lives on the volume, so there is no instance_id here.",
+      "description": "Reset a paint annotation on an object back to unpainted -- the equivalent of the paint gizmo's 'Remove all' button. mode picks which annotation; omit it to clear all four, which paint_object cannot do in one call. Texture displacement masks are not print paint: without mode they stay; mode texture clears one texture_layer's mask, or all eight slots without it (the layers themselves stay; an open paint panel is closed first, closed_toolbar_tool). Clearing is instance-independent: paint lives on the volume, so there is no instance_id here.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "mode": {
-            "description": "Which annotation to clear; omit to clear all four",
+            "description": "Which annotation to clear; omit to clear the four paint modes (texture masks stay)",
             "enum": [
               "color",
               "support",
               "seam",
-              "fuzzy_skin"
+              "fuzzy_skin",
+              "texture"
             ],
             "type": "string"
           },
           "object_id": {
             "description": "Object index (0-based)",
+            "type": "integer"
+          },
+          "texture_layer": {
+            "description": "mode=texture only: clear this layer slot's mask; omit for all eight",
+            "maximum": 7,
+            "minimum": 0,
             "type": "integer"
           },
           "volume_id": {
@@ -1355,7 +1362,7 @@
     },
     {
       "category": "Painting",
-      "description": "Read what is currently painted on an object: per-volume facet counts and surface coverage for each of the four paint modes (color, support, seam, fuzzy_skin), plus its brim ears. Coordinates are PLATE millimetres, the same frame get_object_info reports its bounding_box in. Use it to verify a paint_object call did what you asked. coverage_percent is how much of the surface a state covers -- use that. Do not divide facet_count by original_facets: facet_count counts the leaf triangles a paint stroke subdivided the mesh into, so on a painted volume it can exceed the original count.",
+      "description": "Read what is currently painted on an object: per-volume facet counts and surface coverage for each of the four paint modes (color, support, seam, fuzzy_skin), plus its brim ears. mode texture (with texture_layer for one layer, else every layer of the object's stack) reads the texture displacement masks instead, per volume under `texture`: {layers: [{layer, painted_facets, coverage_percent, stale}]} (stale only when true: the mask points at facets the mesh no longer has); without mode the answer carries both. Coordinates are PLATE millimetres, the same frame get_object_info reports its bounding_box in. Use it to verify a paint_object call did what you asked. coverage_percent is how much of the surface a state covers -- use that. Do not divide facet_count by original_facets: facet_count counts the leaf triangles a paint stroke subdivided the mesh into, so on a painted volume it can exceed the original count.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1365,17 +1372,24 @@
             "type": "integer"
           },
           "mode": {
-            "description": "Omit to report all four modes",
+            "description": "Omit to report the four paint modes and the texture layers' paint; texture reads only the texture displacement masks",
             "enum": [
               "color",
               "support",
               "seam",
-              "fuzzy_skin"
+              "fuzzy_skin",
+              "texture"
             ],
             "type": "string"
           },
           "object_id": {
             "description": "Object index (0-based)",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "texture_layer": {
+            "description": "mode=texture only: report this layer slot; omit for every layer of the object's stack",
+            "maximum": 7,
             "minimum": 0,
             "type": "integer"
           },
@@ -2197,7 +2211,7 @@
     },
     {
       "category": "Painting",
-      "description": "Find the facet a point, a ray, or a pixel of a render lands on. Give ONE of: point [x,y,z] (plate mm; snaps to the nearest surface), ray {origin, direction} (plate mm; first hit), or pixel [u,v] plus the `camera` object from a render_plate_view result (u right, v down, (0,0) top-left). Returns the volume, facet, plate point and normal -- feed `point` straight into paint_object {selection: \"connected\", seed: {point}}. include_component adds the shell id for paint_object {selection: \"component\"}; it costs a pass over the mesh.",
+      "description": "Find the facet a point, a ray, or a pixel of a render lands on. Give ONE of: point [x,y,z] (plate mm; snaps to the nearest surface), ray {origin, direction} (plate mm; first hit), or pixel [u,v] plus the `camera` object from a render_plate_view result (u right, v down, (0,0) top-left). Returns the volume, facet, plate point and normal -- feed `point` straight into paint_object {selection: \"connected\", seed: {point}}. include_component adds the shell id for paint_object {selection: \"component\"}; it costs a pass over the mesh. texture_layers lists the slots of the texture displacement layers whose paint covers the facet, wholly or in part (empty when none).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2608,7 +2622,7 @@
     },
     {
       "category": "Painting",
-      "description": "Renumber an object's painted filaments in one step: mapping {\"1\": 2, \"2\": 3, \"3\": 4} moves every facet painted with filament 1 to 2, 2 to 3 and 3 to 4 together -- never chained, so 1 does not end up at 3 -- which frees slot 1, e.g. for a support filament. Filaments the mapping does not list keep their facets. 0 means unpainted: as a key it paints the bare facets, as a value it unpaints. New filaments must be existing slots (get_filaments). One undo step. Returns facet counts per filament before and after (facets_before / facets_after, and per volume). Unpainted facets print with the part's own filament, which this leaves as it is: when the mapping moves that filament, notes names the set_object_filament call that moves them too. For one filament, paint_object with selection \"state\" does the same.",
+      "description": "Renumber an object's painted filaments in one step: mapping {\"1\": 2, \"2\": 3, \"3\": 4} moves every facet painted with filament 1 to 2, 2 to 3 and 3 to 4 together -- never chained, so 1 does not end up at 3 -- which frees slot 1, e.g. for a support filament. Filaments the mapping does not list keep their facets. 0 means unpainted: as a key it paints the bare facets, as a value it unpaints. New filaments must be existing slots (get_filaments). One undo step. Returns facet counts per filament before and after (facets_before / facets_after, and per volume). Unpainted facets print with the part's own filament, which this leaves as it is: when the mapping moves that filament, notes names the set_object_filament call that moves them too. For one filament, paint_object with selection \"state\" does the same. mode texture renumbers one texture_layer's mask instead ({\"1\": 0} unpaints it); moving layers is set_texture_displacement, action move.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2620,14 +2634,21 @@
             "type": "object"
           },
           "mode": {
-            "description": "Which paint to renumber: color, the filament paint (default). For support, seam or fuzzy skin states use paint_object's selection state.",
+            "description": "Which paint to renumber: color, the filament paint (default), or texture, one texture layer's mask (texture_layer; its states are 0 unpainted and 1 painted). For support, seam or fuzzy skin states use paint_object's selection state.",
             "enum": [
-              "color"
+              "color",
+              "texture"
             ],
             "type": "string"
           },
           "object_id": {
             "description": "Object index (0-based)",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "texture_layer": {
+            "description": "mode=texture (required there): the slot of the layer whose mask is renumbered; the layer must exist",
+            "maximum": 7,
             "minimum": 0,
             "type": "integer"
           },
