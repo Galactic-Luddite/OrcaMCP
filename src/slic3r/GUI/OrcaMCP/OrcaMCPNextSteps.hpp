@@ -149,8 +149,11 @@ std::vector<NextStep> bake_next_steps(int object_id, bool needs_bake);
 // when the bake added mixed filament slots (`slots_added`), to see them; bake_texture_displacement again when paint
 // is left (`needs_bake`: a part the bake did not move keeps its paint). The bake changed the object's mesh, so its plate
 // (`plate_index`, when known) lost its slice; mixed filament slots added change every plate's filaments.
-// What a mesh edit's texture_changes lead to: set_texture_displacement add when texture layers were lost with a part,
-// else paint_object for the first layer whose paint was lost; get_texture_displacement for a stack the object no longer reads.
+// What a mesh edit's texture_changes lead to: set_texture_displacement add when texture layers were lost with a part;
+// get_object_paint when paint was lost (the region has to be painted again, and no tool can restore it); and
+// get_texture_displacement for a stack, UV channel, unwrap edits or paint the object no longer reads or fits. The
+// arguments name the first object, the why all of `objects`.
+std::vector<NextStep> texture_changes_next_steps(const std::vector<int>& objects, const nlohmann::json& changes);
 std::vector<NextStep> texture_changes_next_steps(int object_id, const nlohmann::json& changes);
 std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added, std::optional<int> plate_index);
 

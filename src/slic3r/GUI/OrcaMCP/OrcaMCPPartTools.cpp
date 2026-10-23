@@ -476,7 +476,7 @@ nlohmann::json drop_to_bed_on_main_thread(const nlohmann::json& params)
 // Adds the answer's texture_changes, comparing `before` with the objects `after_ids` name now. Call it after
 // guard.report, which replaces info_messages. `cause` says why.
 void report_texture_changes(nlohmann::json& answer, const Model& model, const TextureState& before, const std::vector<int>& after_ids,
-                            const std::string& cause)
+                            const std::string& cause, const std::string& subject = std::string(), const nlohmann::json& extra = nlohmann::json::object())
 {
     std::vector<const ModelObject*> after;
     for (int id : after_ids)
@@ -484,7 +484,9 @@ void report_texture_changes(nlohmann::json& answer, const Model& model, const Te
             after.push_back(model.objects[std::size_t(id)]);
     if (after.empty())
         return;
-    add_texture_changes(answer, texture_changes_json(before, after, nullptr), after_ids.front(), cause);
+    nlohmann::json changes = texture_changes_json(before, after, nullptr);
+    changes.update(extra);
+    add_texture_changes(answer, changes, after_ids.front(), cause, subject);
 }
 
 // ---- delete ----
@@ -497,7 +499,6 @@ nlohmann::json delete_volume_on_main_thread(Plater& plater, int object_id, Model
         return error_response(*refusal);
     if (const auto refusal = ui_job_refusal(plater, "delete_object"))
         return error_response(*refusal);
-    const TextureState             texture_before = texture_state_of(object);
     const nlohmann::json           deleted = volume_row_json(object, std::size_t(volume_id));
     const std::vector<std::string> moving  = settings_moving_to_object(object, volume_id);
     const std::size_t              before  = object.volumes.size();
@@ -505,6 +506,9 @@ nlohmann::json delete_volume_on_main_thread(Plater& plater, int object_id, Model
     std::string closed_tool;
     if (const auto refusal = close_toolbar_tool_before_change(plater, object_id, before, closed_tool))
         return *refusal;
+    // Read after the panel closed: closing a painter can change the paint.
+    TextureState texture_before = texture_state_of(object);
+    forget_texture_paint_of(texture_before, volume_id); // the deleted part's paint goes with it: nothing to paint again
     McpDialogSuppressionGuard guard;
     {
         // The Delete key's undo step (Plater::remove_selected); the list's own inside it is suppressed.
@@ -836,7 +840,6 @@ nlohmann::json split_object_on_main_thread(const nlohmann::json& params)
     if (to != "objects" && to != "parts")
         return error_response("to must be \"objects\" (one object per solid part, or per shell of a one-part object) or \"parts\" (one "
                               "part per shell of a volume)");
-    const TextureState         texture_before = texture_state_of(*object);
     const SplitTarget          target      = to == "objects" ? SplitTarget::objects : SplitTarget::parts;
     const std::optional<int>   volume_id   = read_volume_id(params, error);
     const std::optional<bool>  keep_height = error.empty() ? read_flag(params, "keep_height", error) : std::nullopt;
@@ -851,6 +854,7 @@ nlohmann::json split_object_on_main_thread(const nlohmann::json& params)
     std::string closed_tool;
     if (const auto refusal = close_toolbar_tool_before_change(*plater, object_id, object->volumes.size(), closed_tool))
         return *refusal;
+    const TextureState        texture_before = texture_state_of(*object); // after the panel closed
     McpDialogSuppressionGuard guard;
     ScopedKeepPainting        painting(keep.value);
     nlohmann::json            answer;
@@ -871,7 +875,8 @@ nlohmann::json split_object_on_main_thread(const nlohmann::json& params)
     if (succeeded)
         report_texture_changes(answer, plater->model(), texture_before,
                                target == SplitTarget::objects ? answer.at("new_object_ids").get<std::vector<int>>() : std::vector<int>{object_id},
-                               "the object was split into new meshes, and texture paint is not carried across");
+                               "the mesh was split, and texture paint is not carried across",
+                               target == SplitTarget::objects ? "object " + std::to_string(object_id) + " (before the split)" : std::string());
     return with_closed_tool(std::move(answer), closed_tool);
 }
 
@@ -1022,7 +1027,6 @@ nlohmann::json set_volume_type_on_main_thread(const nlohmann::json& params)
     const std::optional<ModelVolumeType> to        = volume_type_from_name(type_name);
     if (!to)
         return error_response("type must be one of: part, negative_volume, modifier, support_blocker, support_enforcer");
-    const TextureState texture_before = texture_state_of(*object);
     ModelVolume*      target        = object->volumes[std::size_t(*volume_id)];
     const std::string previous_type = volume_type_name(target->type());
     nlohmann::json    answer        = {{"status", "success"}, {"object_id", object_id}, {"previous_volume_id", *volume_id},
@@ -1039,6 +1043,7 @@ nlohmann::json set_volume_type_on_main_thread(const nlohmann::json& params)
     std::string closed_tool;
     if (const auto refusal = close_toolbar_tool_before_change(*plater, object_id, object->volumes.size(), closed_tool))
         return *refusal;
+    const TextureState texture_before = texture_state_of(*object); // after the panel closed
     if (const auto refusal = select_in_object_list(*plater, object_id, target))
         return with_closed_tool(error_response(*refusal), closed_tool);
     McpDialogSuppressionGuard guard;
@@ -1080,14 +1085,6 @@ nlohmann::json assemble_objects_on_main_thread(const nlohmann::json& params)
     if (const auto refusal = ui_job_refusal(*plater, "assemble_objects"))
         return error_response(*refusal);
 
-    // The assembly keeps every volume's id (copies), so the first object's stack is read and the others' are not.
-    TextureState texture_before;
-    for (int id : object_ids) {
-        TextureState one = texture_state_of(*model.objects[std::size_t(id)]);
-        texture_before.volume_count += one.volume_count;
-        for (TextureState::Part& part : one.parts)
-            texture_before.parts.push_back(std::move(part));
-    }
     nlohmann::json from = nlohmann::json::array();
     for (int id : object_ids) {
         const ModelObject& object = *model.objects[std::size_t(id)];
@@ -1100,6 +1097,15 @@ nlohmann::json assemble_objects_on_main_thread(const nlohmann::json& params)
     std::string closed_tool;
     if (const auto refusal = close_toolbar_tool_before_change(*plater, -1, 0, closed_tool))
         return *refusal;
+    // The assembly keeps every volume's id (copies), so ids find the parts again. Read after the panel closed.
+    TextureState              texture_before;
+    std::vector<TextureState> per_object;
+    for (int id : object_ids) {
+        per_object.push_back(texture_state_of(*model.objects[std::size_t(id)]));
+        texture_before.volume_count += per_object.back().volume_count;
+        for (const TextureState::Part& part : per_object.back().parts)
+            texture_before.parts.push_back(part);
+    }
     if (const auto refusal = select_objects_in_object_list(*plater, object_ids))
         return with_closed_tool(error_response(*refusal), closed_tool);
     ObjectList* list = wxGetApp().obj_list();
@@ -1124,7 +1130,16 @@ nlohmann::json assemble_objects_on_main_thread(const nlohmann::json& params)
     answer["active_warnings"] = get_active_warnings_json(plater);
     add_next_steps(answer, assembled_next_steps(assembled));
     answer = guard.report(std::move(answer));
-    report_texture_changes(answer, model, texture_before, {assembled}, "the objects were joined into one");
+    // The other objects' masks are read against the first object's layers now.
+    nlohmann::json reassigned = nlohmann::json::array();
+    for (std::size_t k = 1; k < per_object.size(); ++k)
+        for (const TextureState::Part& part : per_object[k].parts)
+            if (!part.painted_slots.empty())
+                for (std::size_t v = 0; v < object.volumes.size(); ++v)
+                    if (object.volumes[v]->id() == part.id)
+                        reassigned.push_back({{"volume_id", int(v)}, {"name", part.name}, {"layers", part.painted_slots}});
+    report_texture_changes(answer, model, texture_before, {assembled}, "the objects were joined into one", std::string(),
+                           reassigned.empty() ? nlohmann::json::object() : nlohmann::json{{"paint_reassigned", reassigned}});
     return with_closed_tool(std::move(answer), closed_tool);
 }
 
@@ -1160,7 +1175,6 @@ nlohmann::json merge_parts_on_main_thread(const nlohmann::json& params)
                                   {"part_settings", std::vector<std::string>(part_settings.begin(), part_settings.end())},
                                   {"layer_ranges", int(object->layer_config_ranges.size())},
                                   {"brim_ears", int(object->brim_points.size())}};
-    const TextureState     texture_before = texture_state_of(*object);
     const int              instances = int(object->instances.size());
     const std::string      name      = object->name;
     const std::vector<int> siblings  = cut_siblings(model, object_id);
@@ -1168,6 +1182,7 @@ nlohmann::json merge_parts_on_main_thread(const nlohmann::json& params)
     std::string closed_tool;
     if (const auto refusal = close_toolbar_tool_before_change(*plater, object_id, object->volumes.size(), closed_tool))
         return *refusal;
+    const TextureState texture_before = texture_state_of(*object); // after the panel closed
     if (const auto refusal = select_in_object_list(*plater, object_id))
         return with_closed_tool(error_response(*refusal), closed_tool);
     ObjectList* list = wxGetApp().obj_list();

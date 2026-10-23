@@ -69,7 +69,16 @@ std::optional<std::string> unusable(const NextStep& step)
     if (tool == tools.end())
         return step.tool + " is not a tool";
     const json schema = OrcaMCPServer::tool_list_entry(tool->second).at("inputSchema");
-    return tool_arguments_error(step.tool, schema, step.arguments.is_null() ? json::object() : step.arguments);
+    if (const auto error = tool_arguments_error(step.tool, schema, step.arguments.is_null() ? json::object() : step.arguments))
+        return error;
+    // The schema check above looks at names, not values: a top-level argument with an enum takes one of its values.
+    if (step.arguments.is_object() && schema.contains("properties"))
+        for (const auto& [name, value] : step.arguments.items()) {
+            const json& property = schema.at("properties").value(name, json::object());
+            if (property.contains("enum") && std::find(property.at("enum").begin(), property.at("enum").end(), value) == property.at("enum").end())
+                return step.tool + " takes " + name + " from " + property.at("enum").dump() + ", not " + value.dump();
+        }
+    return std::nullopt;
 }
 
 } // namespace
@@ -342,13 +351,15 @@ TEST_CASE("A texture layer painted nowhere points at painting it", "[McpNextStep
 TEST_CASE("Texture changes of a mesh edit point at what restores them", "[McpNextSteps][orcamcp]")
 {
     CHECK(texture_changes_next_steps(1, json::object()).empty());
-    const auto layers = texture_changes_next_steps(1, {{"layers_lost", 1}, {"paint_lost", {{{"volume_id", 0}, {"layers", {0}}}}}});
+    const auto layers = texture_changes_next_steps(1, {{"layers_lost", 1}});
     REQUIRE(layers.size() == 1);
     CHECK(layers[0].tool == "set_texture_displacement");
+    CHECK(texture_changes_next_steps(std::vector<int>{3, 4}, {{"layers_lost", 1}})[0].why.find("objects 3 and 4") != std::string::npos);
     const auto paint = texture_changes_next_steps(1, {{"paint_lost", {{{"volume_id", 0}, {"layers", {2, 3}}}}}});
     REQUIRE(paint.size() == 1);
-    CHECK(paint[0].tool == "paint_object");
-    CHECK(paint[0].arguments["texture_layer"] == 2);
+    CHECK(paint[0].tool == "get_object_paint");
+    CHECK(paint[0].arguments == json{{"object_id", 1}, {"mode", "texture"}});
+    CHECK(paint[0].why.find("painted again") != std::string::npos);
     const auto unused = texture_changes_next_steps(1, {{"stacks_unused", {{{"volume_id", 1}, {"layers", 2}}}}});
     REQUIRE(unused.size() == 1);
     CHECK(unused[0].tool == "get_texture_displacement");

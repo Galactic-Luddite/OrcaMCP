@@ -112,12 +112,16 @@ const char* const TEXTURE_LOAD_CAUSE = "the part was loaded anew from a file, an
 
 // The texture paint and layers the changed objects lost. The loaded parts are new volumes in the places of the old
 // ones, so the states are matched by position when the object kept its volume count.
-nlohmann::json texture_changes_of_object(const Model& model, TextureStates& states, int object_id)
+std::vector<std::pair<int, nlohmann::json>> texture_changes_of_objects(const Model& model, TextureStates& states, const std::vector<int>& object_ids)
 {
-    const ModelObject& object = *model.objects[size_t(object_id)];
-    TextureState&      before = states[object_id];
-    rekey_texture_state(before, object);
-    return texture_changes_json(before, {&object}, nullptr);
+    std::vector<std::pair<int, nlohmann::json>> changes;
+    for (int object_id : object_ids) {
+        const ModelObject& object = *model.objects[size_t(object_id)];
+        TextureState&      before = states[object_id];
+        rekey_texture_state(before, object);
+        changes.emplace_back(object_id, texture_changes_json(before, {&object}, nullptr));
+    }
+    return changes;
 }
 
 std::set<int> objects_of(const std::vector<std::pair<int, int>>& volumes)
@@ -211,8 +215,7 @@ nlohmann::json reload_on_main_thread(const ReloadRequest& request)
     nlohmann::json answer = {{"status", "success"}, {"reloaded", std::move(reloaded)}};
     report_loaded(*plater, changed_objects, answer);
     answer = guard.report(answer);
-    for (int o : changed_objects)
-        append_object_texture_changes(answer, texture_changes_of_object(model, texture_before, o), o, TEXTURE_LOAD_CAUSE);
+    add_objects_texture_changes(answer, texture_changes_of_objects(model, texture_before, changed_objects), TEXTURE_LOAD_CAUSE);
     return with_closed_tool(std::move(answer), closed_tool);
 }
 
@@ -281,7 +284,7 @@ nlohmann::json replace_on_main_thread(const ReplaceRequest& request)
     nlohmann::json answer = {{"status", "success"}, {"replaced", std::move(replaced)}, {"object_name", object->name}};
     report_loaded(*plater, changed_objects, answer);
     answer = guard.report(answer);
-    add_texture_changes(answer, texture_changes_of_object(model, texture_before, request.object_id), request.object_id, TEXTURE_LOAD_CAUSE);
+    add_objects_texture_changes(answer, texture_changes_of_objects(model, texture_before, changed_objects), TEXTURE_LOAD_CAUSE);
     return with_closed_tool(std::move(answer), closed_tool);
 }
 

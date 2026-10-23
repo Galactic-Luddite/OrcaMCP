@@ -6035,7 +6035,8 @@ void OrcaMCPServer::register_builtin_tools()
                     pieces.push_back(model.objects[size_t(id)]);
                 if (!pieces.empty())
                     add_texture_changes(result, texture_changes_json(texture_before, pieces, nullptr), new_object_ids.front(),
-                                        "the object was cut into new meshes, and texture paint is not carried across");
+                                        "the object was cut into new meshes, and texture paint is not carried across",
+                                        "object " + std::to_string(object_id) + " (before the cut)");
 
                 // Add turntable preview if requested
                 add_turntable_preview_if_requested(result, include_preview);

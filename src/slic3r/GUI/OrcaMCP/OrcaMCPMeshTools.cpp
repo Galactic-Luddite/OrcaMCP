@@ -156,6 +156,9 @@ nlohmann::json finish_repair(RepairRequest& request, CgalRepairPlan& plan, bool 
                                                  closed_tool));
     }
 
+    // The panel's closing can change paint: read the texture state again.
+    if (!closed_tool.empty())
+        request.texture_before = texture_state_of(*object);
     // The object list's own undo step: nothing above changed the object.
     Plater::TakeSnapshot snapshot(plater, _u8L("Repairing model object"));
     const bool             painted_before = request.before.value("painted", false);
@@ -175,8 +178,6 @@ nlohmann::json finish_repair(RepairRequest& request, CgalRepairPlan& plan, bool 
     answer.update(placement);
     answer["volumes"]         = mesh_volume_rows_json(*object);
     answer["active_warnings"] = get_active_warnings_json(plater);
-    // The repair gives each repaired volume a new id, in the place it was.
-    rekey_texture_state(request.texture_before, *object);
     answer = guard.report(with_closed_tool(std::move(answer), closed_tool));
     add_texture_changes(answer, texture_changes_json(request.texture_before, {object}, nullptr), object_id, TEXTURE_REPAIR_CAUSE);
     return answer;
@@ -313,19 +314,16 @@ void apply_batch_item(Plater& plater, BatchRepairItem& item, CgalRepairPlan& pla
 // lost some, with the info_messages lines and the next steps of each.
 void add_batch_texture_changes(nlohmann::json& answer, const BatchRepairRequest& request)
 {
-    Model&         model = wxGetApp().plater()->model();
+    Model&                                   model = wxGetApp().plater()->model();
+    std::vector<std::pair<int, nlohmann::json>> lost;
     for (std::size_t i = 0; i < request.items.size(); ++i) {
         const BatchRepairItem& item = request.items[i];
         if (!item.changed || item.object_id < 0 || std::size_t(item.object_id) >= model.objects.size())
             continue;
-        const ModelObject* object = model.objects[std::size_t(item.object_id)];
-        TextureState       before = request.texture_before[i];
-        rekey_texture_state(before, *object);
-        nlohmann::json changes = texture_changes_json(before, {object}, nullptr);
-        if (changes.empty())
-            continue;
-        append_object_texture_changes(answer, changes, item.object_id, TEXTURE_REPAIR_CAUSE);
+        // The repaired volumes keep their ModelVolume, with a new id: texture_changes_json finds them by pointer.
+        lost.emplace_back(item.object_id, texture_changes_json(request.texture_before[i], {model.objects[std::size_t(item.object_id)]}, nullptr));
     }
+    add_objects_texture_changes(answer, lost, TEXTURE_REPAIR_CAUSE);
 }
 
 // Main thread, the last step: every plan made in time applied under one undo snapshot, if its object is still
@@ -359,6 +357,12 @@ nlohmann::json finish_batch(BatchRepairRequest& request, std::vector<std::option
             if (applies(item) && !object_unchanged(model, item))
                 item.result = object_exists(model, item) ? BatchRepairResult::changed_meanwhile : BatchRepairResult::deleted_meanwhile;
     }
+
+    // The panel's closing can change paint: read the texture state of what is applied again.
+    if (!closed_tool.empty())
+        for (std::size_t i = 0; i < request.items.size(); ++i)
+            if (applies(request.items[i]))
+                request.texture_before[i] = texture_state_of(*model.objects[std::size_t(request.items[i].object_id)]);
 
     bool painting_removed = false;
     if (std::any_of(request.items.begin(), request.items.end(), applies)) {

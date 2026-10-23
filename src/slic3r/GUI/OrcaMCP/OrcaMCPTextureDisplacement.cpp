@@ -1190,13 +1190,21 @@ TextureState texture_state_of(const ModelObject& object)
     for (size_t i = 0; i < object.volumes.size(); ++i) {
         const ModelVolume* v = object.volumes[i];
         TextureState::Part part;
-        part.id        = v->id();
-        part.volume_id = int(i);
-        part.name      = v->name;
-        part.layers    = int(v->texture_displacement_layers.size());
+        part.id          = v->id();
+        part.volume      = v;
+        part.volume_id   = int(i);
+        part.name        = v->name;
+        part.layers      = int(v->texture_displacement_layers.size());
         part.stack_owner = v == owner;
+        part.model_part  = v->is_model_part();
+        part.has_uv      = v->has_texture_uv();
+        part.vertices    = v->mesh().its.vertices.size();
+        part.facets      = v->mesh().its.indices.size();
+        for (const TextureDisplacementLayer& layer : v->texture_displacement_layers)
+            if (!layer.lscm_seam_edges.empty() || !layer.islands.empty() || !layer.island_groups.empty() || !layer.lscm_uv_overrides.empty())
+                part.unwrap_edits = true;
         for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
-            if (mask_has_paint(v->texture_displacement_facet(slot).get_data(), v->mesh().its.indices.size()))
+            if (mask_has_paint(v->texture_displacement_facet(slot).get_data(), part.facets))
                 part.painted_slots.push_back(slot);
         // A volume of any type is told when it holds a stack or paint: the first part turned into a modifier
         // keeps its stack, which the object no longer reads.
@@ -1204,6 +1212,16 @@ TextureState texture_state_of(const ModelObject& object)
             state.parts.push_back(std::move(part));
     }
     return state;
+}
+
+void forget_texture_paint_of(TextureState& state, int volume_id)
+{
+    for (TextureState::Part& part : state.parts)
+        if (part.volume_id == volume_id) {
+            part.painted_slots.clear();
+            part.has_uv       = false;
+            part.unwrap_edits = false;
+        }
 }
 
 json texture_changes_json(const TextureState& before, const std::vector<const ModelObject*>& after, const ModelVolume* owner_after)
@@ -1219,20 +1237,27 @@ json texture_changes_json(const TextureState& before, const std::vector<const Mo
         }
     }
     const auto find_after = [&](const TextureState::Part& b) {
-        return std::find_if(after_parts.begin(), after_parts.end(), [&](const TextureState::Part& a) { return a.id == b.id; });
+        return std::find_if(after_parts.begin(), after_parts.end(), [&](const TextureState::Part& a) { return a.id == b.id || (b.volume != nullptr && a.volume == b.volume); });
     };
 
-    json lost = json::array();
+    json lost = json::array(), uv_lost = json::array(), stale = json::array(), dead = json::array();
     int  layers_lost = 0;
     for (const TextureState::Part& b : before.parts) {
         const auto       it = find_after(b);
+        const bool       found = it != after_parts.end();
         std::vector<int> slots;
         for (int slot : b.painted_slots)
-            if (it == after_parts.end() || std::find(it->painted_slots.begin(), it->painted_slots.end(), slot) == it->painted_slots.end())
+            if (!found || std::find(it->painted_slots.begin(), it->painted_slots.end(), slot) == it->painted_slots.end())
                 slots.push_back(slot);
         if (!slots.empty())
             lost.push_back({{"volume_id", b.volume_id}, {"name", b.name}, {"layers", slots}});
-        layers_lost += it == after_parts.end() ? b.layers : std::max(0, b.layers - it->layers);
+        layers_lost += found ? std::max(0, b.layers - it->layers) : b.layers;
+        if (b.has_uv && (!found || !it->has_uv))
+            uv_lost.push_back({{"volume_id", b.volume_id}, {"name", b.name}});
+        if (found && b.unwrap_edits && it->layers > 0 && (b.vertices != it->vertices || b.facets != it->facets))
+            stale.push_back({{"volume_id", b.volume_id}, {"name", b.name}});
+        if (found && b.model_part && !it->model_part && !it->painted_slots.empty())
+            dead.push_back({{"volume_id", b.volume_id}, {"name", b.name}, {"layers", it->painted_slots}});
     }
 
     // A stack the edit left on a part the object does not read it from (it was not so before).
@@ -1240,7 +1265,7 @@ json texture_changes_json(const TextureState& before, const std::vector<const Mo
     for (size_t i = 0; i < after_parts.size(); ++i) {
         if (!unused_after[i])
             continue;
-        const auto was = std::find_if(before.parts.begin(), before.parts.end(), [&](const TextureState::Part& b) { return b.id == after_parts[i].id; });
+        const auto was = std::find_if(before.parts.begin(), before.parts.end(), [&](const TextureState::Part& b) { return b.id == after_parts[i].id || (b.volume != nullptr && b.volume == after_parts[i].volume); });
         const bool unused_before = was != before.parts.end() && was->layers > 0 && !was->stack_owner;
         if (!unused_before)
             unused.push_back({{"volume_id", after_parts[i].volume_id}, {"layers", after_parts[i].layers}});
@@ -1253,6 +1278,12 @@ json texture_changes_json(const TextureState& before, const std::vector<const Mo
         out["layers_lost"] = layers_lost;
     if (!unused.empty())
         out["stacks_unused"] = unused;
+    if (!uv_lost.empty())
+        out["uv_lost"] = uv_lost;
+    if (!stale.empty())
+        out["unwrap_edits_stale"] = stale;
+    if (!dead.empty())
+        out["paint_unused"] = dead;
     return out;
 }
 
@@ -1273,25 +1304,37 @@ std::string slot_list(const json& slots)
 
 } // namespace
 
-std::vector<std::string> texture_changes_messages(const json& changes, int object_id, const std::string& cause)
+std::vector<std::string> texture_changes_messages(const json& changes, const std::string& subject, const std::string& cause)
 {
     std::vector<std::string> said;
-    const std::string        object = "object " + std::to_string(object_id);
     for (const json& lost : changes.value("paint_lost", json::array())) {
-        const json&       slots = lost.at("layers");
-        said.push_back(object + " lost the paint of texture layer" + (slots.size() == 1 ? " " : "s ") + slot_list(slots) + " on part " +
-                       std::to_string(lost.value("volume_id", 0)) + ": " + cause + "; paint it again with paint_object mode texture");
+        const json& slots = lost.at("layers");
+        said.push_back(subject + " lost the paint of texture layer" + (slots.size() == 1 ? " " : "s ") + slot_list(slots) + " on part " +
+                       std::to_string(lost.value("volume_id", 0)) + ": " + cause + "; that region has to be painted again (paint_object mode texture)");
     }
     if (changes.value("layers_lost", 0) > 0)
-        said.push_back(object + " lost " + std::to_string(changes.at("layers_lost").get<int>()) + " texture layer(s) with the part that held them: " +
+        said.push_back(subject + " lost " + std::to_string(changes.at("layers_lost").get<int>()) + " texture layer(s) with the part that held them: " +
                        cause + "; set_texture_displacement add makes them again");
     for (const json& unused : changes.value("stacks_unused", json::array()))
-        said.push_back("part " + std::to_string(unused.value("volume_id", 0)) + " of " + object + " holds " +
+        said.push_back("part " + std::to_string(unused.value("volume_id", 0)) + " of " + subject + " holds " +
                        std::to_string(unused.value("layers", 0)) + " texture layer(s) the object does not read: only its first model part's count");
+    for (const json& uv : changes.value("uv_lost", json::array()))
+        said.push_back("part " + std::to_string(uv.value("volume_id", 0)) + " of " + subject + " lost its UV channel: " + cause +
+                       "; a model_uv layer cannot map it (use another projection)");
+    for (const json& stale : changes.value("unwrap_edits_stale", json::array()))
+        said.push_back("part " + std::to_string(stale.value("volume_id", 0)) + " of " + subject + " keeps the unwrap edits (seams, islands, UV overrides) made on its old mesh: "
+                       "nothing checks them against the new mesh, so they may cut or move the wrong places (get_texture_unwrap shows them)");
+    for (const json& dead : changes.value("paint_unused", json::array()))
+        said.push_back("part " + std::to_string(dead.value("volume_id", 0)) + " of " + subject + " is no longer a model part, so its texture paint (layer" +
+                       (dead.at("layers").size() == 1 ? " " : "s ") + slot_list(dead.at("layers")) + ") is applied by no bake");
+    for (const json& moved : changes.value("paint_reassigned", json::array()))
+        said.push_back("part " + std::to_string(moved.value("volume_id", 0)) + " of " + subject + " holds texture paint of layer" +
+                       (moved.at("layers").size() == 1 ? " " : "s ") + slot_list(moved.at("layers")) +
+                       " made against another object's layers: " + cause + "; it is now read against this object's own layers");
     return said;
 }
 
-void add_texture_changes(json& answer, const json& changes, int object_id, const std::string& cause)
+void add_texture_changes(json& answer, const json& changes, int object_id, const std::string& cause, const std::string& subject)
 {
     if (changes.empty())
         return;
@@ -1299,27 +1342,48 @@ void add_texture_changes(json& answer, const json& changes, int object_id, const
     json& said = answer["info_messages"];
     if (!said.is_array())
         said = json::array();
-    for (const std::string& line : texture_changes_messages(changes, object_id, cause))
+    for (const std::string& line : texture_changes_messages(changes, subject.empty() ? "object " + std::to_string(object_id) : subject, cause))
         said.push_back(line);
     append_next_steps(answer, texture_changes_next_steps(object_id, changes));
 }
 
-void append_object_texture_changes(json& answer, const json& changes, int object_id, const std::string& cause)
+void add_objects_texture_changes(json& answer, const std::vector<std::pair<int, json>>& changes, const std::string& cause)
 {
-    if (changes.empty())
+    std::vector<int> ids;
+    json             list = json::array();
+    for (const auto& [object_id, one] : changes) {
+        if (one.empty())
+            continue;
+        ids.push_back(object_id);
+        json entry         = one;
+        entry["object_id"] = object_id;
+        list.push_back(std::move(entry));
+    }
+    if (ids.empty())
         return;
     json& said = answer["info_messages"];
     if (!said.is_array())
         said = json::array();
-    for (const std::string& line : texture_changes_messages(changes, object_id, cause))
-        said.push_back(line);
-    append_next_steps(answer, texture_changes_next_steps(object_id, changes));
-    json& all = answer["texture_changes"];
-    if (!all.is_array())
-        all = json::array();
-    json entry       = changes;
-    entry["object_id"] = object_id;
-    all.push_back(std::move(entry));
+    if (ids.size() == 1)
+        for (const std::string& line : texture_changes_messages(list[0], "object " + std::to_string(ids[0]), cause))
+            said.push_back(line);
+    else
+        said.push_back("objects " + listed_ids(ids) + " lost texture paint or layers, or keep texture data that no longer fits: " + cause + "; texture_changes tells what for each");
+    answer["texture_changes"] = std::move(list);
+    // One step per tool, built from every object's changes: arguments name the first object, why all of them.
+    json merged = json::object();
+    for (const auto& [object_id, one] : changes)
+        for (const auto& [key, value] : one.items())
+            if (key == "layers_lost")
+                merged[key] = merged.value(key, 0) + value.get<int>();
+            else {
+                json& all = merged[key];
+                if (!all.is_array())
+                    all = json::array();
+                for (const json& item : value)
+                    all.push_back(item);
+            }
+    append_next_steps(answer, texture_changes_next_steps(ids, merged));
 }
 
 void rekey_texture_state(TextureState& state, const ModelObject& after)
@@ -1327,8 +1391,10 @@ void rekey_texture_state(TextureState& state, const ModelObject& after)
     if (state.volume_count != after.volumes.size())
         return;
     for (TextureState::Part& part : state.parts)
-        if (part.volume_id >= 0)
-            part.id = after.volumes[size_t(part.volume_id)]->id();
+        if (part.volume_id >= 0) {
+            part.id     = after.volumes[size_t(part.volume_id)]->id();
+            part.volume = after.volumes[size_t(part.volume_id)];
+        }
 }
 
 // ---- The unwrap request ----

@@ -20,6 +20,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "slic3r/GUI/Camera.hpp"
+#include "slic3r/GUI/OrcaMCP/OrcaMCPNextSteps.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPServer.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPTextureDisplacement.hpp"
 #include "slic3r/GUI/TextureDisplacementObject.hpp"
@@ -963,7 +964,7 @@ TEST_CASE("a first part turned into a modifier leaves its stack unused, not lost
     CHECK(j["stacks_unused"][0]["volume_id"] == 0);
 }
 
-TEST_CASE("a mesh edit's texture changes are told in words and tied to new ids by position", "[McpTexture][orcamcp]")
+TEST_CASE("a mesh edit's texture changes are told in words and found again by volume", "[McpTexture][orcamcp]")
 {
     Model        model;
     ModelObject* object = cube_object(model);
@@ -971,37 +972,121 @@ TEST_CASE("a mesh edit's texture changes are told in words and tied to new ids b
     part->texture_displacement_layers = {layer_in(0), layer_in(2)};
     paint_facets(*part, 0, 2);
     paint_facets(*part, 2, 4);
-    TextureState before = texture_state_of(*object);
+    const TextureState before = texture_state_of(*object);
     CHECK(before.parts[0].stack_owner);
+    CHECK(before.parts[0].volume == part);
     CHECK(before.volume_count == 1);
 
-    SECTION("a repaired volume has a new id and kept nothing")
+    SECTION("a repaired volume has a new id and lost its paint, not its layers")
     {
         part->texture_displacement_facet(0).reset();
         part->texture_displacement_facet(2).reset();
         part->set_new_unique_id();
-        // by id the part is gone, and its stack with it; by position only its paint is
-        CHECK(texture_changes_json(before, {object}, nullptr).value("layers_lost", 0) == 2);
-        rekey_texture_state(before, *object);
         const json changes = texture_changes_json(before, {object}, nullptr);
         CHECK_FALSE(changes.contains("layers_lost"));
         REQUIRE(changes.contains("paint_lost"));
-        const auto said = texture_changes_messages(changes, 3, "the mesh changed");
+        const auto said = texture_changes_messages(changes, "object 3", "the mesh changed");
         REQUIRE(said.size() == 1);
-        CHECK(said[0] == "object 3 lost the paint of texture layers 0 and 2 on part 0: the mesh changed; paint it again with paint_object mode texture");
+        CHECK(said[0] == "object 3 lost the paint of texture layers 0 and 2 on part 0: the mesh changed; that region has to be painted again (paint_object mode texture)");
         json answer = {{"next_steps", json::array({{{"tool", "slice_all"}, {"why", "x"}}})}};
         add_texture_changes(answer, changes, 3, "the mesh changed");
         CHECK(answer["texture_changes"] == changes);
         CHECK(answer["info_messages"].size() == 1);
         REQUIRE(answer["next_steps"].size() == 2);
-        CHECK(answer["next_steps"][1]["tool"] == "paint_object");
+        CHECK(answer["next_steps"][0]["tool"] == "slice_all");
+        CHECK(answer["next_steps"][1]["tool"] == "get_object_paint");
+    }
+    SECTION("a split to parts keeps the first piece with its layers under a new id")
+    {
+        part->texture_displacement_facet(0).reset();
+        part->texture_displacement_facet(2).reset();
+        part->set_new_unique_id();
+        object->add_volume(TriangleMesh(its_make_cube(5., 5., 5.)), ModelVolumeType::MODEL_PART, false);
+        const json changes = texture_changes_json(before, {object}, nullptr);
+        CHECK_FALSE(changes.contains("layers_lost")); // would make set_texture_displacement add duplicate a stack
+        CHECK_FALSE(changes.contains("stacks_unused"));
+        REQUIRE(changes.contains("paint_lost"));
+        CHECK(changes["paint_lost"][0]["layers"] == json::array({0, 2}));
+    }
+    SECTION("losing paint and layers is told together")
+    {
+        Model        other;
+        ModelObject* fresh = cube_object(other);
+        const json   changes = texture_changes_json(before, {fresh}, nullptr);
+        CHECK(changes["layers_lost"] == 2);
+        CHECK(changes.contains("paint_lost"));
+        const auto steps = texture_changes_next_steps(1, changes);
+        REQUIRE(steps.size() == 2);
+        CHECK(steps[0].tool == "set_texture_displacement");
+        CHECK(steps[1].tool == "get_object_paint");
+    }
+    SECTION("a reloaded part is a new volume in the same place, found by position")
+    {
+        Model        other;
+        ModelObject* fresh = cube_object(other);
+        fresh->volumes.front()->texture_displacement_layers = part->texture_displacement_layers;
+        paint_facets(*fresh->volumes.front(), 0, 2);
+        TextureState moved = before;
+        CHECK(texture_changes_json(moved, {fresh}, nullptr).value("layers_lost", 0) == 2); // by identity it is another part
+        rekey_texture_state(moved, *fresh);
+        const json changes = texture_changes_json(moved, {fresh}, nullptr);
+        CHECK_FALSE(changes.contains("layers_lost"));
+        REQUIRE(changes.contains("paint_lost"));
+        CHECK(changes["paint_lost"][0]["layers"] == json::array({2}));
     }
     SECTION("a rekey is skipped when the volume count changed")
     {
-        object->add_volume(TriangleMesh(its_make_cube(5., 5., 5.)), ModelVolumeType::MODEL_PART, false);
-        part->set_new_unique_id();
-        rekey_texture_state(before, *object);
-        CHECK(before.parts[0].id != part->id());
+        Model        other;
+        ModelObject* fresh = cube_object(other);
+        fresh->volumes.front()->texture_displacement_layers = part->texture_displacement_layers;
+        fresh->add_volume(TriangleMesh(its_make_cube(5., 5., 5.)), ModelVolumeType::MODEL_PART, false);
+        TextureState moved = before;
+        rekey_texture_state(moved, *fresh);
+        CHECK(moved.parts[0].id == before.parts[0].id);
+        CHECK(moved.parts[0].volume == part);
+        CHECK(texture_changes_json(moved, {fresh}, nullptr).value("layers_lost", 0) == 2); // still another part
+    }
+    SECTION("a deleted part's paint is forgotten, its layers are not")
+    {
+        TextureState deleted = before;
+        forget_texture_paint_of(deleted, 0);
+        Model        other;
+        ModelObject* fresh = cube_object(other);
+        const json   changes = texture_changes_json(deleted, {fresh}, nullptr);
+        CHECK_FALSE(changes.contains("paint_lost"));
+        CHECK(changes["layers_lost"] == 2);
+    }
+    SECTION("a UV channel the edit dropped is told")
+    {
+        part->texture_uv.assign(part->mesh().its.indices.size() * 3, Vec2f::Zero());
+        const TextureState with_uv = texture_state_of(*object);
+        REQUIRE(with_uv.parts[0].has_uv);
+        part->reset_texture_uv();
+        const json changes = texture_changes_json(with_uv, {object}, nullptr);
+        REQUIRE(changes.contains("uv_lost"));
+        CHECK(changes["uv_lost"][0]["volume_id"] == 0);
+    }
+    SECTION("unwrap edits on a mesh that changed are told, on an unchanged one not")
+    {
+        TextureState edited = before;
+        edited.parts[0].unwrap_edits = true;
+        CHECK_FALSE(texture_changes_json(edited, {object}, nullptr).contains("unwrap_edits_stale"));
+        edited.parts[0].facets += 4;
+        const json changes = texture_changes_json(edited, {object}, nullptr);
+        REQUIRE(changes.contains("unwrap_edits_stale"));
+        CHECK(changes["unwrap_edits_stale"][0]["volume_id"] == 0);
+    }
+    SECTION("several objects get one summary line and one step naming them all")
+    {
+        json answer = json::object();
+        const json one = {{"layers_lost", 1}};
+        add_objects_texture_changes(answer, {{2, one}, {5, one}, {7, json::object()}}, "x");
+        REQUIRE(answer["info_messages"].size() == 1);
+        CHECK(answer["texture_changes"].size() == 2);
+        CHECK(answer["texture_changes"][1]["object_id"] == 5);
+        REQUIRE(answer["next_steps"].size() == 1);
+        CHECK(answer["next_steps"][0]["arguments"]["object_id"] == 2);
+        CHECK(answer["next_steps"][0]["why"].get<std::string>().find("objects 2 and 5") != std::string::npos);
     }
     SECTION("nothing lost adds nothing")
     {
@@ -1009,6 +1094,21 @@ TEST_CASE("a mesh edit's texture changes are told in words and tied to new ids b
         add_texture_changes(answer, texture_changes_json(before, {object}, nullptr), 0, "x");
         CHECK(answer.empty());
     }
+}
+
+TEST_CASE("paint on a part turned into a modifier is told as unused", "[McpTexture][orcamcp]")
+{
+    Model        model;
+    ModelObject* object = cube_object(model);
+    ModelVolume* first  = object->volumes.front();
+    object->add_volume(TriangleMesh(its_make_cube(5., 5., 5.)), ModelVolumeType::MODEL_PART, false);
+    paint_facets(*first, 1, 3);
+    const TextureState before = texture_state_of(*object);
+    first->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    const json changes = texture_changes_json(before, {object}, nullptr);
+    CHECK_FALSE(changes.contains("paint_lost"));
+    REQUIRE(changes.contains("paint_unused"));
+    CHECK(changes["paint_unused"][0]["layers"] == json::array({1}));
 }
 
 TEST_CASE("a layer read back is accepted and changes nothing", "[McpTexture][orcamcp]")

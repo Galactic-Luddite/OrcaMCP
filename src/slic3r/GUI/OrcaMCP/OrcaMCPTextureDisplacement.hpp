@@ -282,36 +282,49 @@ struct TextureState
 {
     struct Part
     {
-        ObjectID         id;
-        int              volume_id = -1; // position among the object's volumes
-        std::string      name;
-        std::vector<int> painted_slots;
-        int              layers = 0;     // the part's own stack
-        bool             stack_owner = false; // the object reads its layers from this part
+        ObjectID           id;
+        const ModelVolume* volume = nullptr; // identity only, to find the part again after an edit: never dereferenced
+        int                volume_id = -1;   // position among the object's volumes
+        std::string        name;
+        std::vector<int>   painted_slots;
+        int                layers = 0;       // the part's own stack
+        bool               stack_owner = false; // the object reads its layers from this part
+        bool               model_part  = false;
+        bool               has_uv      = false;
+        bool               unwrap_edits = false; // some layer has seams, islands or UV overrides made on the mesh
+        std::size_t        vertices = 0, facets = 0;
     };
     std::vector<Part> parts;
     std::size_t       volume_count = 0; // all the object's volumes, the parts above or not
 };
 TextureState texture_state_of(const ModelObject&);
-// {paint_lost: [{volume_id, name, layers: [slots]}], layers_lost: n, stacks_unused: [{volume_id, layers}]}
-// comparing `before` with the objects after (one for most edits, several for a split). A part no longer found
-// lost all its paint and layers. stacks_unused: a stack on a part that is not its object's owner (`owner_after`
-// for the first object). An empty object when nothing was lost.
+// Comparing `before` with the objects after (one for most edits, several for a split), a part is found again by
+// its volume pointer or its id. Keys, each only when there is something:
+//   paint_lost [{volume_id, name, layers: [slots]}], layers_lost n (a part's layers gone with it or its stack),
+//   stacks_unused [{volume_id, layers}] (a stack on a part that is not its object's owner; `owner_after` for the
+//   first object), uv_lost [{volume_id, name}] (the part's UV channel, which model_uv layers map by),
+//   unwrap_edits_stale [{volume_id, name}] (layers kept, with seams / islands / UV overrides made on a mesh that
+//   changed: nothing checks them against the new mesh), paint_unused [{volume_id, name, layers}] (paint on a part
+//   that is no longer a model part). volume_id is the part's place before. An empty object when nothing was lost.
 nlohmann::json texture_changes_json(const TextureState& before, const std::vector<const ModelObject*>& after, const ModelVolume* owner_after);
+// A deleted part's paint, UV and unwrap edits are not reported as lost (its layers still are, if it held the stack).
+void forget_texture_paint_of(TextureState& state, int volume_id);
 
-// The same for an edit of several objects: appends {object_id, ...changes} to the answer's texture_changes list.
-void append_object_texture_changes(nlohmann::json& answer, const nlohmann::json& changes, int object_id, const std::string& cause);
-// For an edit that keeps every volume where it is but gives it a new id (repair, reload, replace): `state`'s parts
-// take the id of the volume now at their position, so texture_changes_json compares what each part holds, not ids.
-// Does nothing when the object's volume count changed.
+// For an edit that puts a new volume in each place (reload, replace): `state`'s parts take the identity of the volume
+// now at their position, so texture_changes_json compares what each part holds. Does nothing when the object's volume
+// count changed.
 void rekey_texture_state(TextureState& state, const ModelObject& after);
-// The info_messages lines for a texture_changes answer, one per part that lost paint, one for lost layers, one per
-// unused stack. `cause` says why ("the mesh changed, and texture paint is not carried across").
-std::vector<std::string> texture_changes_messages(const nlohmann::json& changes, int object_id, const std::string& cause);
+// The info_messages lines for a texture_changes answer. `subject` names the object ("object 3"); `cause` says why
+// ("the mesh changed, and texture paint is not carried across").
+std::vector<std::string> texture_changes_messages(const nlohmann::json& changes, const std::string& subject, const std::string& cause);
 // Does nothing for an empty `changes`; else adds texture_changes, appends the lines to info_messages (after the
-// guard's report, which would replace them) and the next steps of texture_changes_next_steps.
-void add_texture_changes(nlohmann::json& answer, const nlohmann::json& changes, int object_id, const std::string& cause);
-
+// guard's report, which would replace them) and the next steps. `subject` defaults to "object <object_id>"; an
+// edit whose object is gone names it ("object 3, before the split") while object_id is the one to act on.
+void add_texture_changes(nlohmann::json& answer, const nlohmann::json& changes, int object_id, const std::string& cause,
+                         const std::string& subject = std::string());
+// The same for an edit of several objects: texture_changes is a list of {object_id, ...changes}. One affected object
+// gets its lines; several get one summary line, the list telling what each lost, and one next step naming them all.
+void add_objects_texture_changes(nlohmann::json& answer, const std::vector<std::pair<int, nlohmann::json>>& changes, const std::string& cause);
 
 // ---- The unwrap request ----
 

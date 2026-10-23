@@ -317,24 +317,33 @@ std::vector<NextStep> bake_next_steps(int object_id, bool needs_bake)
              {{"object_id", object_id}}}};
 }
 
-std::vector<NextStep> texture_changes_next_steps(int object_id, const nlohmann::json& changes)
+std::vector<NextStep> texture_changes_next_steps(const std::vector<int>& objects, const nlohmann::json& changes)
 {
-    const std::string     object = "object " + std::to_string(object_id);
     std::vector<NextStep> steps;
+    if (objects.empty() || changes.empty())
+        return steps;
+    const int         first  = objects.front();
+    const std::string object = (objects.size() == 1 ? "object " : "objects ") + listed_ids(objects);
+    const auto        has    = [&](const char* key) { return changes.contains(key) && !changes.at(key).empty(); };
     if (changes.value("layers_lost", 0) > 0)
         steps.push_back({"set_texture_displacement", object + " lost texture layers with the edit: add them again",
-                         {{"object_id", object_id}, {"action", "add"}}});
-    else if (changes.contains("paint_lost") && !changes.at("paint_lost").empty())
-        steps.push_back({"paint_object", object + " lost the paint of a texture layer: paint it again",
-                         {{"object_id", object_id},
-                          {"mode", "texture"},
-                          {"texture_layer", changes.at("paint_lost").front().at("layers").front()},
-                          {"selection", "all"},
-                          {"state", "painted"}}});
-    if (changes.contains("stacks_unused") && !changes.at("stacks_unused").empty())
-        steps.push_back({"get_texture_displacement", object + " holds texture layers on a part it does not read them from: get_texture_displacement lists them as ignored_stacks",
-                         {{"object_id", object_id}}});
+                         {{"object_id", first}, {"action", "add"}}});
+    if (has("paint_lost"))
+        steps.push_back({"get_object_paint",
+                         object + " lost the paint of texture layers, which no tool restores: the region has to be painted again with paint_object mode texture; "
+                                  "get_object_paint shows what is painted now",
+                         {{"object_id", first}, {"mode", "texture"}}});
+    if (has("stacks_unused") || has("uv_lost") || has("unwrap_edits_stale") || has("paint_unused") || has("paint_reassigned"))
+        steps.push_back({"get_texture_displacement",
+                         object + " keeps texture data that no longer fits (a stack on a part it does not read, a lost UV channel, unwrap edits of an old mesh, paint on a "
+                                  "non-model part): get_texture_displacement lists the layers and ignored_stacks",
+                         {{"object_id", first}}});
     return steps;
+}
+
+std::vector<NextStep> texture_changes_next_steps(int object_id, const nlohmann::json& changes)
+{
+    return texture_changes_next_steps(std::vector<int>{object_id}, changes);
 }
 
 std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added, std::optional<int> plate_index)
