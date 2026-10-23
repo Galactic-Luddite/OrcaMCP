@@ -1770,7 +1770,7 @@
     },
     {
       "category": "Painting",
-      "description": "Paint an object's surface as the GUI's paint tools do: filament colours for a multi-colour print, support enforcers and blockers, the seam, or fuzzy skin -- per-triangle data, the same the paint gizmos write. To put a whole object or volume on one filament, use set_object_filament. mode selects which: color (multi-material / MMU segmentation), support, seam or fuzzy_skin. selection selects where: bands along a plate axis (an even split across a list of filaments, or explicit ranges), a box, a sphere, or the whole volume. connected fills the surface region around a seed without crossing an edge sharper than `angle` -- the way to paint a feature such as a bag or a sleeve; component paints one shell by id; state repaints every facet now in one state (match_filament, or match_state outside colour mode) with filament / state and leaves the rest, e.g. everything painted with filament 1 becomes filament 3 (remap_paint renumbers several at once). Very large meshes (millions of facets) take seconds to minutes; the work runs off the GUI thread, but the bridge's ORCAMCP_TIMEOUT (default 120 s) may still need raising. ALL COORDINATES ARE PLATE MILLIMETRES -- the same frame get_object_info reports its bounding_box and position in, not object-local coordinates. But for the numbers, use THIS call's own bounding_box in the response (or get_object_paint's), not get_object_info's: that one spans every instance of the object, and matches this tool's, which is instance_id's alone, only when the object has one instance. A facet belongs to the band or region containing its centroid. Paint lives on the volume, so it applies to every instance; instance_id only says whose transform reads your coordinates. Verify with get_object_paint, undo with undo, reset with clear_object_paint. Painted support enforcers do nothing while enable_support is off: next_steps then names the set_object_config call that turns it on with a (manual) support_type, for support only where painted.",
+      "description": "Paint an object's surface as the GUI's paint tools do: filament colours for a multi-colour print, support enforcers and blockers, the seam, or fuzzy skin -- per-triangle data, the same the paint gizmos write. To put a whole object or volume on one filament, use set_object_filament. mode selects which: color (multi-material / MMU segmentation), support, seam, fuzzy_skin or texture. texture paints where one texture displacement layer applies (texture_layer: the layer's slot; state painted or none). selection selects where: bands along a plate axis (an even split across a list of filaments, or explicit ranges), a box, a sphere, the whole volume, or visible: the facets seen from `view` (front-facing and not hidden by the object's other facets), as the texture panel's Project only on visible does, in any mode. connected fills the surface region around a seed without crossing an edge sharper than `angle` -- the way to paint a feature such as a bag or a sleeve; component paints one shell by id; state repaints every facet now in one state (match_filament, or match_state outside colour mode) with filament / state and leaves the rest, e.g. everything painted with filament 1 becomes filament 3 (remap_paint renumbers several at once). Very large meshes (millions of facets) take seconds to minutes; the work runs off the GUI thread, but the bridge's ORCAMCP_TIMEOUT (default 120 s) may still need raising. ALL COORDINATES ARE PLATE MILLIMETRES -- the same frame get_object_info reports its bounding_box and position in, not object-local coordinates. But for the numbers, use THIS call's own bounding_box in the response (or get_object_paint's), not get_object_info's: that one spans every instance of the object, and matches this tool's, which is instance_id's alone, only when the object has one instance. A facet belongs to the band or region containing its centroid. Paint lives on the volume, so it applies to every instance; instance_id only says whose transform reads your coordinates. Verify with get_object_paint, undo with undo, reset with clear_object_paint. Painted support enforcers do nothing while enable_support is off: next_steps then names the set_object_config call that turns it on with a (manual) support_type, for support only where painted. A paint panel open in the app is closed first, as the user would close it (closed_toolbar_tool), since it would write its own copy of the paint over this one. Texture paint changes the mask only: nothing reaches the print until the layers are baked into the mesh.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1802,7 +1802,8 @@
                     "none",
                     "enforcer",
                     "blocker",
-                    "fuzzy_skin"
+                    "fuzzy_skin",
+                    "painted"
                   ],
                   "type": "string"
                 },
@@ -1869,7 +1870,8 @@
               "none",
               "enforcer",
               "blocker",
-              "fuzzy_skin"
+              "fuzzy_skin",
+              "painted"
             ],
             "type": "string"
           },
@@ -1879,7 +1881,8 @@
               "color",
               "support",
               "seam",
-              "fuzzy_skin"
+              "fuzzy_skin",
+              "texture"
             ],
             "type": "string"
           },
@@ -1903,6 +1906,7 @@
               "box",
               "sphere",
               "all",
+              "visible",
               "connected",
               "component",
               "state"
@@ -1926,18 +1930,59 @@
             "type": "object"
           },
           "state": {
-            "description": "State for selection=box/sphere/all/connected/component/state when mode is not color. fuzzy_skin accepts none and enforcer (spelled either 'enforcer' or 'fuzzy_skin'), never blocker.",
+            "description": "State for selection=box/sphere/all/visible/connected/component/state when mode is not color. fuzzy_skin accepts none and enforcer (spelled either 'enforcer' or 'fuzzy_skin'), never blocker; texture accepts none and painted.",
             "enum": [
               "none",
               "enforcer",
               "blocker",
-              "fuzzy_skin"
+              "fuzzy_skin",
+              "painted"
             ],
             "type": "string"
+          },
+          "texture_layer": {
+            "description": "mode=texture (required there): the slot of the texture displacement layer whose paint this writes; the layer must exist. Not for other modes.",
+            "maximum": 7,
+            "minimum": 0,
+            "type": "integer"
           },
           "to": {
             "description": "End of the even split in plate mm (default: the object's own extent). Ignored when explicit `bands` are given, which carry their own ranges.",
             "type": "number"
+          },
+          "view": {
+            "additionalProperties": false,
+            "description": "selection=visible: the view the facets are seen from. Give direction or vector.",
+            "properties": {
+              "direction": {
+                "description": "A named view, or current: the 3D view's camera now",
+                "enum": [
+                  "iso",
+                  "top",
+                  "bottom",
+                  "front",
+                  "back",
+                  "left",
+                  "right",
+                  "current"
+                ],
+                "type": "string"
+              },
+              "frame_layer": {
+                "description": "Only facets inside that texture layer's projection frame",
+                "maximum": 7,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "vector": {
+                "description": "[x, y, z]: the direction the view looks along, in plate axes",
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
           },
           "volume_id": {
             "description": "Part index within the object (0-based); omit, or pass -1, for every part",
@@ -1952,7 +1997,7 @@
         "type": "object"
       },
       "name": "paint_object",
-      "summary": "Paint color, support, seam, fuzzy skin"
+      "summary": "Paint color/support/seam/fuzzy/texture"
     },
     {
       "category": "Painting",

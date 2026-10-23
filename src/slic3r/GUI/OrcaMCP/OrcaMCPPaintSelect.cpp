@@ -3,9 +3,15 @@
 #include "OrcaMCPCommon.hpp"
 
 #include "libslic3r/AABBMesh.hpp"
+#include "libslic3r/TextureDisplacement.hpp"
+
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -403,6 +409,89 @@ bool parse_state_param(const nlohmann::json& params, PaintMode mode, const State
         return false;
     }
     return true;
+}
+
+namespace {
+
+// How far a ray starts off the surface, along its direction toward the viewer.
+constexpr double k_visible_ray_offset_mm = 1e-4;
+
+// A part's mesh for ray queries in its own frame, with the transform to and from the plate.
+struct Occluder
+{
+    std::unique_ptr<AABBMesh> aabb;
+    Transform3d               to_plate;
+    Transform3d               to_local;
+};
+
+// True when a ray from `origin` (plate mm) along `dir` (unit) meets `occluder` before `limit` mm (infinity: anywhere).
+bool ray_meets(const Occluder& occluder, const Vec3d& origin, const Vec3d& dir, double limit)
+{
+    const Vec3d local_dir = occluder.to_local.linear() * dir;
+    if (local_dir.squaredNorm() == 0.0)
+        return false;
+    const AABBMesh::hit_result hit = occluder.aabb->query_ray_hit(occluder.to_local * origin, local_dir.normalized());
+    if (!hit.is_hit())
+        return false;
+    return std::isinf(limit) || (occluder.to_plate * hit.position() - origin).norm() < limit;
+}
+
+} // namespace
+
+std::vector<FacetAssignment> assign_visible(const std::vector<PaintPlanVolume>& targets,
+                                            const std::vector<PaintPlanVolume>& occluder_volumes,
+                                            const VisibleView&                  view,
+                                            int                                 state)
+{
+    std::vector<Occluder> occluders;
+    for (const PaintPlanVolume& pv : occluder_volumes)
+        if (pv.mesh && !pv.mesh->its.indices.empty() && plate_transform_is_invertible(pv.to_plate))
+            occluders.push_back({std::make_unique<AABBMesh>(pv.mesh->its), pv.to_plate, pv.to_plate.inverse()});
+
+    const Vec3d forward = view.forward.squaredNorm() > 0.0 ? Vec3d(view.forward.normalized()) : Vec3d(-Vec3d::UnitZ());
+    std::vector<FacetAssignment> out;
+    for (const PaintPlanVolume& pv : targets) {
+        const indexed_triangle_set& its = pv.mesh->its;
+        FacetAssignment             assignment;
+        assignment.states.assign(its.indices.size(), -1);
+        if (plate_transform_is_invertible(pv.to_plate)) {
+            const Matrix3d normal_matrix = pv.to_plate.linear().inverse().transpose();
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, its.indices.size()), [&](const tbb::blocked_range<size_t>& range) {
+                for (size_t f = range.begin(); f < range.end(); ++f) {
+                    const Vec3i32& face = its.indices[f];
+                    const Vec3d    a    = its.vertices[face[0]].cast<double>();
+                    const Vec3d    b    = its.vertices[face[1]].cast<double>();
+                    const Vec3d    c    = its.vertices[face[2]].cast<double>();
+                    const Vec3d    normal = normal_matrix * (b - a).cross(c - a);
+                    if (normal.squaredNorm() < 1e-20)
+                        continue; // a degenerate facet has no facing
+                    const Vec3d centroid = pv.to_plate * ((a + b + c) / 3.0);
+                    const Vec3d seen_along = view.ortho ? forward : Vec3d(centroid - view.eye);
+                    if (normal.dot(seen_along) >= 0.0)
+                        continue; // facing away
+                    if (view.frame) {
+                        Vec2f uv;
+                        if (!project_uv_projective(*view.frame, (view.plate_to_frame * centroid).cast<float>(), uv) ||
+                            uv.x() < 0.f || uv.x() > 1.f || uv.y() < 0.f || uv.y() > 1.f)
+                            continue;
+                    }
+                    const Vec3d toward = view.ortho ? Vec3d(-forward) : Vec3d(view.eye - centroid);
+                    if (toward.squaredNorm() == 0.0)
+                        continue;
+                    const Vec3d    dir    = toward.normalized();
+                    const Vec3d    origin = centroid + dir * k_visible_ray_offset_mm;
+                    const double   limit  = view.ortho ? std::numeric_limits<double>::infinity() : toward.norm();
+                    const bool     hidden = std::any_of(occluders.begin(), occluders.end(),
+                                                    [&](const Occluder& o) { return ray_meets(o, origin, dir, limit); });
+                    if (!hidden)
+                        assignment.states[f] = state;
+                }
+            });
+        }
+        assignment.unassigned = int(std::count(assignment.states.begin(), assignment.states.end(), -1));
+        out.push_back(std::move(assignment));
+    }
+    return out;
 }
 
 }}} // namespace Slic3r::GUI::OrcaMCP

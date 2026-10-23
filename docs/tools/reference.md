@@ -3586,18 +3586,22 @@ the other.
 
 ### paint_object
 Paint an object's surface as the GUI's paint tools do: filament colours for a multi-colour print,
-support enforcers and blockers, the seam, or fuzzy skin -- per-triangle paint, the same data the paint
-gizmos write. To put a whole object or volume on one filament, use `set_object_filament`. Painted
+support enforcers and blockers, the seam, fuzzy skin, or the mask of a texture displacement layer --
+per-triangle paint, the same data the paint gizmos write. To put a whole object or volume on one filament, use `set_object_filament`. Painted
 support enforcers do nothing while `enable_support` is off; `next_steps` then names the
 `set_object_config` call that turns it on with a `(manual)` `support_type`, for support only where
-painted.
+painted. A paint panel open in the app (the colour, support, seam, fuzzy skin or texture panel) is
+closed first, in every mode, as the user would close it: it would otherwise write its own copy of
+the paint over this one when it next flushes. The answer's `closed_toolbar_tool` names it.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `object_id` | integer | Yes | Object index (0-based) |
-| `selection` | string | Yes | `bands`, `box`, `sphere`, `all`, `connected`, `component` or `state` |
-| `mode` | string | No | `color` (default), `support`, `seam`, `fuzzy_skin` |
+| `selection` | string | Yes | `bands`, `box`, `sphere`, `all`, `visible`, `connected`, `component` or `state` |
+| `mode` | string | No | `color` (default), `support`, `seam`, `fuzzy_skin`, `texture` |
+| `texture_layer` | integer 0-7 | `texture` | The slot of the texture displacement layer whose paint this writes. The object must have a layer in that slot. Refused with any other mode |
+| `view` | object | `visible` | `{direction, vector, frame_layer}`: `direction` is a named view (`iso`, `top`, `bottom`, `front`, `back`, `left`, `right`) or `current` (the 3D view's camera now), `vector` is `[x, y, z]`, the direction the view looks along in plate axes (give one of the two); `frame_layer` (0-7) keeps only the facets inside that texture layer's projection frame |
 | `volume_id` | integer | No | Part index (0-based); omit or `-1` for every model part |
 | `instance_id` | integer | No | Whose transform reads your coordinates (default 0) |
 | `axis` | string | `bands` | `x`, `y` or `z` — the plate axis the bands run along |
@@ -3611,11 +3615,24 @@ painted.
 | `component` | integer | `component` | A shell id from `get_object_components`. Needs `volume_id` when the object has several parts |
 | `filament` | integer | `box`/`sphere`/`all`/`connected`/`component`/`state` + `color` | 1-based slot; `0` = unpainted |
 | `match_filament` | integer | `state` + `color` | Repaint every facet now painted with this filament (`0` = the unpainted facets) |
-| `match_state` | string | `state`, non-color | Repaint every facet now in this state: `none`, `enforcer`, `blocker` (`fuzzy_skin` for `enforcer` in that mode) |
-| `state` | string | `box`/`sphere`/`all`/`connected`/`component`/`state`, non-color | `none`, `enforcer`, `blocker`; in `fuzzy_skin` mode, `fuzzy_skin` is also accepted as a synonym for `enforcer` (there is no `blocker`) |
+| `match_state` | string | `state`, non-color | Repaint every facet now in this state: `none`, `enforcer`, `blocker` (`fuzzy_skin` for `enforcer` in that mode, `painted` in `texture`) |
+| `state` | string | `box`/`sphere`/`all`/`visible`/`connected`/`component`/`state`, non-color | `none`, `enforcer`, `blocker`; in `fuzzy_skin` mode, `fuzzy_skin` is also accepted as a synonym for `enforcer` (there is no `blocker`); in `texture` mode `painted` (or `enforcer`) and `none` (there is no `blocker`) |
 | `replace` | boolean | No | `true` (default) discards this mode's existing paint first. `selection: state` always keeps the rest; `replace: true` is refused there |
 
 **Notes:**
+- **Texture layers.** `mode: texture` writes the mask of one texture displacement layer (`texture_layer`, its
+  slot): where the layer applies is where its mask is painted (`state: painted`), and `state: none` unpaints.
+  It changes the mask only; nothing reaches the print until the layers are baked into the mesh. It is one
+  undo step, refused while an arrange, orient or bake runs or when the slot holds no layer. The answer
+  adds `texture_layer`, `needs_bake` (some layer of the object is painted, so a bake would change the
+  mesh) and, when the layer is now painted on no part, a `next_steps` entry that paints it on the whole object.
+  <!-- TODO(T6/T8): name get_texture_displacement and bake_texture_displacement here once they exist. -->
+- **`visible`** paints the facets seen from `view`, in any mode: a facet whose normal faces the view
+  (from the eye under a perspective `current` camera, along the view direction otherwise) and that no
+  facet of any model part of the object hides (a ray from its centroid toward the viewer, started
+  1e-4 mm off the surface). It is what the texture panel's "Project only on visible" selects. A named
+  view or `vector` is orthographic; `current` is the 3D view's camera as it is now. With `frame_layer`
+  a facet must also project inside that layer's frame (the layer must have one).
 - An even split (`filaments`) is colour-only. The other three modes take explicit `bands`
   with a `state`, because alternating enforcer and blocker along an axis means nothing.
 - `fuzzy_skin` has no `blocker`: `EnforcerBlockerType::FUZZY_SKIN` is an alias of `ENFORCER`.
@@ -3697,7 +3714,8 @@ paint_object  {"object_id": 0, "selection": "connected", "seed": {"point": [129.
  "bands": [{"from": 0, "to": 12, "state": "enforcer"}]}
 ```
 
-**Response includes:** `mode`, `selection`, `coordinate_frame` (always `"plate"`),
+**Response includes:** `mode`, `selection`, `closed_toolbar_tool` (when a paint panel was open and
+was closed first), `coordinate_frame` (always `"plate"`),
 `bounding_box` (the plate-frame box of exactly the volumes this call addressed, for
 `instance_id` — the same field name and shape `get_object_paint` reports; band from this,
 not from `get_object_info`'s), `instance_id`, `replace`, `annotation_changed`,
@@ -4461,6 +4479,7 @@ nothing to suggest has no `next_steps`.
 | `render_plate_view`, on each view whose `uniform_image` is true (beside its `hint`) | `get_scene_info` | nothing printable on that plate was drawn |
 | | `render_plate_view` with `{plate_index, save_to_file: true}` | the plate's objects were drawn but the camera looked elsewhere: no views gives a contact sheet fitted to the plate |
 | `paint_object` with `mode: support` | `set_object_config` for that object: `enable_support` `"1"` and `support_type` `normal(manual)` (or `tree(manual)` when its type is a tree one), for support only where painted | the object has painted enforcers and `enable_support` is off for it, so they do nothing (`info_messages` says so too). Not for blockers alone or erased paint: turning support on is the opposite of what a blocker asks; and not with an `(auto)` type, which would also support every other overhang |
+| `paint_object` with `mode: texture` | `paint_object` with `mode: texture`, that `texture_layer`, `selection: all`, `state: painted` | the layer is painted on no part of the object, so it applies nowhere |
 | `split_object` `to: "parts"` | `get_object_components` for that object | the volume became two or more parts: their sizes, to find a fragment (`delete_object` with `volume_id` deletes one) |
 | `split_object` `to: "objects"`, `merge_parts` | `get_mesh_health`, `get_object_components` | as for `load_model`: a new object with the mesh warning icon, or a part of several shells |
 | `add_volume` | `move_object` with `object_id` and `volume_id` | a primitive: it stands beside the object |

@@ -134,6 +134,11 @@ std::vector<NextStep> uniform_image_next_steps(size_t model_volumes, size_t draw
 std::vector<NextStep> support_paint_next_steps(int object_id, bool support_enabled, bool enforcers_painted,
                                                const std::string& support_type);
 
+// What a texture layer's paint leads to: a layer painted on no part applies nowhere, so paint_object paints it on
+// the whole object (a mask is painted with state painted). None once it is painted.
+// TODO(T8): the bake step (bake_texture_displacement) comes with that tool.
+std::vector<NextStep> texture_paint_next_steps(int object_id, int slot, bool painted);
+
 // What printer_control's answer to a set_* action (filtration, fans, print speed, Z offset) leads to:
 // get_printer_status, whose printer.controls reads back what the printer now reports -- it takes a moment
 // to apply a command, as the Device page shows by waiting for the next status.

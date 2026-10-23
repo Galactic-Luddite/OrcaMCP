@@ -328,6 +328,17 @@ TEST_CASE("Blockers, erased support paint, or supports already on point nowhere"
     CHECK(support_paint_next_steps(3, /*support_enabled=*/true, /*enforcers_painted=*/true, "normal(auto)").empty());
 }
 
+TEST_CASE("A texture layer painted nowhere points at painting it", "[McpNextSteps][orcamcp]")
+{
+    const std::vector<NextStep> steps = texture_paint_next_steps(2, 3, false);
+    REQUIRE(steps.size() == 1);
+    CHECK(steps[0].tool == "paint_object");
+    CHECK(steps[0].arguments == json{{"object_id", 2}, {"mode", "texture"}, {"texture_layer", 3}, {"selection", "all"}, {"state", "painted"}});
+    CHECK(mentions(steps[0].why, "texture layer 3 of object 2"));
+    CHECK(unusable(steps[0]) == std::nullopt);
+    CHECK(texture_paint_next_steps(2, 3, true).empty());
+}
+
 TEST_CASE("A split to parts points at get_object_components, to find a fragment among the pieces", "[McpNextSteps][orcamcp]")
 {
     const std::vector<NextStep> steps = split_parts_next_steps(4, 1, {1, 2, 3});
@@ -519,6 +530,8 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
         steps.push_back(std::move(step));
     for (NextStep& step : split_parts_next_steps(0, 0, {0, 1}))
         steps.push_back(std::move(step));
+    for (NextStep& step : texture_paint_next_steps(0, 1, false))
+        steps.push_back(std::move(step));
     for (NextStep& step : new_volume_next_steps(0, 1, "modifier", true))
         steps.push_back(std::move(step));
     for (NextStep& step : assembled_next_steps(0))
@@ -550,7 +563,7 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
             steps.push_back(std::move(step));
     for (NextStep& step : repair_timed_out_next_steps({4, 7}))
         steps.push_back(std::move(step));
-    REQUIRE(steps.size() == 35);
+    REQUIRE(steps.size() == 36);
 
     const mcp_tool_references::ToolNames names(OrcaMCPServer::registered_tools());
     json                                 response = json::object();

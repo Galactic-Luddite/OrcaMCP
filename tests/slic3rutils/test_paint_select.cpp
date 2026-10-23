@@ -2,9 +2,12 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "slic3r/GUI/OrcaMCP/OrcaMCPPaintSelect.hpp"
+#include "slic3r/GUI/OrcaMCP/OrcaMCPTextureDisplacement.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include <algorithm>
+#include <array>
+#include <memory>
 #include <vector>
 
 // The geometry behind "paint her bag": which triangles form one shell, which triangle a point or
@@ -502,4 +505,89 @@ TEST_CASE("assign_connected refuses a seed facet the mesh does not have", "[orca
                                                   kDefaultSeedFillAngleDeg, 5);
     CHECK(none.states.empty());
     CHECK(none.unassigned == 0);
+}
+
+// ---- selection "visible" ------------------------------------------------------------------------
+
+namespace {
+
+PaintPlanVolume plan_volume(const indexed_triangle_set& its, const Transform3d& to_plate, int index)
+{
+    PaintPlanVolume pv;
+    pv.index     = index;
+    pv.volume_id = index;
+    pv.mesh      = std::make_shared<const TriangleMesh>(its);
+    pv.to_plate  = to_plate;
+    return pv;
+}
+
+int selected(const FacetAssignment& assignment)
+{
+    return int(std::count_if(assignment.states.begin(), assignment.states.end(), [](int s) { return s >= 0; }));
+}
+
+} // namespace
+
+TEST_CASE("A cube seen from the top has its two top facets visible", "[PaintSelect][orcamcp]")
+{
+    const std::vector<PaintPlanVolume> cube = {plan_volume(Slic3r::its_make_cube(10., 10., 10.), Transform3d::Identity(), 0)};
+    VisibleView view;
+    view.forward = -Vec3d::UnitZ();
+    const std::vector<FacetAssignment> out = assign_visible(cube, cube, view, 1);
+    REQUIRE(out.size() == 1);
+    CHECK(selected(out[0]) == 2);
+    CHECK(out[0].unassigned == 10);
+    for (size_t f = 0; f < out[0].states.size(); ++f)
+        if (out[0].states[f] >= 0) {
+            const Vec3d n = facet_normal_plate(cube[0].mesh->its, int(f), Transform3d::Identity());
+            CHECK(n.z() > 0.99);
+        }
+}
+
+TEST_CASE("A facet another part hides is not visible, and the part in front is", "[PaintSelect][orcamcp]")
+{
+    // The front face (y = 0) is seen from the front (looking along +Y); a block in front of the left half hides the
+    // facet behind it. Both parts are occluders, only the big cube is painted.
+    const PaintPlanVolume big   = plan_volume(Slic3r::its_make_cube(10., 10., 10.), Transform3d::Identity(), 0);
+    const PaintPlanVolume block = plan_volume(Slic3r::its_make_cube(5., 3., 10.), Transform3d(Eigen::Translation3d(0., -5., 0.)), 1);
+    VisibleView view;
+    view.forward = Vec3d::UnitY();
+
+    const std::vector<FacetAssignment> alone = assign_visible({big}, {big}, view, 1);
+    CHECK(selected(alone[0]) == 2);
+    const std::vector<FacetAssignment> behind = assign_visible({big}, {big, block}, view, 1);
+    CHECK(selected(behind[0]) == 1);
+    // The block's own back-facing facets are not seen, its front ones are.
+    const std::vector<FacetAssignment> both = assign_visible({big, block}, {big, block}, view, 1);
+    REQUIRE(both.size() == 2);
+    CHECK(selected(both[0]) == 1);
+    CHECK(selected(both[1]) == 2);
+}
+
+TEST_CASE("A projection frame keeps only the visible facets inside it", "[PaintSelect][orcamcp]")
+{
+    const std::vector<PaintPlanVolume> cube = {plan_volume(Slic3r::its_make_cube(10., 10., 10.), Transform3d::Identity(), 0)};
+    VisibleView view;
+    view.forward = -Vec3d::UnitZ();
+    // A frame over x 0..5, y 0..10 of the top face: one of its two facets has its centroid there.
+    view.frame = orthographic_frame_matrix(Vec3d::UnitX(), Vec3d::UnitY(), Vec3d(2.5, 5., 0.), 5., 10., Transform3d::Identity());
+    const std::vector<FacetAssignment> out = assign_visible(cube, cube, view, 1);
+    CHECK(selected(out[0]) == 1);
+}
+
+TEST_CASE("Under a perspective view only what lies between a facet and the eye hides it", "[PaintSelect][orcamcp]")
+{
+    const PaintPlanVolume cube = plan_volume(Slic3r::its_make_cube(10., 10., 10.), Transform3d::Identity(), 0);
+    VisibleView view;
+    view.ortho   = false;
+    view.forward = -Vec3d::UnitZ();
+    view.eye     = Vec3d(5., 5., 50.);
+    CHECK(selected(assign_visible({cube}, {cube}, view, 1)[0]) == 2);
+    // An eye below the top face sees it from behind: nothing on the top, and the bottom faces it instead.
+    view.eye = Vec3d(5., 5., -50.);
+    const FacetAssignment below = assign_visible({cube}, {cube}, view, 1)[0];
+    CHECK(selected(below) == 2);
+    for (size_t f = 0; f < below.states.size(); ++f)
+        if (below.states[f] >= 0)
+            CHECK(facet_normal_plate(cube.mesh->its, int(f), Transform3d::Identity()).z() < -0.99);
 }

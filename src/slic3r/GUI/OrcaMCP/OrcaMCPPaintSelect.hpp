@@ -1,6 +1,7 @@
 // src/slic3r/GUI/OrcaMCP/OrcaMCPPaintSelect.hpp
 #pragma once
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -159,6 +160,31 @@ FacetAssignment assign_connected(const TriangleMesh& mesh,
                                  const Vec3f&        seed_point_local,
                                  double              angle_deg,
                                  int                 state);
+
+// ---- What a view sees ------------------------------------------------------------------------
+
+// A view as paint_object's selection "visible" reads it, in plate axes. Under an orthographic view every facet is
+// seen along `forward`; under a perspective one along the line from `eye` to its centroid (the texture panel's
+// Project only on visible: Pass 1 of select_visible_faces).
+struct VisibleView
+{
+    bool  ortho   = true;
+    Vec3d forward = -Vec3d::UnitZ(); // the direction the view looks along
+    Vec3d eye     = Vec3d::Zero();   // perspective only
+    // Only facets whose centroid, in the frame's own coordinates (`plate_to_frame` applied to plate mm), projects
+    // inside [0,1]^2 through project_uv_projective: a texture layer's projection frame.
+    std::optional<std::array<float, 12>> frame;
+    Transform3d plate_to_frame = Transform3d::Identity();
+};
+
+// Any thread. For each of `targets` (in order), `state` for every facet the view sees, -1 for every other: a facet
+// is seen when its plate normal faces the view and a ray from its centroid toward the viewer, 1e-4 mm clear of the
+// surface, meets no facet of any of `occluders` (every model part of the object, the targets among them; under a
+// perspective view only what lies between the facet and the eye). `unassigned` counts the facets not seen.
+std::vector<FacetAssignment> assign_visible(const std::vector<PaintPlanVolume>& targets,
+                                            const std::vector<PaintPlanVolume>& occluders,
+                                            const VisibleView&                  view,
+                                            int                                 state);
 
 // ---- remap_paint's mapping ----------------------------------------------------------------------
 //

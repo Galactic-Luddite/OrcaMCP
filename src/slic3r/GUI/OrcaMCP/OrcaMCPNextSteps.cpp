@@ -275,6 +275,20 @@ std::vector<NextStep> support_paint_next_steps(int object_id, bool support_enabl
               {"settings", {{{"key", "enable_support"}, {"value", "1"}}, {{"key", "support_type"}, {"value", manual}}}}}}};
 }
 
+std::vector<NextStep> texture_paint_next_steps(int object_id, int slot, bool painted)
+{
+    if (painted)
+        return {};
+    return {{"paint_object",
+             "texture layer " + std::to_string(slot) + " of object " + std::to_string(object_id) +
+                 " is painted nowhere, so it applies nowhere: paint where it goes",
+             {{"object_id", object_id},
+              {"mode", "texture"},
+              {"texture_layer", slot},
+              {"selection", "all"},
+              {"state", "painted"}}}};
+}
+
 namespace {
 
 // "instance 3" / "instances 3 and 4".
