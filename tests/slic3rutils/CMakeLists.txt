@@ -69,6 +69,7 @@ add_executable(${_TEST_NAME}_tests
     test_paint_select.cpp
     test_paint_remap.cpp
     test_mcp_texture_displacement.cpp
+    test_mcp_texture_files.cpp
     test_extrusion_features.cpp
     test_object_placement.cpp
     test_mcp_bed_exclusion.cpp
