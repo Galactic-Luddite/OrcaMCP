@@ -367,6 +367,10 @@ static constexpr const char* TEXTURE_DISPLACEMENT_KEY = "texture_displacement";
 // A part's own UV channel (ModelVolume::texture_uv), one attribute per triangle: the u, v pairs of its three
 // corners in the triangle's vertex order, "u1 v1 u2 v2 u3 v3". Written only for a part that has a channel. Readers
 // that do not know the attribute ignore it, as they do the paint attributes beside it.
+// The 3MF Materials and Properties extension (m:texture2dgroup of m:tex2coord, triangles naming pid/p1/p2/p3) is not
+// used: its texture2d must point at a real image in the package, and a part with UVs but no texture layer has none;
+// other programs would show that image as the surface colour, which is wrong for a height map; and a triangle carries
+// only one pid, which the existing colour and material resources already use.
 static constexpr const char* TEXTURE_UV_ATTR = "texture_uv";
 static constexpr const char* TEXTURE_DISPLACEMENT_DIR = "Metadata/texture_displacement/";
 // BBS
@@ -555,7 +559,7 @@ float bbs_get_attribute_value_float(const char** attributes, unsigned int attrib
     return value;
 }
 
-// Parses "u1 v1 u2 v2 u3 v3". False if any of the six is missing or not a finite number.
+// Parses "u1 v1 u2 v2 u3 v3". False if any of the six is missing or not a finite number, or if anything follows them.
 static bool parse_texture_uv(const char *text, std::array<float, 6> &out)
 {
     const char *end = text + strlen(text);
@@ -567,7 +571,9 @@ static bool parse_texture_uv(const char *text, std::array<float, 6> &out)
             return false;
         text = result.ptr;
     }
-    return true;
+    while (text < end && (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r'))
+        ++text;
+    return text == end;
 }
 
 int bbs_get_attribute_value_int(const char** attributes, unsigned int attributes_size, const char* attribute_key)
@@ -5627,11 +5633,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     //FIXME do the mesh fixing?
                 }
             }
-            bool uv_flipped = false;
-            if (triangle_mesh.volume() < 0) {
+            if (triangle_mesh.volume() < 0)
                 triangle_mesh.flip_triangles();
-                uv_flipped = true;
-            }
 
 			ModelVolume* volume = object.add_volume(std::move(triangle_mesh));
             // stores the volume matrix taken from the metadata, if present
@@ -5673,7 +5676,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 facets.shrink_to_fit();
                 facets.touch();
             }
-            volume->texture_uv = geometry.texture_uv_of(volume_data.first_triangle_id, triangles_count, uv_flipped);
             volume->set_type(volume_data.part_type);
 
             // apply the remaining volume's metadata
@@ -7887,12 +7889,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     output_buffer += "=\"";
                     for (int corner = 0; corner < 3; ++corner) {
                         const Vec2f &uv = volume->texture_uv[size_t(i) * 3 + corner];
-                        char *ptr = format_coordinate(uv.x(), buf);
-                        *ptr++ = ' ';
-                        ptr = format_coordinate(uv.y(), ptr);
-                        if (corner < 2)
-                            *ptr++ = ' ';
-                        *ptr = '\0';
+                        // 7 digits: a UV is a position on an image, finer than 1e-6 of it is not meaningful.
+                        snprintf(buf, sizeof(buf), corner < 2 ? "%.7g %.7g " : "%.7g %.7g", uv.x(), uv.y());
                         output_buffer += buf;
                     }
                     output_buffer += "\"";

@@ -918,7 +918,7 @@ TEST_CASE("A channel that is missing on some triangles is dropped, not guessed",
 
 TEST_CASE("A malformed UV value drops the channel and still loads", "[3mf][Regression]")
 {
-    const std::string bad = GENERATE(std::string("1 2 3"), std::string("a b c d e f"), std::string("nan 0 0 0 0 0"));
+    const std::string bad = GENERATE(std::string("1 2 3"), std::string("a b c d e f"), std::string("nan 0 0 0 0 0"), std::string("0 0 0 0 0 0 0"));
     INFO("value " << bad);
 
     Model        source;
@@ -975,6 +975,45 @@ TEST_CASE("Volumes sharing a mesh keep their own UV channel", "[3mf]")
     check_same_texture_uv(*model.objects[0]->volumes.front(), *first);
     check_same_texture_uv(*model.objects[1]->volumes.front(), *second);
     CHECK_FALSE(model.objects[2]->volumes.front()->has_texture_uv());
+}
+
+TEST_CASE("Volumes sharing an inside-out mesh keep their equal UV channel", "[3mf]")
+{
+    Model        source;
+    ModelObject* first_object = source.add_object();
+    TriangleMesh mesh         = make_cube(10., 10., 10.);
+    mesh.flip_triangles();
+    REQUIRE(mesh.volume() < 0);
+    ModelVolume* first = first_object->add_volume(std::move(mesh));
+    first_object->add_instance();
+    ModelVolume* second = source.add_object(*first_object)->volumes.front();
+    REQUIRE(second->mesh_ptr() == first->mesh_ptr());
+    give_texture_uv(*first);
+    second->texture_uv = first->texture_uv; // equal, so the exporter writes the mesh once
+
+    ScopedTemporaryFile temp(".3mf");
+    store_project(source, temp.string(),
+                  SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::ShareMesh);
+
+    ScopedTemporaryDir backup_dir("orca_texuv_dst");
+    Model              model;
+    REQUIRE(load_project(temp.string(), model, backup_dir));
+    REQUIRE(model.objects.size() == 2);
+    const ModelVolume& a = *model.objects[0]->volumes.front();
+    const ModelVolume& b = *model.objects[1]->volumes.front();
+    REQUIRE(a.has_texture_uv());
+    REQUIRE(b.has_texture_uv());
+    CHECK(its_volume(a.mesh().its) > 0); // flipped on load
+    // The loaded meshes have the same triangles, so the same corners carry the same coordinates.
+    REQUIRE(a.texture_uv.size() == b.texture_uv.size());
+    for (size_t i = 0; i < a.texture_uv.size(); ++i)
+        CHECK(a.texture_uv[i] == b.texture_uv[i]);
+    // Triangle t's corners 1 and 2 were swapped with the mesh's: corner 0 is still the source's.
+    for (size_t t = 0; t < 12; ++t) {
+        CHECK_THAT(a.texture_uv[t * 3].x(), Catch::Matchers::WithinAbs(first->texture_uv[t * 3].x(), 1e-6));
+        CHECK_THAT(a.texture_uv[t * 3 + 1].y(), Catch::Matchers::WithinAbs(first->texture_uv[t * 3 + 2].y(), 1e-6));
+        CHECK_THAT(a.texture_uv[t * 3 + 2].y(), Catch::Matchers::WithinAbs(first->texture_uv[t * 3 + 1].y(), 1e-6));
+    }
 }
 
 TEST_CASE("A texture displacement layer never loads its image from outside the project", "[3mf]")
