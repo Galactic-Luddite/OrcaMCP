@@ -1380,3 +1380,205 @@ TEST_CASE("an RGB image of grey pixels is the grayscale texture the library woul
     CHECK(coloured.has_color());
     CHECK(coloured.pixels == std::vector<std::uint8_t>{100, 101});
 }
+
+
+// ---- The bake and the mesh preparation ----
+
+TEST_CASE("a bake request reads its options and refuses what the panel cannot set", "[McpTexture][orcamcp]")
+{
+    std::string error;
+    const auto  none = read_bake_request({{"object_id", 0}}, error);
+    REQUIRE(none.has_value());
+    CHECK_FALSE(none->classic.has_value());
+    CHECK_FALSE(none->include_preview);
+
+    const auto full = read_bake_request({{"object_id", 0}, {"pipeline", "classic"}, {"resolution_mm", 0.5}, {"budget_k", 300}, {"classic_budget_k", 900},
+                                         {"displace_border", false}, {"smooth", {{"enabled", true}, {"strength", 40}, {"passes", 3}, {"ignore_outer_ring", false}}},
+                                         {"color_mix", false}, {"color_mix_count", 4}, {"color_denoise", 1}, {"include_preview", true}},
+                                        error);
+    REQUIRE(full.has_value());
+    CHECK(*full->classic);
+    CHECK_THAT(*full->resolution_mm, WithinAbs(0.5, 1e-6));
+    CHECK(*full->budget_k == 300);
+    CHECK(classic_bake_budget_k(*full) == 900);
+    CHECK(*full->smooth.passes == 3);
+    CHECK(full->include_preview);
+
+    const auto refused = [&](const json& params) {
+        std::string why;
+        CHECK_FALSE(read_bake_request(params, why).has_value());
+        return why;
+    };
+    CHECK(refused({{"pipeline", "fast"}}).find("default or classic") != std::string::npos);
+    CHECK(refused({{"resolution_mm", 5}}).find("0.02 to 2") != std::string::npos);
+    CHECK(refused({{"resolution_mm", "fine"}}).find("must be a number") != std::string::npos);
+    CHECK(refused({{"budget_k", 5000}}).find("0 to 4000") != std::string::npos);
+    CHECK(refused({{"budget_k", 1.5}}).find("integer") != std::string::npos);
+    CHECK(refused({{"classic_budget_k", 5}}).find("10 to 2000") != std::string::npos);
+    CHECK(refused({{"pipeline", "default"}, {"classic_budget_k", 500}}).find("classic pipeline") != std::string::npos);
+    CHECK(refused({{"smooth", {{"strength", 150}}}}).find("1 to 100") != std::string::npos);
+    CHECK(refused({{"smooth", {{"width", 1}}}}).find("has no key \"width\"") != std::string::npos);
+    CHECK(refused({{"color_mix_count", 40}}).find("1 to 32") != std::string::npos);
+}
+
+TEST_CASE("the stack options a response reports are accepted back as bake options", "[McpTexture][orcamcp]")
+{
+    TextureDisplacementOptions stored;
+    stored.pipeline_v2        = false;
+    stored.v2_refine_mm       = 0.4f;
+    stored.v2_max_triangles_k = 0;
+    stored.smooth_enabled     = true;
+    for (const bool automatic : {false, true}) {
+        if (automatic) {
+            stored.v2_refine_mm       = 0.f;
+            stored.v2_max_triangles_k = -1;
+        }
+        json arguments = stack_options_json(stored);
+        arguments["object_id"] = 0;
+        std::string error;
+        const auto  request = read_bake_request(arguments, error);
+        REQUIRE(request.has_value());
+        const TextureDisplacementOptions used = bake_options(TextureDisplacementOptions{}, *request);
+        CHECK_FALSE(bake_options_differ(used, stored));
+    }
+}
+
+TEST_CASE("a bake pins the Standard options unless the call says otherwise", "[McpTexture][orcamcp]")
+{
+    TextureDisplacementOptions stored;
+    stored.displace_border = false;
+    stored.smooth_enabled  = true;
+    stored.v2_refine_mm    = 0.7f;
+    std::string error;
+    const auto  request = read_bake_request({{"object_id", 0}}, error);
+    REQUIRE(request.has_value());
+    const TextureDisplacementOptions used = bake_options(stored, *request);
+    CHECK(used.displace_border);
+    CHECK_FALSE(used.smooth_enabled);
+    CHECK_THAT(used.v2_refine_mm, WithinAbs(0.7, 1e-6)); // what the call leaves out stays
+
+    const auto automatic = read_bake_request({{"object_id", 0}, {"resolution_mm", nullptr}, {"budget_k", -1}}, error);
+    REQUIRE(automatic.has_value());
+    const TextureDisplacementOptions auto_used = bake_options(stored, *automatic);
+    CHECK_THAT(auto_used.v2_refine_mm, WithinAbs(0., 1e-9));
+    CHECK(auto_used.v2_max_triangles_k == -1);
+    CHECK(bake_options_differ(used, auto_used));
+    TextureDisplacementOptions panel_state = used;
+    panel_state.active_slot = 3;
+    panel_state.panel_mode  = 1;
+    CHECK_FALSE(bake_options_differ(used, panel_state));
+}
+
+TEST_CASE("every bound of the bake and the preparation is the registered schema's minimum and maximum", "[McpTexture][orcamcp]")
+{
+    const auto& tools = OrcaMCPServer::registered_tools();
+    const json  bake = tools.at("bake_texture_displacement").input_schema.at("properties");
+    for (const char* key : {"classic_budget_k", "color_mix_count", "color_denoise"}) {
+        INFO(key);
+        CHECK_THAT(bake.at(key).at("minimum").get<double>(), WithinAbs(bake_setting_bound(key)->min, 1e-9));
+        CHECK_THAT(bake.at(key).at("maximum").get<double>(), WithinAbs(bake_setting_bound(key)->max, 1e-9));
+    }
+    for (const char* key : {"strength", "passes"}) {
+        INFO(key);
+        CHECK_THAT(bake.at("smooth").at("properties").at(key).at("minimum").get<double>(), WithinAbs(bake_setting_bound(key)->min, 1e-9));
+        CHECK_THAT(bake.at("smooth").at("properties").at(key).at("maximum").get<double>(), WithinAbs(bake_setting_bound(key)->max, 1e-9));
+    }
+    const json prepare = tools.at("prepare_texture_mesh").input_schema.at("properties");
+    for (const SettingBound& bound : prepare_setting_bounds()) {
+        INFO(bound.key);
+        CHECK_THAT(prepare.at(bound.key).at("minimum").get<double>(), WithinAbs(bound.min, 1e-9));
+        CHECK_THAT(prepare.at(bound.key).at("maximum").get<double>(), WithinAbs(bound.max, 1e-9));
+    }
+}
+
+TEST_CASE("a prepare request is held to its operation's arguments", "[McpTexture][orcamcp]")
+{
+    std::string error;
+    const auto  remesh = read_prepare_request({{"object_id", 0}, {"operation", "remesh"}, {"target_edge_mm", 0.8}, {"keep_sharp_edges", false}}, error);
+    REQUIRE(remesh.has_value());
+    const TextureDisplacementPrepareParams remesh_params = remesh_prepare_params(*remesh, 2.f);
+    CHECK_THAT(remesh_params.remesh_edge_mm, WithinAbs(0.8, 1e-6));
+    CHECK_THAT(remesh_params.remesh_sharp_deg, WithinAbs(0., 1e-9)); // sharp edges not kept
+    const auto defaults = read_prepare_request({{"object_id", 0}, {"operation", "remesh"}}, error);
+    CHECK_THAT(remesh_prepare_params(*defaults, 2.f).remesh_edge_mm, WithinAbs(2., 1e-6));
+    CHECK_THAT(remesh_prepare_params(*defaults, 2.f).remesh_sharp_deg, WithinAbs(40., 1e-6));
+
+    const auto adaptive = read_prepare_request({{"object_id", 0}, {"operation", "subdivide"}, {"follow_texture", true}, {"budget_k", 100}}, error);
+    REQUIRE(adaptive.has_value());
+    CHECK_FALSE(adaptive->uniform());
+    const TextureDisplacementPrepareParams sub = subdivide_prepare_params(*adaptive, 0.5f);
+    CHECK_THAT(sub.subdiv_target_mm, WithinAbs(0.5, 1e-6));
+    CHECK_THAT(sub.subdiv_border_mm, WithinAbs(0.4, 1e-6));
+    CHECK_THAT(sub.subdiv_color_edge_mm, WithinAbs(0.3, 1e-6));
+    CHECK(sub.subdiv_feature);
+    CHECK(sub.subdiv_added_triangles == 100000);
+
+    const auto uniform = read_prepare_request({{"object_id", 0}, {"operation", "subdivide"}, {"adaptive", false}, {"steps", 2}}, error);
+    REQUIRE(uniform.has_value());
+    CHECK(uniform->uniform());
+
+    const auto refused = [&](const json& params) {
+        std::string why;
+        CHECK_FALSE(read_prepare_request(params, why).has_value());
+        return why;
+    };
+    CHECK(refused({{"object_id", 0}}).find("operation is required") != std::string::npos);
+    CHECK(refused({{"operation", "tidy"}}).find("remesh, subdivide or smooth") != std::string::npos);
+    CHECK(refused({{"operation", "remesh"}, {"steps", 2}}).find("steps does not apply to remesh") != std::string::npos);
+    CHECK(refused({{"operation", "subdivide"}, {"target_edge_mm", 1}}).find("does not apply to subdivide") != std::string::npos);
+    CHECK(refused({{"operation", "subdivide"}, {"adaptive", false}, {"steps", 2}, {"max_edge_mm", 1}}).find("uniform subdivide") != std::string::npos);
+    CHECK(refused({{"operation", "subdivide"}, {"adaptive", false}}).find("needs steps") != std::string::npos);
+    CHECK(refused({{"operation", "subdivide"}, {"steps", 2}}).find("steps does not apply") != std::string::npos);
+    CHECK(refused({{"operation", "remesh"}, {"target_edge_mm", 50}}).find("0.1 to 20") != std::string::npos);
+    CHECK(refused({{"operation", "smooth"}, {"strength", 0}}).find("1 to 100") != std::string::npos);
+    const auto smooth = read_prepare_request({{"operation", "smooth"}, {"strength", 50}, {"passes", 4}, {"ignore_outer_ring", false}}, error);
+    REQUIRE(smooth.has_value());
+    const TextureDisplacementOptions smoothed = smooth_options(TextureDisplacementOptions{}, smooth->smooth);
+    CHECK_THAT(smoothed.smooth_strength, WithinAbs(0.5, 1e-6));
+    CHECK(smoothed.smooth_iterations == 4);
+    CHECK_FALSE(smoothed.smooth_skip_border);
+}
+
+TEST_CASE("the panel's seeds for the edge lengths come from the mesh's mean edge", "[McpTexture][orcamcp]")
+{
+    const indexed_triangle_set cube = its_make_cube(10., 10., 10.);
+    // A cube's triangles have edges of 10, 10 and 14.14: the mean is 11.38.
+    CHECK_THAT(default_remesh_edge_mm(cube), WithinAbs(11.38, 0.01));
+    CHECK_THAT(default_subdivide_edge_mm(cube), WithinAbs(5.69, 0.01));
+    CHECK_THAT(default_remesh_edge_mm(indexed_triangle_set{}), WithinAbs(1., 1e-9));
+    const indexed_triangle_set tiny = its_make_cube(0.02, 0.02, 0.02);
+    CHECK_THAT(default_remesh_edge_mm(tiny), WithinAbs(0.1, 1e-6));
+}
+
+TEST_CASE("a uniform subdivision is refused above the facet cap", "[McpTexture][orcamcp]")
+{
+    CHECK_FALSE(uniform_subdivision_refusal(100000, 2).has_value()); // 1.6 million
+    const auto refusal = uniform_subdivision_refusal(100000, 3);     // 6.4 million
+    REQUIRE(refusal.has_value());
+    CHECK(refusal->find("adaptive") != std::string::npos);
+}
+
+TEST_CASE("the bake's answers: parts, budget and mixed slots", "[McpTexture][orcamcp]")
+{
+    BakePartReport part;
+    part.volume_id = 1; part.name = "cube"; part.facets_before = 12; part.facets_after = 90000; part.baked = true; part.colored = true;
+    const json row = bake_part_json(part);
+    CHECK(row["facets_after"] == 90000);
+    CHECK(row["colored"] == true);
+
+    CHECK(bake_budget_json(0, 0).is_null());
+    CHECK(bake_budget_json(900000, 750000)["kept"] == 750000);
+
+    const json mixed = bake_mixed_filaments_json({1, 4}, 4);
+    REQUIRE(mixed.size() == 2);
+    CHECK(mixed[0]["slot"] == 2);
+    CHECK(mixed[0]["created"] == false);
+    CHECK(mixed[1]["slot"] == 5);
+    CHECK(mixed[1]["created"] == true);
+
+    CHECK(bake_undo_warning(1).find("delete_mixed_filament") != std::string::npos);
+    CHECK(bake_timed_out_message(105., true).find("ORCAMCP_TIMEOUT") != std::string::npos);
+    CHECK(bake_timed_out_message(105., true).find("classic_budget_k") != std::string::npos);
+    CHECK(bake_timed_out_message(105., false).find("classic_budget_k") == std::string::npos);
+    CHECK(bake_no_displacement_message().find("paint was kept") != std::string::npos);
+}

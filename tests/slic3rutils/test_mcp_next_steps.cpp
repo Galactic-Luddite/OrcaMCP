@@ -330,13 +330,48 @@ TEST_CASE("Blockers, erased support paint, or supports already on point nowhere"
 
 TEST_CASE("A texture layer painted nowhere points at painting it", "[McpNextSteps][orcamcp]")
 {
-    const std::vector<NextStep> steps = texture_paint_next_steps(2, 3, false);
+    const std::vector<NextStep> steps = texture_paint_next_steps(2, 3, false, false);
     REQUIRE(steps.size() == 1);
     CHECK(steps[0].tool == "paint_object");
     CHECK(steps[0].arguments == json{{"object_id", 2}, {"mode", "texture"}, {"texture_layer", 3}, {"selection", "all"}, {"state", "painted"}});
     CHECK(mentions(steps[0].why, "texture layer 3 of object 2"));
     CHECK(unusable(steps[0]) == std::nullopt);
-    CHECK(texture_paint_next_steps(2, 3, true).empty());
+    CHECK(texture_paint_next_steps(2, 3, true, false).empty());
+}
+
+TEST_CASE("Painted texture layers point at baking them, after the layer still to paint", "[McpNextSteps][orcamcp]")
+{
+    const std::vector<NextStep> bake = bake_next_steps(2, true);
+    REQUIRE(bake.size() == 1);
+    CHECK(bake[0].tool == "bake_texture_displacement");
+    CHECK(bake[0].arguments == json{{"object_id", 2}});
+    CHECK(mentions(bake[0].why, "object 2"));
+    CHECK(unusable(bake[0]) == std::nullopt);
+    CHECK(bake_next_steps(2, false).empty());
+
+    const std::vector<NextStep> both = texture_paint_next_steps(2, 3, false, true);
+    REQUIRE(both.size() == 2);
+    CHECK(both[0].tool == "paint_object");
+    CHECK(both[1].tool == "bake_texture_displacement");
+    const std::vector<NextStep> only_bake = texture_paint_next_steps(2, 3, true, true);
+    REQUIRE(only_bake.size() == 1);
+    CHECK(only_bake[0].tool == "bake_texture_displacement");
+}
+
+TEST_CASE("A bake points at slicing, at the mixed slots it added and at paint it left", "[McpNextSteps][orcamcp]")
+{
+    const std::vector<NextStep> plain = baked_texture_next_steps(1, false, 0);
+    REQUIRE(plain.size() == 1);
+    CHECK(plain[0].tool == "slice_all");
+    CHECK(unusable(plain[0]) == std::nullopt);
+
+    const std::vector<NextStep> all = baked_texture_next_steps(1, true, 2);
+    REQUIRE(all.size() == 3);
+    CHECK(all[1].tool == "get_filaments");
+    CHECK(mentions(all[1].why, "2 mixed filament slots"));
+    CHECK(all[2].tool == "bake_texture_displacement");
+    for (const NextStep& step : all)
+        CHECK(unusable(step) == std::nullopt);
 }
 
 TEST_CASE("A split to parts points at get_object_components, to find a fragment among the pieces", "[McpNextSteps][orcamcp]")
@@ -530,7 +565,9 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
         steps.push_back(std::move(step));
     for (NextStep& step : split_parts_next_steps(0, 0, {0, 1}))
         steps.push_back(std::move(step));
-    for (NextStep& step : texture_paint_next_steps(0, 1, false))
+    for (NextStep& step : texture_paint_next_steps(0, 1, false, true))
+        steps.push_back(std::move(step));
+    for (NextStep& step : baked_texture_next_steps(0, true, 1))
         steps.push_back(std::move(step));
     for (NextStep& step : new_volume_next_steps(0, 1, "modifier", true))
         steps.push_back(std::move(step));
@@ -563,7 +600,7 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
             steps.push_back(std::move(step));
     for (NextStep& step : repair_timed_out_next_steps({4, 7}))
         steps.push_back(std::move(step));
-    REQUIRE(steps.size() == 36);
+    REQUIRE(steps.size() == 40);
 
     const mcp_tool_references::ToolNames names(OrcaMCPServer::registered_tools());
     json                                 response = json::object();

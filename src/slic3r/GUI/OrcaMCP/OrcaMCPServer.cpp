@@ -6112,6 +6112,7 @@ void OrcaMCPServer::register_builtin_tools()
     register_printer_tools();
     register_paint_tools();
     register_texture_tools();
+    register_texture_bake_tools();
     register_mesh_tools();
     register_part_tools();
     register_arrange_tools();

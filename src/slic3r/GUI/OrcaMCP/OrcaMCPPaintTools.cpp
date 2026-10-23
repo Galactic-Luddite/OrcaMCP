@@ -267,9 +267,8 @@ void add_texture_answer(nlohmann::json& result, const PaintTarget& target, const
         return;
     result["texture_layer"] = channel.texture_layer;
     result["needs_bake"]    = needs_bake_fast(*target.object, texture_stack_owner(*target.object));
-    // TODO(T8): bake_texture_displacement's step comes with that tool.
     add_next_steps(result, texture_paint_next_steps(target.object_id, channel.texture_layer,
-                                                    slot_painted_fast(*target.object, channel.texture_layer)));
+                                                    slot_painted_fast(*target.object, channel.texture_layer), result["needs_bake"].get<bool>()));
 }
 
 // The plate-frame bounding box of exactly the volumes a call paints, so a band range defaulted

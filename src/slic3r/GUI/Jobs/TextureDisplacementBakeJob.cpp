@@ -434,17 +434,6 @@ template<class T> std::string serialized(const T &value)
     return os.str();
 }
 
-// The bake reads a layer's live image adjustments, which the archive leaves out.
-bool same_layers(const std::vector<TextureDisplacementLayer> &a, const std::vector<TextureDisplacementLayer> &b)
-{
-    if (a.size() != b.size() || serialized(a) != serialized(b))
-        return false;
-    for (size_t i = 0; i < a.size(); ++i)
-        if (!(a[i].preview_adjust == b[i].preview_adjust))
-            return false;
-    return true;
-}
-
 // Options as the bake reads them: where the panel was left (active layer, mode) is not one of them.
 bool same_bake_options(TextureDisplacementOptions a, TextureDisplacementOptions b)
 {
@@ -453,6 +442,17 @@ bool same_bake_options(TextureDisplacementOptions a, TextureDisplacementOptions 
     return serialized(a) == serialized(b);
 }
 } // namespace
+
+// The bake reads a layer's live image adjustments, which the archive leaves out.
+bool same_texture_layers(const std::vector<TextureDisplacementLayer> &a, const std::vector<TextureDisplacementLayer> &b)
+{
+    if (a.size() != b.size() || serialized(a) != serialized(b))
+        return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (!(a[i].preview_adjust == b[i].preview_adjust))
+            return false;
+    return true;
+}
 
 bool texture_bake_applies_to(const Model &model, const TextureDisplacementBakeInput &input)
 {
@@ -473,7 +473,7 @@ bool texture_bake_applies_to(const Model &model, const TextureDisplacementBakeIn
             live.texture_anchor != captured.texture_anchor ||
             live.volume_to_world.matrix() != captured.volume_to_world.matrix() || live.model_uv != captured.model_uv ||
             live.base_mesh.indices != captured.base_mesh.indices || live.base_mesh.vertices != captured.base_mesh.vertices ||
-            live.facets_data != captured.facets_data || !same_layers(live.layers, captured.layers) ||
+            live.facets_data != captured.facets_data || !same_texture_layers(live.layers, captured.layers) ||
             !same_bake_options(live.options, captured.options))
             return false;
     }

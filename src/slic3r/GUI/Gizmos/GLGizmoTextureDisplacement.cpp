@@ -6496,6 +6496,22 @@ static constexpr float STD_SUBDIV_BORDER_MM   = 0.4f;
 // way a slightly coarse relief transition does not - and it costs triangles along an outline only.
 static constexpr float STD_SUBDIV_COLOR_MM    = 0.25f;
 
+TextureDisplacementPrepareParams GLGizmoTextureDisplacement::standard_prepare_params(int budget_k)
+{
+    TextureDisplacementPrepareParams params;
+    params.remesh_edge_mm         = STD_REMESH_EDGE_MM;
+    params.remesh_sharp_deg       = STD_REMESH_SHARP_DEG;
+    params.subdiv_target_mm       = STD_SUBDIV_MAX_EDGE_MM;
+    params.subdiv_detail_mm       = STD_SUBDIV_DETAIL_MM;
+    params.subdiv_min_edge_mm     = STD_SUBDIV_MIN_EDGE_MM;
+    params.subdiv_border_mm       = STD_SUBDIV_BORDER_MM;
+    params.subdiv_color_edge_mm   = STD_SUBDIV_COLOR_MM;
+    params.subdiv_feature         = true;
+    params.subdiv_added_triangles = budget_k * 1000;
+    params.cut_steps              = true;
+    return params;
+}
+
 bool GLGizmoTextureDisplacement::apply_standard_mode_presets(ModelVolume *mv)
 {
     bool       changed = false;
@@ -6548,18 +6564,7 @@ void GLGizmoTextureDisplacement::bake_standard()
     // The whole recipe in one go. Either stage having nothing to do is normal, not a failure - a mesh
     // that is already even needs no remesh, one that is already fine enough for the texture needs no
     // subdivision - so no "nothing changed" message here: it goes straight on to the displacement.
-    TextureDisplacementPrepareParams params;
-    params.remesh_edge_mm         = STD_REMESH_EDGE_MM;
-    params.remesh_sharp_deg       = STD_REMESH_SHARP_DEG;
-    params.subdiv_target_mm       = STD_SUBDIV_MAX_EDGE_MM;
-    params.subdiv_detail_mm       = STD_SUBDIV_DETAIL_MM;
-    params.subdiv_min_edge_mm     = STD_SUBDIV_MIN_EDGE_MM;
-    params.subdiv_border_mm       = STD_SUBDIV_BORDER_MM;
-    params.subdiv_color_edge_mm   = STD_SUBDIV_COLOR_MM;
-    params.subdiv_feature         = true;
-    params.subdiv_added_triangles = m_subdivide_budget_k * 1000;
-    params.cut_steps              = true;
-    queue_prepare(params, _u8L("Bake texture displacement"), /* then_bake */ true, {});
+    queue_prepare(standard_prepare_params(m_subdivide_budget_k), _u8L("Bake texture displacement"), /* then_bake */ true, {});
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -6586,16 +6591,7 @@ void GLGizmoTextureDisplacement::run_stage_debug()
     TextureDisplacementPrepareParams params;
     if (run_prepare) {
         apply_standard_mode_presets(mv); // capture what the panel is showing, exactly as Bake does
-        params.remesh_edge_mm         = STD_REMESH_EDGE_MM;
-        params.remesh_sharp_deg       = STD_REMESH_SHARP_DEG;
-        params.subdiv_target_mm       = STD_SUBDIV_MAX_EDGE_MM;
-        params.subdiv_detail_mm       = STD_SUBDIV_DETAIL_MM;
-        params.subdiv_min_edge_mm     = STD_SUBDIV_MIN_EDGE_MM;
-        params.subdiv_border_mm       = STD_SUBDIV_BORDER_MM;
-        params.subdiv_color_edge_mm   = STD_SUBDIV_COLOR_MM;
-        params.subdiv_feature         = true;
-        params.subdiv_added_triangles = m_subdivide_budget_k * 1000;
-        params.cut_steps              = true;
+        params = standard_prepare_params(m_subdivide_budget_k);
     }
 
     // Free the previous run's meshes before the next one allocates its own: every stage is a full

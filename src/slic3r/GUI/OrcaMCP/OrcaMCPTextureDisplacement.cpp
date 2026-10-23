@@ -1902,4 +1902,444 @@ json stack_options_json(const TextureDisplacementOptions& o)
             {"color_denoise", o.color_despeckle}};
 }
 
+// ---- The bake and the mesh preparation ----
+
+const std::vector<SettingBound>& bake_setting_bounds()
+{
+    static const std::vector<SettingBound> bounds = {
+        {"resolution_mm", 0.02, 2., "mm", "Resolution"},
+        {"budget_k", 0., 4000., "", "Budget"},
+        {"classic_budget_k", 10., 2000., "", "Triangles"},
+        {"strength", 1., 100., "percent", "Strength"},
+        {"passes", 1., 10., "", "Passes"},
+        {"color_mix_count", 1., 32., "", "Mixed colors"},
+        {"color_denoise", 0., 6., "", "Denoise"},
+    };
+    return bounds;
+}
+
+const SettingBound* bake_setting_bound(const std::string& key)
+{
+    for (const SettingBound& b : bake_setting_bounds())
+        if (key == b.key)
+            return &b;
+    return nullptr;
+}
+
+const std::vector<SettingBound>& prepare_setting_bounds()
+{
+    static const std::vector<SettingBound> bounds = {
+        {"target_edge_mm", 0.1, 20., "mm", "Target edge"},
+        {"sharp_angle_deg", 5., 90., "degrees", "Keep sharp edges' angle"},
+        {"steps", 1., 5., "", "Steps"},
+        {"max_edge_mm", 0.001, 20., "mm", "Max edge"},
+        {"detail_mm", 0.001, 1., "mm", "Detail"},
+        {"min_edge_mm", 0.001, 20., "mm", "Min edge"},
+        {"edge_detail_mm", 0., 5., "mm", "Edge detail"},
+        {"color_detail_mm", 0., 5., "mm", "Color detail"},
+        {"budget_k", 10., 2000., "", "Triangles"},
+        {"strength", 1., 100., "percent", "Strength"},
+        {"passes", 1., 10., "", "Passes"},
+    };
+    return bounds;
+}
+
+const SettingBound* prepare_setting_bound(const std::string& key)
+{
+    for (const SettingBound& b : prepare_setting_bounds())
+        if (key == b.key)
+            return &b;
+    return nullptr;
+}
+
+namespace {
+
+std::string range_text(const SettingBound& b)
+{
+    return "from " + number_text(b.min) + " to " + number_text(b.max) + (*b.unit ? std::string(" ") + b.unit : std::string()) + " (the panel's " +
+           b.panel_label + ")";
+}
+
+// A number held to `b`, as a float.
+bool bounded_number(Reader& r, const char* key, const SettingBound& b, std::optional<float>& out)
+{
+    if (!r.has(key))
+        return true;
+    double v = 0;
+    if (!r.number(key, v))
+        return false;
+    if (v < b.min || v > b.max)
+        return r.fail(std::string(key) + " must be " + range_text(b) + ", not " + number_text(v));
+    out = float(v);
+    return true;
+}
+
+bool bounded_whole(Reader& r, const char* key, const SettingBound& b, std::optional<int>& out)
+{
+    if (!r.has(key))
+        return true;
+    if (!r.obj.at(key).is_number_integer())
+        return r.fail(std::string(key) + " must be an integer");
+    const long long v = r.obj.at(key).get<long long>();
+    if (double(v) < b.min || double(v) > b.max)
+        return r.fail(std::string(key) + " must be " + range_text(b) + ", not " + std::to_string(v));
+    out = int(v);
+    return true;
+}
+
+// The smoothing settings in `obj` (a bake's `smooth` object, or a smooth's own arguments): strength, passes, ignore_outer_ring.
+bool read_smooth_numbers(Reader& r, SmoothRequest& out)
+{
+    return bounded_number(r, "strength", *bake_setting_bound("strength"), out.strength_percent) &&
+           bounded_whole(r, "passes", *bake_setting_bound("passes"), out.passes) && r.boolean("ignore_outer_ring", out.ignore_outer_ring);
+}
+
+} // namespace
+
+std::optional<BakeRequest> read_bake_request(const json& params, std::string& error)
+{
+    error.clear();
+    if (!params.is_object()) {
+        error = "arguments must be an object";
+        return std::nullopt;
+    }
+    BakeRequest req;
+    Reader      r{params, error};
+
+    std::optional<std::string> pipeline;
+    if (!r.string("pipeline", pipeline))
+        return std::nullopt;
+    if (pipeline) {
+        if (lower(*pipeline) != "default" && lower(*pipeline) != "classic") {
+            error = "pipeline must be default or classic, not \"" + *pipeline + "\"";
+            return std::nullopt;
+        }
+        req.classic = lower(*pipeline) == "classic";
+    }
+    if (r.has("resolution_mm")) {
+        const json& v = params.at("resolution_mm");
+        if (v.is_null()) {
+            req.resolution_auto = true;
+        } else if (!v.is_number() || !std::isfinite(v.get<double>())) {
+            error = "resolution_mm must be a number, 0 or null (automatic)";
+            return std::nullopt;
+        } else if (v.get<double>() == 0.) {
+            req.resolution_auto = true;
+        } else {
+            const SettingBound& b = *bake_setting_bound("resolution_mm");
+            if (v.get<double>() < b.min || v.get<double>() > b.max) {
+                error = "resolution_mm must be " + range_text(b) + ", or 0 or null for automatic, not " + number_text(v.get<double>());
+                return std::nullopt;
+            }
+            req.resolution_mm = float(v.get<double>());
+        }
+    }
+    if (r.has("budget_k")) {
+        const json& v = params.at("budget_k");
+        if (v.is_null()) {
+            req.budget_auto = true;
+        } else if (!v.is_number_integer()) {
+            error = "budget_k must be an integer, -1 or null (automatic)";
+            return std::nullopt;
+        } else if (v.get<long long>() == -1) {
+            req.budget_auto = true;
+        } else {
+            const SettingBound& b = *bake_setting_bound("budget_k");
+            if (double(v.get<long long>()) < b.min || double(v.get<long long>()) > b.max) {
+                error = "budget_k must be " + range_text(b) + ", or -1 or null for automatic, not " + std::to_string(v.get<long long>());
+                return std::nullopt;
+            }
+            req.budget_k = int(v.get<long long>());
+        }
+    }
+    if (!bounded_whole(r, "classic_budget_k", *bake_setting_bound("classic_budget_k"), req.classic_budget_k) ||
+        !r.boolean("displace_border", req.displace_border) || !r.boolean("color_mix", req.color_mix) ||
+        !bounded_whole(r, "color_mix_count", *bake_setting_bound("color_mix_count"), req.color_mix_count) ||
+        !bounded_whole(r, "color_denoise", *bake_setting_bound("color_denoise"), req.color_denoise))
+        return std::nullopt;
+    if (req.classic_budget_k && req.classic && !*req.classic) {
+        error = "classic_budget_k is the classic pipeline's subdivision budget: leave it out for the default pipeline, whose budget is budget_k";
+        return std::nullopt;
+    }
+    if (r.has("smooth")) {
+        const json& v = params.at("smooth");
+        if (!known_keys(v, "smooth", {"enabled", "strength", "passes", "ignore_outer_ring"}, error))
+            return std::nullopt;
+        Reader sr{v, error};
+        if (!sr.boolean("enabled", req.smooth.enabled) || !read_smooth_numbers(sr, req.smooth))
+            return std::nullopt;
+    }
+    std::optional<bool> preview;
+    if (!r.boolean("include_preview", preview))
+        return std::nullopt;
+    req.include_preview = preview.value_or(false);
+    return req;
+}
+
+TextureDisplacementOptions bake_options(const TextureDisplacementOptions& stored, const BakeRequest& req)
+{
+    TextureDisplacementOptions o = stored;
+    if (req.classic)
+        o.pipeline_v2 = !*req.classic;
+    if (req.resolution_auto)
+        o.v2_refine_mm = 0.f;
+    else if (req.resolution_mm)
+        o.v2_refine_mm = *req.resolution_mm;
+    if (req.budget_auto)
+        o.v2_max_triangles_k = -1;
+    else if (req.budget_k)
+        o.v2_max_triangles_k = *req.budget_k;
+    // The Standard bake's pins, unless the call says otherwise.
+    o.displace_border = req.displace_border.value_or(true);
+    o.smooth_enabled  = req.smooth.enabled.value_or(false);
+    if (req.smooth.strength_percent)
+        o.smooth_strength = std::clamp(*req.smooth.strength_percent / 100.f, 0.01f, 1.f);
+    if (req.smooth.passes)
+        o.smooth_iterations = *req.smooth.passes;
+    if (req.smooth.ignore_outer_ring)
+        o.smooth_skip_border = *req.smooth.ignore_outer_ring;
+    if (req.color_mix)
+        o.color_mix_enabled = *req.color_mix;
+    if (req.color_mix_count)
+        o.color_mix_count = *req.color_mix_count;
+    if (req.color_denoise)
+        o.color_despeckle = *req.color_denoise;
+    return o;
+}
+
+bool bake_options_differ(const TextureDisplacementOptions& a, const TextureDisplacementOptions& b)
+{
+    return a.displace_border != b.displace_border || a.smooth_enabled != b.smooth_enabled || a.smooth_strength != b.smooth_strength ||
+           a.smooth_iterations != b.smooth_iterations || a.smooth_skip_border != b.smooth_skip_border || a.pipeline_v2 != b.pipeline_v2 ||
+           a.v2_refine_mm != b.v2_refine_mm || a.v2_max_triangles_k != b.v2_max_triangles_k || a.color_mix_enabled != b.color_mix_enabled ||
+           a.color_mix_count != b.color_mix_count || a.color_despeckle != b.color_despeckle;
+}
+
+int classic_bake_budget_k(const BakeRequest& req) { return req.classic_budget_k.value_or(750); }
+
+namespace {
+
+// The arguments each operation takes, besides object_id and operation.
+std::set<std::string> prepare_keys(const PrepareRequest& req)
+{
+    switch (req.operation) {
+    case PrepareOperation::remesh: return {"target_edge_mm", "keep_sharp_edges", "sharp_angle_deg"};
+    case PrepareOperation::smooth: return {"strength", "passes", "ignore_outer_ring"};
+    case PrepareOperation::subdivide:
+        if (req.uniform())
+            return {"adaptive", "steps"};
+        return {"adaptive", "max_edge_mm", "detail_mm", "min_edge_mm", "edge_detail_mm", "color_detail_mm", "follow_texture", "budget_k"};
+    }
+    return {};
+}
+
+std::string operation_name(PrepareOperation op)
+{
+    return op == PrepareOperation::remesh ? "remesh" : op == PrepareOperation::subdivide ? "subdivide" : "smooth";
+}
+
+} // namespace
+
+std::optional<PrepareRequest> read_prepare_request(const json& params, std::string& error)
+{
+    error.clear();
+    if (!params.is_object()) {
+        error = "arguments must be an object";
+        return std::nullopt;
+    }
+    PrepareRequest req;
+    Reader         r{params, error};
+
+    std::optional<std::string> operation;
+    if (!r.string("operation", operation))
+        return std::nullopt;
+    if (!operation) {
+        error = "operation is required: remesh, subdivide or smooth";
+        return std::nullopt;
+    }
+    const std::string name = lower(*operation);
+    if (name == "remesh")
+        req.operation = PrepareOperation::remesh;
+    else if (name == "subdivide")
+        req.operation = PrepareOperation::subdivide;
+    else if (name == "smooth")
+        req.operation = PrepareOperation::smooth;
+    else {
+        error = "operation must be remesh, subdivide or smooth, not \"" + *operation + "\"";
+        return std::nullopt;
+    }
+    if (!r.boolean("adaptive", req.adaptive))
+        return std::nullopt;
+
+    // An argument of another operation would be ignored: refused instead.
+    static const std::set<std::string> all_keys = {"target_edge_mm", "keep_sharp_edges", "sharp_angle_deg", "adaptive", "steps", "max_edge_mm",
+                                                   "detail_mm", "min_edge_mm", "edge_detail_mm", "color_detail_mm", "follow_texture", "budget_k",
+                                                   "strength", "passes", "ignore_outer_ring"};
+    const std::set<std::string> mine = prepare_keys(req);
+    for (const std::string& key : all_keys)
+        if (r.has(key.c_str()) && !mine.count(key)) {
+            std::string list;
+            for (const std::string& k : mine)
+                list += (list.empty() ? "" : ", ") + k;
+            error = key + " does not apply to " + (req.uniform() ? "a uniform subdivide (adaptive: false)" : operation_name(req.operation)) +
+                    ", which takes " + list;
+            return std::nullopt;
+        }
+
+    const auto b = [](const char* key) -> const SettingBound& { return *prepare_setting_bound(key); };
+    if (!bounded_number(r, "target_edge_mm", b("target_edge_mm"), req.target_edge_mm) || !r.boolean("keep_sharp_edges", req.keep_sharp_edges) ||
+        !bounded_number(r, "sharp_angle_deg", b("sharp_angle_deg"), req.sharp_angle_deg) ||
+        !bounded_whole(r, "steps", b("steps"), req.steps) || !bounded_number(r, "max_edge_mm", b("max_edge_mm"), req.max_edge_mm) ||
+        !bounded_number(r, "detail_mm", b("detail_mm"), req.detail_mm) || !bounded_number(r, "min_edge_mm", b("min_edge_mm"), req.min_edge_mm) ||
+        !bounded_number(r, "edge_detail_mm", b("edge_detail_mm"), req.edge_detail_mm) ||
+        !bounded_number(r, "color_detail_mm", b("color_detail_mm"), req.color_detail_mm) || !r.boolean("follow_texture", req.follow_texture) ||
+        !bounded_whole(r, "budget_k", b("budget_k"), req.budget_k) || !read_smooth_numbers(r, req.smooth))
+        return std::nullopt;
+    if (req.uniform() && !req.steps) {
+        error = "a uniform subdivide (adaptive: false) needs steps, 1 to 5";
+        return std::nullopt;
+    }
+    return req;
+}
+
+TextureDisplacementPrepareParams remesh_prepare_params(const PrepareRequest& req, float default_edge_mm)
+{
+    TextureDisplacementPrepareParams p;
+    p.remesh_edge_mm   = req.target_edge_mm.value_or(default_edge_mm);
+    p.remesh_sharp_deg = req.keep_sharp_edges.value_or(true) ? req.sharp_angle_deg.value_or(40.f) : 0.f;
+    return p;
+}
+
+TextureDisplacementPrepareParams subdivide_prepare_params(const PrepareRequest& req, float default_edge_mm)
+{
+    TextureDisplacementPrepareParams p;
+    p.subdiv_target_mm       = req.max_edge_mm.value_or(default_edge_mm);
+    p.subdiv_detail_mm       = req.detail_mm.value_or(0.05f);
+    p.subdiv_min_edge_mm     = req.min_edge_mm.value_or(0.1f);
+    p.subdiv_border_mm       = req.edge_detail_mm.value_or(0.4f);
+    p.subdiv_color_edge_mm   = req.color_detail_mm.value_or(0.3f);
+    p.subdiv_feature         = req.follow_texture.value_or(false);
+    p.subdiv_added_triangles = req.budget_k.value_or(750) * 1000;
+    return p;
+}
+
+namespace {
+float mean_edge_mm(const indexed_triangle_set& its)
+{
+    double sum = 0.;
+    size_t cnt = 0;
+    for (const stl_triangle_vertex_indices& tri : its.indices)
+        for (int i = 0; i < 3; ++i) {
+            sum += double((its.vertices[size_t(tri[i])] - its.vertices[size_t(tri[(i + 1) % 3])]).norm());
+            ++cnt;
+        }
+    return cnt > 0 ? float(sum / double(cnt)) : 0.f;
+}
+} // namespace
+
+float default_remesh_edge_mm(const indexed_triangle_set& its)
+{
+    const float mean = mean_edge_mm(its);
+    return mean > 0.f ? std::clamp(mean, 0.1f, 20.f) : 1.f;
+}
+
+float default_subdivide_edge_mm(const indexed_triangle_set& its)
+{
+    const float mean = mean_edge_mm(its);
+    return mean > 0.f ? std::clamp(mean * 0.5f, 0.001f, 20.f) : 1.f;
+}
+
+TextureDisplacementOptions smooth_options(const TextureDisplacementOptions& stored, const SmoothRequest& req)
+{
+    TextureDisplacementOptions o = stored;
+    if (req.strength_percent)
+        o.smooth_strength = std::clamp(*req.strength_percent / 100.f, 0.01f, 1.f);
+    if (req.passes)
+        o.smooth_iterations = *req.passes;
+    if (req.ignore_outer_ring)
+        o.smooth_skip_border = *req.ignore_outer_ring;
+    return o;
+}
+
+std::optional<std::string> uniform_subdivision_refusal(std::size_t facets, int steps)
+{
+    double result = double(facets);
+    for (int i = 0; i < steps; ++i)
+        result *= 4.;
+    if (result <= double(UNIFORM_SUBDIVISION_MAX_FACETS))
+        return std::nullopt;
+    return "Subdividing " + std::to_string(facets) + " triangles " + std::to_string(steps) + (steps == 1 ? " step" : " steps") +
+           " would make " + number_text(std::round(result)) + " (each step quadruples the count), more than the " +
+           std::to_string(UNIFORM_SUBDIVISION_MAX_FACETS) + " one call allows: use fewer steps, or adaptive subdivision, which refines the painted area only";
+}
+
+std::string bake_nothing_painted_message(int object_id)
+{
+    return "Object " + std::to_string(object_id) + " has no texture paint, so there is nothing to bake: paint_object mode texture paints a layer";
+}
+
+std::string bake_no_displacement_message()
+{
+    return "The bake produced no displacement, so nothing was changed and the paint was kept. Check that the painted layer has a texture and a non-zero depth.";
+}
+
+std::string bake_timed_out_message(double wait_s, bool classic)
+{
+    return "The bake did not finish within this call's wait (" + number_text(std::round(wait_s)) + " s), so nothing was changed. Raise ORCAMCP_TIMEOUT, or " +
+           (classic ? "lower classic_budget_k, or " : "") +
+           "ask for less detail: a larger resolution_mm or a smaller budget_k";
+}
+
+std::string prepare_timed_out_message(double wait_s)
+{
+    return "The preparation did not finish within this call's wait (" + number_text(std::round(wait_s)) +
+           " s), so nothing was changed. Raise ORCAMCP_TIMEOUT, or ask for less: a larger edge length or a smaller budget_k";
+}
+
+std::string bake_undo_warning(int slots_added)
+{
+    return "The bake added " + std::to_string(slots_added) + " mixed filament slot" + (slots_added == 1 ? "" : "s") +
+           ", which an undo does not remove (filament slots are not undone): delete_mixed_filament removes one";
+}
+
+std::string prepare_unchanged_message(const PrepareRequest& req)
+{
+    switch (req.operation) {
+    case PrepareOperation::remesh:
+        return "Remeshing did not change the model. It may be non-manifold (open edges or edges shared by more than two triangles), or the target "
+               "edge length may already be met.";
+    case PrepareOperation::subdivide:
+        return "Nothing to subdivide - the painted area already meets the target edge length and detail tolerance, or the triangle budget is already used up.";
+    case PrepareOperation::smooth:
+        return "Nothing to smooth.";
+    }
+    return {};
+}
+
+std::string prepare_paint_lost_message()
+{
+    return "The painted area could not be carried onto the remeshed model, so nothing was changed";
+}
+
+json bake_part_json(const BakePartReport& p)
+{
+    return {{"volume_id", p.volume_id}, {"name", p.name}, {"facets_before", p.facets_before}, {"facets_after", p.facets_after},
+            {"baked", p.baked}, {"colored", p.colored}};
+}
+
+json bake_budget_json(std::size_t needed, std::size_t kept)
+{
+    if (needed == 0)
+        return nullptr;
+    return {{"needed", needed}, {"kept", kept}};
+}
+
+json bake_mixed_filaments_json(const std::vector<int>& slots, int filaments_before)
+{
+    json out = json::array();
+    for (const int slot : slots)
+        out.push_back({{"slot", slot + 1}, {"created", slot >= filaments_before}});
+    return out;
+}
+
 }}} // namespace Slic3r::GUI::OrcaMCP

@@ -1,4 +1,5 @@
 #include "TextureDisplacementPrepareJob.hpp"
+#include "TextureDisplacementBakeJob.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -114,6 +115,21 @@ TextureDisplacementPrepareInput capture_texture_prepare(const ModelObject &objec
         input.volumes.push_back(std::move(entry));
     }
     return input;
+}
+
+bool texture_prepare_applies_to(const ModelObject &object, const TextureDisplacementPrepareInput &input, TexturePrepareScope scope)
+{
+    const TextureDisplacementPrepareInput now = capture_texture_prepare(object, input.params, scope, input.color, input.snapshot_name);
+    if (now.volumes.size() != input.volumes.size())
+        return false;
+    for (size_t i = 0; i < now.volumes.size(); ++i) {
+        const TextureDisplacementPrepareVolume &live = now.volumes[i], &captured = input.volumes[i];
+        if (live.volume_id != captured.volume_id || live.base_mesh.indices != captured.base_mesh.indices ||
+            live.base_mesh.vertices != captured.base_mesh.vertices || live.masks != captured.masks || live.model_uv != captured.model_uv ||
+            live.texture_frame.matrix() != captured.texture_frame.matrix() || !same_texture_layers(live.layers, captured.layers))
+            return false;
+    }
+    return true;
 }
 
 void TextureDisplacementPrepareJob::finalize(bool canceled, std::exception_ptr &eptr)

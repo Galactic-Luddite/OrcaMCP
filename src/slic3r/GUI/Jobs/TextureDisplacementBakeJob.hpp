@@ -99,6 +99,9 @@ TextureBakePlan plan_texture_bake(const TextureDisplacementBakeInput &input, con
 // Main thread: the input still describes the model - every part found by id with the same mesh, masks,
 // layers, options and placement.
 bool texture_bake_applies_to(const Model &model, const TextureDisplacementBakeInput &input);
+// Two layer stacks a bake would treat alike: the same layers as the undo stack stores them, and the same live image
+// adjustments (which it leaves out).
+bool same_texture_layers(const std::vector<TextureDisplacementLayer> &a, const std::vector<TextureDisplacementLayer> &b);
 // A part's result is worth committing: it is not empty and some vertex moved more than 1e-5 mm. A bake
 // that moved nothing must not be committed, since committing clears the baked layers' paint.
 bool texture_bake_moved(const TextureDisplacementBakeInput &input, const TextureBakePlan &plan, std::size_t part);

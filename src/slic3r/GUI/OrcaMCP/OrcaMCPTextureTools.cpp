@@ -711,7 +711,10 @@ nlohmann::json set_texture_displacement(const nlohmann::json& params)
     answer["layer"] = layer_json(pending.layer, pending.position, pending.position == 0, pending.texture, pending.color_capable, paint,
                                  pending.owner_has_uv, pending.stack, pending.options, pending.to_world);
     if (request->action != LayerAction::remove)
-        add_next_steps(answer, texture_paint_next_steps(answer.at("object_id").get<int>(), pending.layer.slot, answer["layer"].at("painted").get<bool>()));
+        add_next_steps(answer, texture_paint_next_steps(answer.at("object_id").get<int>(), pending.layer.slot, answer["layer"].at("painted").get<bool>(),
+                                                        answer.value("needs_bake", false)));
+    else
+        add_next_steps(answer, bake_next_steps(answer.at("object_id").get<int>(), answer.value("needs_bake", false)));
     return answer;
 }
 
@@ -815,8 +818,11 @@ nlohmann::json get_texture_displacement(const nlohmann::json& params)
     answer["ignored_stacks"]  = pending.ignored;
     if (only_volume)
         answer["volume_id"] = *only_volume;
+    const bool needs_bake = answer.value("needs_bake", false);
     if (stack.first_unpainted_layer)
-        add_next_steps(answer, texture_paint_next_steps(object_id, *stack.first_unpainted_layer, false));
+        add_next_steps(answer, texture_paint_next_steps(object_id, *stack.first_unpainted_layer, false, needs_bake));
+    else
+        add_next_steps(answer, bake_next_steps(object_id, needs_bake));
     return answer;
 }
 

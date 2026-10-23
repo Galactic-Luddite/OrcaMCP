@@ -238,6 +238,27 @@ TEST_CASE("A texture layer a response reports is taken back by set_texture_displ
     CHECK(refusal("set_texture_displacement", cleared) == "");
 }
 
+TEST_CASE("The stack options get_texture_displacement reports are taken back by bake_texture_displacement", "[McpToolArguments][orcamcp][tools]")
+{
+    using namespace Slic3r;
+    using namespace Slic3r::GUI::OrcaMCP;
+    for (const bool automatic : {false, true}) {
+        TextureDisplacementOptions options;
+        options.pipeline_v2        = automatic;
+        options.v2_refine_mm       = automatic ? 0.f : 0.3f;
+        options.v2_max_triangles_k = automatic ? -1 : 200;
+        json arguments             = stack_options_json(options);
+        arguments["object_id"]     = 0;
+        CHECK(refusal("bake_texture_displacement", arguments) == "");
+        std::string error;
+        CHECK(read_bake_request(arguments, error).has_value());
+    }
+    json bad = {{"object_id", 0}, {"smooth", {{"width", 1}}}};
+    CHECK(::contains(refusal("bake_texture_displacement", bad), "has no key \"width\""));
+    CHECK(::contains(refusal("prepare_texture_mesh", {{"object_id", 0}, {"operation", "remesh"}, {"radius", 1}}), "radius"));
+    CHECK(::contains(refusal("prepare_texture_mesh", {{"object_id", 0}}), "operation"));
+}
+
 TEST_CASE("An unwrap get_texture_unwrap reports is taken back by set_texture_unwrap", "[McpToolArguments][orcamcp][tools]")
 {
     using namespace Slic3r;

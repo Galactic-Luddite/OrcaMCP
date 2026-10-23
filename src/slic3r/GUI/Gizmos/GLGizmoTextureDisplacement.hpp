@@ -91,6 +91,9 @@ public:
                                                          // after the remesh and after the refinement,
                                                          // so a debug run can show the whole recipe.
                                                          BakeStageRecorder                           *debug = nullptr);
+    // The Standard bake's preparation recipe for the classic pipeline (remesh at 1 mm, adaptive subdivision, step cut),
+    // with `budget_k` thousand triangles of budget: what the panel's Bake and OrcaMCP's bake_texture_displacement run.
+    static TextureDisplacementPrepareParams standard_prepare_params(int budget_k);
     // The volume's eight texture-displacement masks, gathered into the array every pure function here
     // (and every job input) takes.
     static TextureDisplacementFacetsData facets_data_of(const ModelVolume &mv);

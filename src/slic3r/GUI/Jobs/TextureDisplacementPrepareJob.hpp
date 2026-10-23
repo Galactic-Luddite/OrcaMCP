@@ -90,6 +90,9 @@ enum class TexturePrepareScope { PaintedParts, AllParts };
 TextureDisplacementPrepareInput capture_texture_prepare(const ModelObject &object, const TextureDisplacementPrepareParams &params,
                                                         TexturePrepareScope scope, const TextureColorSettings &color,
                                                         const std::string &snapshot_name);
+// Main thread: the input still describes the model - what a prepare of `scope` started now would capture (the same parts
+// by id, meshes, masks, UV channels, layers and texture frames). `object` is the one the input was captured from.
+bool texture_prepare_applies_to(const ModelObject &object, const TextureDisplacementPrepareInput &input, TexturePrepareScope scope);
 struct TextureDisplacementPreparePlan
 {
     std::vector<TextureDisplacementPrepareResult> results;

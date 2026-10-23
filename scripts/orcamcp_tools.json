@@ -460,6 +460,105 @@
       "summary": "Orient the current plate's objects"
     },
     {
+      "category": "Texture displacement",
+      "description": "Turn an object's painted texture layers into real geometry, as the texture panel's Bake does, on every painted model part: each part's mesh is rebuilt with the relief (classic: remeshed and refined first, then displaced), its other paint carried across, a colouring layer's colours written as colour paint (adding mixed filament slots when its mixes need them), the baked layers' paint cleared and the layers kept, and the object dropped onto the bed. The options are stored in the stack, as the panel's controls store them; left out, displace_border is true and smooth off (the Standard bake), the rest as the stack has them, and get_texture_displacement's stack_options are accepted back as they are (a null resolution_mm or budget_k is automatic). One undo step; the mixed filament slots a colour bake adds are not undone with it (undo_warning says so, delete_mixed_filament removes one). Answers each part's facets before and after, the options used, the mixed slots, budget_limited when the triangle budget cut detail, unmoved_parts (a part the bake did not move keeps its paint) and the object's placement; the next step is slice_all. Runs in the call's wait (a little under the bridge's ORCAMCP_TIMEOUT): past it nothing changes. A bake that moves nothing changes nothing. Refused while a slice, an export, an arrange or orient, or the app's own bake or repair runs, or when nothing is painted; an open toolbar tool is closed first, only when the bake will change something.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_k": {
+            "description": "Default pipeline: the triangle budget in thousands, 0 to 4000 (0 skips simplification); -1 or null is automatic. Left out: the stack's",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "classic_budget_k": {
+            "description": "Classic pipeline: the subdivision budget in thousands of triangles (default 750). Not stored",
+            "maximum": 2000.0,
+            "minimum": 10.0,
+            "type": "integer"
+          },
+          "color_denoise": {
+            "description": "Stack-wide: passes that clear colour specks",
+            "maximum": 6.0,
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "color_mix": {
+            "description": "Stack-wide: interleave filament pairs to reach colours between them",
+            "type": "boolean"
+          },
+          "color_mix_count": {
+            "description": "Stack-wide: the most mixed colors the palette may offer",
+            "maximum": 32.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "displace_border": {
+            "description": "Let the relief run to the edge of the painted area (default true, as the Standard bake does)",
+            "type": "boolean"
+          },
+          "include_preview": {
+            "description": "Add a turntable preview of the result",
+            "type": "boolean"
+          },
+          "object_id": {
+            "description": "Object index (0-based)",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pipeline": {
+            "description": "default: refine, displace and simplify in one run. classic: remesh and refine first (classic_budget_k), then move the existing vertices, keeping the topology. Left out: the stack's",
+            "enum": [
+              "default",
+              "classic"
+            ],
+            "type": "string"
+          },
+          "resolution_mm": {
+            "description": "Default pipeline: the refinement's edge length, 0.02 to 2 mm; 0 or null is automatic. Left out: the stack's",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "smooth": {
+            "additionalProperties": false,
+            "description": "Relax the displaced surface after the texture is applied (default off, as the Standard bake does)",
+            "properties": {
+              "enabled": {
+                "description": "Smooth the result",
+                "type": "boolean"
+              },
+              "ignore_outer_ring": {
+                "description": "Hold the painted patch's rim out of the smoothing",
+                "type": "boolean"
+              },
+              "passes": {
+                "description": "Passes",
+                "maximum": 10.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              "strength": {
+                "description": "Percent a vertex moves toward its neighbours' average each pass",
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "object_id"
+        ],
+        "type": "object"
+      },
+      "name": "bake_texture_displacement",
+      "summary": "Bake texture layers into the mesh"
+    },
+    {
       "category": "Slicing",
       "description": "Cancel the slice in progress, as the Cancel on the app's slicing notification does: a Slice All run ends there too (between two plates as well), and the plates it sliced before keep their results. cancelled says whether anything was: false when nothing was slicing, or the last slice had already ended. An export or an upload in progress is not a slice and is refused. The answer comes once the app has taken in the cancel, with slice_run as get_slicing_status gives it (outcome cancelled, cancelled_at_plate, and which plates have no result) and restored_selected_plate when a Slice All run's plate selection was put back; wait_for_slice also ends on outcome cancelled. No undo step.",
       "inputSchema": {
@@ -2170,6 +2269,118 @@
       },
       "name": "pick_facet",
       "summary": "The facet a point, ray or pixel hits"
+    },
+    {
+      "category": "Texture displacement",
+      "description": "Get an object's mesh ready for texture displacement, as the texture panel's Pro mode tools do. remesh rebuilds every model part with triangles near target_edge_mm (the painted area is carried onto the new triangles). subdivide with adaptive (default) refines the painted area only, to max_edge_mm and, with follow_texture, to the texture's detail within the budget_k; with adaptive false it splits every triangle of every part in four, steps times (more than 4 million triangles is refused), which drops the texture paint (texture_paint says so). smooth relaxes the baked vertices of the painted area with the stack's smoothing (strength, passes, ignore_outer_ring, stored when given). Runs in the call's wait (a little under the bridge's ORCAMCP_TIMEOUT): past it nothing changes. Answers each part's facets before and after. One undo step named as the panel names it; nothing to change is changed: false with the panel's words. Refused while a slice, an export, an arrange or orient, or the app's own bake or repair runs; an open toolbar tool is closed first, only when the call will change something.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "adaptive": {
+            "description": "subdivide: refine the painted area only (default true); false splits every triangle of every part by steps",
+            "type": "boolean"
+          },
+          "budget_k": {
+            "description": "adaptive subdivide: triangles to add, in thousands (default 750)",
+            "maximum": 2000.0,
+            "minimum": 10.0,
+            "type": "integer"
+          },
+          "color_detail_mm": {
+            "description": "adaptive subdivide: triangle size where two colours meet, 0 off (default 0.3)",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "detail_mm": {
+            "description": "adaptive subdivide with follow_texture: how far the mesh may sit from the texture's shape (default 0.05)",
+            "maximum": 1.0,
+            "minimum": 0.001,
+            "type": "number"
+          },
+          "edge_detail_mm": {
+            "description": "adaptive subdivide: triangle size along the painted area's outline, 0 off (default 0.4)",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "follow_texture": {
+            "description": "adaptive subdivide: spend triangles where the texture bends (default false)",
+            "type": "boolean"
+          },
+          "ignore_outer_ring": {
+            "description": "smooth: hold the painted patch's rim out (default: the stack's)",
+            "type": "boolean"
+          },
+          "keep_sharp_edges": {
+            "description": "remesh: hold hard edges in place (default true)",
+            "type": "boolean"
+          },
+          "max_edge_mm": {
+            "description": "adaptive subdivide: no painted triangle stays larger (default: half the first part's mean edge)",
+            "maximum": 20.0,
+            "minimum": 0.001,
+            "type": "number"
+          },
+          "min_edge_mm": {
+            "description": "adaptive subdivide with follow_texture: the smallest triangle (default 0.1)",
+            "maximum": 20.0,
+            "minimum": 0.001,
+            "type": "number"
+          },
+          "object_id": {
+            "description": "Object index (0-based)",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "operation": {
+            "description": "remesh: rebuild every model part with an even triangle size. subdivide: add triangles, adaptively where painted or uniformly. smooth: relax the painted area's baked vertices",
+            "enum": [
+              "remesh",
+              "subdivide",
+              "smooth"
+            ],
+            "type": "string"
+          },
+          "passes": {
+            "description": "smooth: passes (default: the stack's)",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "sharp_angle_deg": {
+            "description": "remesh: how sharp a fold must be to be kept (default 40)",
+            "maximum": 90.0,
+            "minimum": 5.0,
+            "type": "number"
+          },
+          "steps": {
+            "description": "subdivide with adaptive false: how many times every triangle is split in four (required then)",
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "strength": {
+            "description": "smooth: percent a vertex moves toward its neighbours' average each pass (default: the stack's)",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "type": "number"
+          },
+          "target_edge_mm": {
+            "description": "remesh: the triangle edge length (default: the first part's mean edge)",
+            "maximum": 20.0,
+            "minimum": 0.1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "object_id",
+          "operation"
+        ],
+        "type": "object"
+      },
+      "name": "prepare_texture_mesh",
+      "summary": "Remesh, subdivide or smooth for textures"
     },
     {
       "category": "Printers",

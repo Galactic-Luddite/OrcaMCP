@@ -235,6 +235,20 @@ json tool_examples()
             {"place_an_island", R"({"object_id": 0, "layer": 1, "islands": [{"chart": 2, "offset": [12, 0], "rotation_deg": 90}]})"},
             {"order", "Seam changes and island edits go in separate calls: chart numbers are the unwrap before the call"}
         }},
+        {"bake_texture_displacement", {
+            {"defaults", R"({"object_id": 0})"},
+            {"fine_relief", R"({"object_id": 0, "resolution_mm": 0.15, "budget_k": 1500, "include_preview": true})"},
+            {"classic", R"({"object_id": 0, "pipeline": "classic", "classic_budget_k": 500})"},
+            {"smoothed", R"({"object_id": 0, "smooth": {"enabled": true, "strength": 30, "passes": 2}})"},
+            {"then", "slice_all; the stack_options of get_texture_displacement are accepted back as options"}
+        }},
+        {"prepare_texture_mesh", {
+            {"remesh", R"({"object_id": 0, "operation": "remesh", "target_edge_mm": 0.8})"},
+            {"refine_the_paint", R"({"object_id": 0, "operation": "subdivide", "max_edge_mm": 0.4, "budget_k": 500})"},
+            {"whole_object", R"({"object_id": 0, "operation": "subdivide", "adaptive": false, "steps": 2})"},
+            {"smooth", R"({"object_id": 0, "operation": "smooth", "strength": 30, "passes": 2})"},
+            {"order", "Before painting on a coarse mesh: remesh first, then paint_object mode texture; the default bake refines by itself"}
+        }},
         {"delete_user_texture", {
             {"by_id", R"({"texture": "user/My bricks.png"})"},
             {"note", "Only an imported texture; layers using it keep their image (still_used_by lists them)"}

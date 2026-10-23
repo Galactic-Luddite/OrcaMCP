@@ -368,4 +368,107 @@ StackAnswer texture_stack_json(std::vector<StackLayerFacts> layers, const std::v
 // color_denoise}
 nlohmann::json stack_options_json(const TextureDisplacementOptions&);
 
+// ---- The bake and the mesh preparation ----
+
+// The panel's ranges for the bake's and the preparation's numbers: one table for the readers and the schemas.
+const std::vector<SettingBound>& bake_setting_bounds();
+const SettingBound*              bake_setting_bound(const std::string& key);
+const std::vector<SettingBound>& prepare_setting_bounds();
+const SettingBound*              prepare_setting_bound(const std::string& key);
+
+// The smoothing settings the bake and a smooth take (stack_options_json's `smooth`, accepted back whole).
+struct SmoothRequest
+{
+    std::optional<bool>  enabled, ignore_outer_ring;
+    std::optional<float> strength_percent; // 1..100, the panel's unit
+    std::optional<int>   passes;           // 1..10
+    bool empty() const { return !enabled && !ignore_outer_ring && !strength_percent && !passes; }
+};
+// bake_texture_displacement's options. The bake stores each one into the object's stack options, as the panel's
+// controls store them. stack_options_json's output is accepted back: a null resolution_mm or budget_k is
+// automatic (so are 0 and -1), and the stack-wide colour options are taken as they are.
+struct BakeRequest
+{
+    std::optional<bool>  classic;                      // pipeline: classic (true) or default (false)
+    std::optional<float> resolution_mm;                // 0.02..2
+    bool                 resolution_auto = false;      // resolution_mm null or 0
+    std::optional<int>   budget_k;                     // 0..4000, 0 = no simplification
+    bool                 budget_auto = false;          // budget_k null or -1
+    std::optional<int>   classic_budget_k;             // 10..2000, the classic bake's subdivision budget (not stored)
+    std::optional<bool>  displace_border;
+    SmoothRequest        smooth;
+    std::optional<bool>  color_mix;
+    std::optional<int>   color_mix_count, color_denoise;
+    bool                 include_preview = false;
+};
+// Types, ranges, strict keys of `smooth`; `object_id` is not read. nullopt with `error` set otherwise.
+std::optional<BakeRequest> read_bake_request(const nlohmann::json& params, std::string& error);
+// The options the bake runs with: the stored ones with the request applied. What the request leaves out stays as it
+// is, except displace_border (true) and smooth.enabled (false), which the Standard bake pins.
+TextureDisplacementOptions bake_options(const TextureDisplacementOptions& stored, const BakeRequest&);
+// Whether two option sets differ in anything the bake reads (the panel's active layer and mode are not).
+bool bake_options_differ(const TextureDisplacementOptions&, const TextureDisplacementOptions&);
+// The classic bake's subdivision budget, in thousands of triangles (the panel's default 750).
+int classic_bake_budget_k(const BakeRequest&);
+
+enum class PrepareOperation { remesh, subdivide, smooth };
+// prepare_texture_mesh's arguments. Numbers left out take the panel's defaults, the two edge lengths from the mesh.
+struct PrepareRequest
+{
+    PrepareOperation     operation = PrepareOperation::remesh;
+    std::optional<float> target_edge_mm;                       // remesh, 0.1..20
+    std::optional<bool>  keep_sharp_edges;                     // remesh, default true
+    std::optional<float> sharp_angle_deg;                      // remesh, 5..90, default 40
+    std::optional<bool>  adaptive;                             // subdivide, default true
+    std::optional<int>   steps;                                // uniform subdivide, 1..5
+    std::optional<float> max_edge_mm, detail_mm, min_edge_mm;  // adaptive subdivide
+    std::optional<float> edge_detail_mm, color_detail_mm;      // adaptive subdivide, 0..5
+    std::optional<bool>  follow_texture;                       // adaptive subdivide
+    std::optional<int>   budget_k;                             // adaptive subdivide, 10..2000
+    SmoothRequest        smooth;                               // smooth: the stored settings where left out
+    bool                 uniform() const { return operation == PrepareOperation::subdivide && !adaptive.value_or(true); }
+};
+// operation is required; an argument of another operation (or an adaptive-only one of a uniform subdivide, steps of
+// an adaptive one) is refused. smooth takes strength (percent), passes and ignore_outer_ring.
+std::optional<PrepareRequest> read_prepare_request(const nlohmann::json& params, std::string& error);
+// The libslic3r parameters of a remesh / an adaptive subdivide; `default_edge_mm` stands in for a left-out
+// target_edge_mm / max_edge_mm (default_remesh_edge_mm, default_subdivide_edge_mm of the mesh).
+TextureDisplacementPrepareParams remesh_prepare_params(const PrepareRequest&, float default_edge_mm);
+TextureDisplacementPrepareParams subdivide_prepare_params(const PrepareRequest&, float default_edge_mm);
+// The panel's seeds: the mesh's mean edge length (clamped to 0.1..20), and half of it (clamped to 0.001..20); 1 for no edge.
+float default_remesh_edge_mm(const indexed_triangle_set&);
+float default_subdivide_edge_mm(const indexed_triangle_set&);
+// The stored options with a smooth's strength, passes and ignore_outer_ring applied.
+TextureDisplacementOptions smooth_options(const TextureDisplacementOptions& stored, const SmoothRequest&);
+// A uniform subdivision of `facets` triangles by `steps` is refused above this many triangles (each step quadruples).
+constexpr std::size_t UNIFORM_SUBDIVISION_MAX_FACETS = 4000000;
+std::optional<std::string> uniform_subdivision_refusal(std::size_t facets, int steps);
+
+// The words of the bake's and the preparation's answers, one place.
+std::string bake_nothing_painted_message(int object_id);
+std::string bake_no_displacement_message();
+std::string bake_timed_out_message(double wait_s, bool classic);
+std::string prepare_timed_out_message(double wait_s);
+std::string bake_undo_warning(int slots_added);
+std::string prepare_unchanged_message(const PrepareRequest&);
+std::string prepare_paint_lost_message();
+
+// One model part's share of a bake as the answer tells it.
+struct BakePartReport
+{
+    int         volume_id     = -1; // the part's place among the object's volumes
+    std::string name;
+    std::size_t facets_before = 0, facets_after = 0;
+    bool        baked = false;      // its mesh was rebuilt (false: the bake moved nothing, the part is as it was)
+    bool        colored = false;    // the bake wrote colour paint on it
+};
+// {volume_id, name, facets_before, facets_after, baked, colored}
+nlohmann::json bake_part_json(const BakePartReport&);
+// {needed, kept} of the panel's budget notification (triangles), null when the budget did not cap the detail.
+nlohmann::json bake_budget_json(std::size_t needed, std::size_t kept);
+// [{slot (1-based), created}] for the 0-based `slots` the bake named; created when the slot did not exist before
+// (`filaments_before` slots then).
+nlohmann::json bake_mixed_filaments_json(const std::vector<int>& slots, int filaments_before);
+
+
 }}} // namespace Slic3r::GUI::OrcaMCP

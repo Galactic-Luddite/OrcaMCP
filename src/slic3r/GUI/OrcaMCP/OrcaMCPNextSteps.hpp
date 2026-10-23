@@ -135,9 +135,18 @@ std::vector<NextStep> support_paint_next_steps(int object_id, bool support_enabl
                                                const std::string& support_type);
 
 // What a texture layer's paint leads to: a layer painted on no part applies nowhere, so paint_object paints it on
-// the whole object (a mask is painted with state painted). None once it is painted.
-// TODO(T8): the bake step (bake_texture_displacement) comes with that tool.
-std::vector<NextStep> texture_paint_next_steps(int object_id, int slot, bool painted);
+// the whole object (a mask is painted with state painted); and paint a bake would apply (`needs_bake`), so
+// bake_texture_displacement. Each step only when it applies, so a layer painted with nothing else to bake leads nowhere.
+std::vector<NextStep> texture_paint_next_steps(int object_id, int slot, bool painted, bool needs_bake);
+
+// What an object's painted texture layers lead to: bake_texture_displacement, since nothing reaches the print until
+// they are baked into the mesh. None when nothing is painted.
+std::vector<NextStep> bake_next_steps(int object_id, bool needs_bake);
+
+// What a bake's answer leads to: slice_all, since the object's mesh changed (every plate lost its slice); get_filaments
+// when the bake added mixed filament slots (`slots_added`), to see them; bake_texture_displacement again when paint
+// is left (`needs_bake`: a part the bake did not move keeps its paint).
+std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added);
 
 // What printer_control's answer to a set_* action (filtration, fans, print speed, Z offset) leads to:
 // get_printer_status, whose printer.controls reads back what the printer now reports -- it takes a moment

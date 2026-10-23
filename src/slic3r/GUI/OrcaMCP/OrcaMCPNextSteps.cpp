@@ -275,18 +275,42 @@ std::vector<NextStep> support_paint_next_steps(int object_id, bool support_enabl
               {"settings", {{{"key", "enable_support"}, {"value", "1"}}, {{"key", "support_type"}, {"value", manual}}}}}}};
 }
 
-std::vector<NextStep> texture_paint_next_steps(int object_id, int slot, bool painted)
+std::vector<NextStep> texture_paint_next_steps(int object_id, int slot, bool painted, bool needs_bake)
 {
-    if (painted)
+    std::vector<NextStep> steps;
+    if (!painted)
+        steps.push_back({"paint_object",
+                         "texture layer " + std::to_string(slot) + " of object " + std::to_string(object_id) +
+                             " is painted nowhere, so it applies nowhere: paint where it goes",
+                         {{"object_id", object_id},
+                          {"mode", "texture"},
+                          {"texture_layer", slot},
+                          {"selection", "all"},
+                          {"state", "painted"}}});
+    for (NextStep& step : bake_next_steps(object_id, needs_bake))
+        steps.push_back(std::move(step));
+    return steps;
+}
+
+std::vector<NextStep> bake_next_steps(int object_id, bool needs_bake)
+{
+    if (!needs_bake)
         return {};
-    return {{"paint_object",
-             "texture layer " + std::to_string(slot) + " of object " + std::to_string(object_id) +
-                 " is painted nowhere, so it applies nowhere: paint where it goes",
-             {{"object_id", object_id},
-              {"mode", "texture"},
-              {"texture_layer", slot},
-              {"selection", "all"},
-              {"state", "painted"}}}};
+    return {{"bake_texture_displacement",
+             "object " + std::to_string(object_id) + "'s texture layers are painted but not baked, so the print does not show them yet",
+             {{"object_id", object_id}}}};
+}
+
+std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added)
+{
+    std::vector<NextStep> steps = {{"slice_all", "object " + std::to_string(object_id) + "'s mesh changed, so every plate lost its slice: slice_all slices again, with the relief in the G-code", nullptr}};
+    if (slots_added > 0)
+        steps.push_back({"get_filaments",
+                         "the bake added " + std::to_string(slots_added) + " mixed filament slot" + (slots_added == 1 ? "" : "s") + ": get_filaments lists them",
+                         nullptr});
+    for (NextStep& step : bake_next_steps(object_id, needs_bake))
+        steps.push_back(std::move(step));
+    return steps;
 }
 
 namespace {

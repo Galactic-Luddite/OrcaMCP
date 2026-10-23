@@ -3628,8 +3628,7 @@ takes the panel's own "Leaving ..." undo step. The answer's `closed_toolbar_tool
   undo step (plus the open paint panel's own "Leaving ..." step when this call had to close one; a refused call, or a repaint of what is there, closes nothing and takes none), refused while an arrange, orient or bake runs or when the slot holds no layer. The answer
   adds `texture_layer`, `needs_bake` (some layer of the object is painted, so a bake would change the
   mesh) and, when the layer is now painted on no part, a `next_steps` entry that paints it on the whole object.
-  `get_texture_displacement` reads each layer's paint per part.
-  <!-- TODO(T8): name bake_texture_displacement here once it exists. -->
+  `get_texture_displacement` reads each layer's paint per part; `bake_texture_displacement` turns it into geometry (the answer's `next_steps` names it while paint is unbaked).
 - **`visible`** paints the facets seen from `view`, in any mode: a facet whose normal faces the view
   (from the eye under a perspective `current` camera, along the view direction otherwise) and that no
   facet of any model part of the object hides (a ray from its centroid toward the viewer, started
@@ -4130,6 +4129,74 @@ before still name the old numbers (`notes`).
 {"object_id": 0, "layer": 1, "cut_islands": [0]}
 {"object_id": 0, "layer": 1, "join": [{"chart": 2, "to": 0}]}
 {"object_id": 0, "layer": 1, "islands": [{"chart": 2, "offset": [12, 0], "rotation_deg": 90}]}
+```
+
+### bake_texture_displacement
+Turn an object's painted texture layers into real geometry, as the texture panel's Bake does, on every painted model
+part. Each part's mesh is rebuilt with the relief (classic pipeline: remeshed and refined first, then displaced); its
+other paint (supports, seams, colour, fuzzy skin) is carried across; a colouring layer's colours are written as colour
+paint, adding mixed filament slots when its mixes need them; the baked layers' paint is cleared and the layers kept;
+the object is dropped onto the bed. One undo step. The mixed filament slots a colour bake adds are not undone with it
+(slot changes are no undo step): `undo_warning` says so, and `delete_mixed_filament` removes one.
+
+It follows `repair_mesh`: the model is read on the main thread, the bake runs on copies on the HTTP thread, and the
+result is applied on the main thread only if the object is still as it was read (otherwise: "changed in the app during
+the bake, so nothing was changed: call again"). It runs in the call's wait (a little under the bridge's
+`ORCAMCP_TIMEOUT`); past it nothing changes and the answer is an error with `timed_out: true`. An open toolbar tool
+(the texture panel included) is closed right before the change, only when the bake will change something; paint it
+held is then read again (the bake is planned once more when closing changed what it read) and `closed_toolbar_tool`
+names it. Refused while a slice, export, upload, arrange or orient runs, the app's own bake or repair runs, the object
+has no layer with an image, or nothing is painted. A bake that moves no vertex changes nothing and says so.
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `object_id` | integer | Object index (required) |
+| `pipeline` | `default` / `classic` | `default` refines, displaces and simplifies in one run; `classic` remeshes (1 mm) and refines first (`classic_budget_k`), then moves the existing vertices. Left out: the stack's |
+| `resolution_mm` | number / null | Default pipeline: refinement edge length, 0.02..2 mm; `0` or `null` is automatic. Left out: the stack's |
+| `budget_k` | integer / null | Default pipeline: triangle budget in thousands, 0..4000 (0 skips simplification); `-1` or `null` is automatic. Left out: the stack's |
+| `classic_budget_k` | integer | Classic pipeline: the subdivision budget, 10..2000 (default 750). Not stored |
+| `displace_border` | boolean | Let the relief run to the painted area's edge. Left out: true (the Standard bake) |
+| `smooth` | `{enabled, strength, passes, ignore_outer_ring}` | Relax the result: `strength` 1..100 percent, `passes` 1..10. Left out: off (the Standard bake) |
+| `color_mix`, `color_mix_count`, `color_denoise` | boolean, 1..32, 0..6 | The stack-wide colour options, as `get_texture_displacement` reports them |
+| `include_preview` | boolean | Add a turntable preview of the result |
+
+The options the bake used are stored into the stack, as the panel's controls store them. `get_texture_displacement`'s
+`stack_options` are accepted back as the arguments as they are.
+
+**Response:** `changed`, `object_id`, `pipeline`, `options` (the stack's now), `parts` (`volume_id`, `name`,
+`facets_before`, `facets_after`, `baked`, `colored`), `unmoved_parts` (volume ids the bake did not move: their paint is
+kept), `mixed_filaments` (`slot` 1-based, `created`), `filaments_added`, `budget_limited` (`needed`, `kept` triangles
+when the budget cut detail, else null), `needs_bake` (paint is left), `undo_warning`, the object's placement,
+`closed_toolbar_tool`, `active_warnings`, the preview, and `next_steps` (`slice_all`; `get_filaments` after new
+mixed slots).
+
+```json
+{"object_id": 0}
+{"object_id": 0, "resolution_mm": 0.15, "budget_k": 1500, "include_preview": true}
+{"object_id": 0, "pipeline": "classic", "classic_budget_k": 500}
+```
+
+### prepare_texture_mesh
+Get an object's mesh ready for texture displacement, as the texture panel's Pro mode tools do. Same threading,
+refusals and closing of an open tool as `bake_texture_displacement`; one undo step named as the panel names it
+(Remesh model / Adaptive subdivide / Subdivide model for texture displacement, Smooth texture displacement); a
+call with nothing to change answers `changed: false` with the panel's words.
+
+| `operation` | What it does | Arguments |
+|-------------|--------------|-----------|
+| `remesh` | Rebuilds every model part with triangles near `target_edge_mm` (CGAL isotropic remesh); the painted area is carried onto the new triangles (`texture_paint: kept`); refused paint loss answers the panel's words and changes nothing | `target_edge_mm` 0.1..20 (default: the first part's mean edge), `keep_sharp_edges` (true), `sharp_angle_deg` 5..90 (40) |
+| `subdivide` | `adaptive` (default): refines the painted area only (`texture_paint: kept`); refused when nothing is painted. `adaptive: false`: splits every triangle of every part in four, `steps` times, and drops the texture paint (`texture_paint: dropped`); above 4 million triangles it is refused | adaptive: `max_edge_mm` 0.001..20 (default: half the first part's mean edge), `follow_texture` (false), `detail_mm` 0.001..1 (0.05) and `min_edge_mm` 0.001..20 (0.1) (with follow_texture), `edge_detail_mm` 0..5 (0.4), `color_detail_mm` 0..5 (0.3; used when a layer colours), `budget_k` 10..2000 (750). uniform: `steps` 1..5 (required) |
+| `smooth` | Relaxes the first part's painted vertices with the stack's smoothing; the given values are stored in the stack. Runs on the main thread (linear work) | `strength` 1..100 percent, `passes` 1..10, `ignore_outer_ring` (the stack's) |
+
+An argument of another operation is refused. **Response:** `changed`, `object_id`, `operation`, `parts` (`volume_id`,
+`name`, `facets_before`, `facets_after`), `texture_paint`, the object's placement, `needs_bake`, `message` (nothing to
+change), `closed_toolbar_tool`, `next_steps` (`bake_texture_displacement` while paint is unbaked).
+
+```json
+{"object_id": 0, "operation": "remesh", "target_edge_mm": 0.8}
+{"object_id": 0, "operation": "subdivide", "max_edge_mm": 0.4, "budget_k": 500}
+{"object_id": 0, "operation": "subdivide", "adaptive": false, "steps": 2}
+{"object_id": 0, "operation": "smooth", "strength": 30, "passes": 2}
 ```
 
 ---
