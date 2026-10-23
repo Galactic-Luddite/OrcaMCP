@@ -1468,7 +1468,7 @@
     },
     {
       "category": "Texture displacement",
-      "description": "The textures a texture displacement layer can use, as its picker lists them: built-in, imported into this data folder's texture library (an image given by file_path to a layer is imported there; an identical image already there is reused), and those of installed texture packs. Each has a texture id a layer takes (a name alone works when only one texture has it), and color: true when it has colours a layer can print with filaments, false for a grayscale height map, null when the file is not a PNG that is read directly. Reading it changes nothing.",
+      "description": "The textures a texture displacement layer can use, as its picker lists them: built-in, imported into this data folder's texture library (set_texture_displacement's file_path imports one there; an identical image already there is reused), and those of installed texture packs. Each has a texture id a layer takes (a name alone works when only one texture has it), and color: true when it has colours a layer can print with filaments, false for a grayscale height map, null when the file is not a PNG that is read directly. Reading it changes nothing.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -3536,6 +3536,301 @@
       },
       "name": "set_prime_tower_position",
       "summary": "Move a plate's prime tower"
+    },
+    {
+      "category": "Texture displacement",
+      "description": "Add, edit, move or remove one texture displacement layer of an object, as the texture displacement panel does. An object holds up to 8 layers, combined in slot order; each applies where paint_object (mode texture) paints it, and nothing reaches the print until the layers are baked into the mesh. add takes the first free slot with texture (an id from get_texture_library) or the library's first; file_path imports an image (an identical one already in the library is reused, imported_texture says which); edit changes only what is given; move puts a layer at to_position in slot order, its paint with it (it may take another slot: layer in the answer); remove drops it and its paint. projection view projects from view_direction (a named view, or current: the 3D view's camera now) or view_axes; projection_frame projects once through a rectangle (view or right and up, center, width_mm, height_mm) with tiling off, false clears it; adjust_image saves an adjusted copy of the texture into the library and uses it. One undo step; nothing to change is changed: false. Refused while an arrange, orient or bake runs; an open toolbar tool is closed first when the call changes something.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "add: a new layer in the first free slot; edit: change the layer in slot layer; remove: drop it and its paint; move: put it at to_position",
+            "enum": [
+              "add",
+              "edit",
+              "remove",
+              "move"
+            ],
+            "type": "string"
+          },
+          "adjust_image": {
+            "additionalProperties": false,
+            "description": "Save an adjusted copy of the layer's image into the library and use it",
+            "properties": {
+              "blur": {
+                "description": "0 unchanged to 1",
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "brightness": {
+                "description": "-1 black to 1 white",
+                "maximum": 1.0,
+                "minimum": -1.0,
+                "type": "number"
+              },
+              "contrast": {
+                "description": "-1 flat to 1 hard threshold",
+                "maximum": 1.0,
+                "minimum": -1.0,
+                "type": "number"
+              },
+              "hue_deg": {
+                "description": "Hue shift in degrees (colour only)",
+                "maximum": 180.0,
+                "minimum": -180.0,
+                "type": "number"
+              },
+              "sharpness": {
+                "description": "0 unchanged to 1",
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "blend": {
+            "description": "How the layer combines with the layers below it (the base layer ignores it)",
+            "enum": [
+              "add",
+              "override",
+              "subtract",
+              "multiply",
+              "divide"
+            ],
+            "type": "string"
+          },
+          "color": {
+            "description": "Colour the painted area from the texture's own colours (a colour texture only)",
+            "type": "boolean"
+          },
+          "color_denoise": {
+            "description": "Stack-wide: passes that clear colour specks",
+            "maximum": 6,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "color_mix": {
+            "description": "Stack-wide: interleave filament pairs to reach colours between them",
+            "type": "boolean"
+          },
+          "color_mix_count": {
+            "description": "Stack-wide: the most mixed colors the palette may offer",
+            "maximum": 32,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "depth_mm": {
+            "description": "Maximum displacement along the surface normal, in mm",
+            "maximum": 10.0,
+            "minimum": 0.01,
+            "type": "number"
+          },
+          "edge_fade": {
+            "description": "Fade the displacement toward the edge of the painted patch",
+            "type": "boolean"
+          },
+          "edge_fade_amount": {
+            "description": "How far edge_fade reaches into the painted patch",
+            "maximum": 1.0,
+            "minimum": 0.02,
+            "type": "number"
+          },
+          "file_path": {
+            "description": "An image file (png, jpg, bmp) to use as the texture: imported into the texture library, or the identical texture already there reused. Instead of texture",
+            "type": "string"
+          },
+          "invert": {
+            "description": "Swap raised and cut texels",
+            "type": "boolean"
+          },
+          "layer": {
+            "description": "The layer's slot (edit, remove, move). add takes the first free slot",
+            "maximum": 7,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "midlevel": {
+            "description": "The height that does not move the surface: 0 only raises, 0.5 lets dark texels cut in",
+            "maximum": 10.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "object_id": {
+            "description": "Object index (0-based). The layers belong to the object",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "description": "Placement [u, v] in texture repeats",
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "projection": {
+            "description": "How the texture is mapped: triplanar, cylindrical, spherical, unwrap, view (from a view), model_uv (the model's own UV channel)",
+            "enum": [
+              "triplanar",
+              "cylindrical",
+              "spherical",
+              "unwrap",
+              "view",
+              "model_uv"
+            ],
+            "type": "string"
+          },
+          "projection_frame": {
+            "additionalProperties": false,
+            "description": "Project the texture once through a rectangle (view or right and up, center, width_mm, height_mm) with tiling off; false clears the frame",
+            "properties": {
+              "center": {
+                "description": "The frame's centre in plate mm (default: the object's centre)",
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "height_mm": {
+                "description": "Height in mm, greater than 0",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              "right": {
+                "description": "The projector's right axis in plate axes",
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "up": {
+                "description": "The projector's up axis in plate axes",
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "view": {
+                "description": "A named view to project through, or current: the 3D view's camera now. Instead of right and up",
+                "enum": [
+                  "current",
+                  "iso",
+                  "top",
+                  "bottom",
+                  "front",
+                  "back",
+                  "left",
+                  "right"
+                ],
+                "type": "string"
+              },
+              "width_mm": {
+                "description": "Width in mm, greater than 0",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              }
+            },
+            "type": [
+              "object",
+              "boolean"
+            ]
+          },
+          "rotation_deg": {
+            "description": "Texture rotation in degrees",
+            "maximum": 360.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "smoothing": {
+            "description": "Blur of the height map before it is sampled (0 raw, 1 strongest)",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "texture": {
+            "description": "A texture id from get_texture_library (a name alone works when only one texture has it)",
+            "type": "string"
+          },
+          "tile": {
+            "description": "Repeat the texture (false: placed once)",
+            "type": "boolean"
+          },
+          "tile_method": {
+            "description": "How the texture repeats",
+            "enum": [
+              "repeat",
+              "mirrored_repeat"
+            ],
+            "type": "string"
+          },
+          "tile_size_mm": {
+            "description": "Size of one texture tile, in mm",
+            "maximum": 200.0,
+            "minimum": 0.2,
+            "type": "number"
+          },
+          "to_position": {
+            "description": "move: the 0-based position in slot order",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "view_axes": {
+            "additionalProperties": false,
+            "description": "projection view: the projector's right and up axes in plate axes, as a layer reports them",
+            "properties": {
+              "right": {
+                "description": "The projector's right axis in plate axes",
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "up": {
+                "description": "The projector's up axis in plate axes",
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "view_direction": {
+            "description": "projection view: project from a named view of the 3D view's cameras, or current: its camera now",
+            "enum": [
+              "current",
+              "iso",
+              "top",
+              "bottom",
+              "front",
+              "back",
+              "left",
+              "right"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "object_id",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "set_texture_displacement",
+      "summary": "Add, edit, move or remove texture layers"
     },
     {
       "category": "Models",

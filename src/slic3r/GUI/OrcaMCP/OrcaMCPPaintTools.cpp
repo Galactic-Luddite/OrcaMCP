@@ -240,9 +240,8 @@ std::optional<std::string> texture_paint_refusal(const PaintChannel& channel, co
     const Slic3r::ModelVolume* owner = texture_stack_owner(object);
     const auto has_layer = [&](const Slic3r::TextureDisplacementLayer& layer) { return layer.slot == channel.texture_layer; };
     if (owner == nullptr || std::none_of(owner->texture_displacement_layers.begin(), owner->texture_displacement_layers.end(), has_layer))
-        // TODO(T5): name set_texture_displacement with action add here once that tool exists.
         return "Object " + std::to_string(object_id) + " has no texture displacement layer in slot " +
-               std::to_string(channel.texture_layer) + ", so there is nothing for its paint to apply: add a layer first";
+               std::to_string(channel.texture_layer) + ", so there is nothing for its paint to apply: add a layer first (set_texture_displacement, action add)";
     return std::nullopt;
 }
 

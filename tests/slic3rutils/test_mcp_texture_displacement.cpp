@@ -19,6 +19,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "slic3r/GUI/Camera.hpp"
+#include "slic3r/GUI/OrcaMCP/OrcaMCPServer.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPTextureDisplacement.hpp"
 #include "slic3r/GUI/TextureLibrary.hpp"
 
@@ -967,4 +968,18 @@ TEST_CASE("a projection frame carries its own view", "[McpTexture][orcamcp]")
           std::string::npos);
     std::string error;
     CHECK(read({{"action", "edit"}, {"layer", 0}, {"projection_frame", frame}, {"projection", "view"}}, error).has_value());
+}
+
+TEST_CASE("every bound of a layer setting is the registered schema's minimum and maximum", "[McpTexture][orcamcp]")
+{
+    const json schema = OrcaMCPServer::registered_tools().at("set_texture_displacement").input_schema;
+    const json& properties = schema.at("properties");
+    for (const SettingBound& bound : layer_setting_bounds()) {
+        INFO(bound.key);
+        const bool adjust = std::string(bound.key) == "brightness" || std::string(bound.key) == "contrast" || std::string(bound.key) == "sharpness" ||
+                            std::string(bound.key) == "blur" || std::string(bound.key) == "hue_deg";
+        const json& property = adjust ? properties.at("adjust_image").at("properties").at(bound.key) : properties.at(bound.key);
+        CHECK_THAT(property.at("minimum").get<double>(), WithinAbs(bound.min, 1e-9));
+        CHECK_THAT(property.at("maximum").get<double>(), WithinAbs(bound.max, 1e-9));
+    }
 }

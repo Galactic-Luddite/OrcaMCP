@@ -208,6 +208,16 @@ json tool_examples()
             {"imported_only", R"({"source": "user"})"},
             {"when_to_use", "Before adding a texture displacement layer: its texture ids, and which textures carry colours"}
         }},
+        {"set_texture_displacement", {
+            {"add", R"({"object_id": 0, "action": "add", "texture": "builtin/Knurl.png", "depth_mm": 0.4})"},
+            {"import", R"({"object_id": 0, "action": "add", "file_path": "/Users/me/bricks.png", "depth_mm": 0.6})"},
+            {"view_from_top", R"({"object_id": 0, "action": "edit", "layer": 0, "projection": "view", "view_direction": "top"})"},
+            {"frame", R"({"object_id": 0, "action": "edit", "layer": 0, "projection_frame": {"view": "front", "width_mm": 40, "height_mm": 30}})"},
+            {"move", R"({"object_id": 0, "action": "move", "layer": 0, "to_position": 1})"},
+            {"adjust", R"({"object_id": 0, "action": "edit", "layer": 0, "adjust_image": {"contrast": 0.3}})"},
+            {"remove", R"({"object_id": 0, "action": "remove", "layer": 1})"},
+            {"then", "paint_object with mode texture and texture_layer paints where the layer applies"}
+        }},
         {"delete_user_texture", {
             {"by_id", R"({"texture": "user/My bricks.png"})"},
             {"note", "Only an imported texture; layers using it keep their image (still_used_by lists them)"}

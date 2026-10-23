@@ -38,7 +38,7 @@ into a call that reports success and changes nothing. See [Error Handling](#erro
 | **Layer Ranges** | `get_object_layer_ranges`, `set_object_layer_range`, `delete_object_layer_range` |
 | **Filaments & colour** | `get_filaments`, `add_filament_slot`, `delete_filament_slot`, `set_object_filament`, `set_mixed_filament`, `delete_mixed_filament`, `set_filament_color`, `get_flush_volumes`, `set_flush_volumes`, `auto_calc_flush_volumes`, `get_toolchanger_config`, `suggest_color_mix`, `get_color_palette` |
 | **Painting** | `paint_object`, `remap_paint`, `get_object_paint`, `clear_object_paint`, `set_brim_ears`, `pick_facet` |
-| **Texture displacement** | `get_texture_library`, `delete_user_texture` |
+| **Texture displacement** | `get_texture_library`, `delete_user_texture`, `set_texture_displacement` |
 | **Slicing** | `slice_all`, `cancel_slice`, `wait_for_slice` (bridge-only), `get_slicing_status`, `export_gcode`, `get_print_estimate`, `add_layer_gcode`, `delete_layer_gcode` |
 | **Visualization** | `render_plate_view`, `get_preview_base64`, `set_gcode_view_type`, `show_view` |
 | **Printers** | `get_printers`, `select_printer`, `add_physical_printer`, `discover_printers`, `send_to_printer`, `get_printer_status`, `printer_control`, `list_printer_files`, `print_printer_file`, `match_project_to_printer` |
@@ -3981,6 +3981,63 @@ the answer lists them in `still_used_by`. A file delete, not an undo step.
 **Response:** `deleted` (`texture`, `name`, `path`), `still_used_by` (`[{object_id, layer}]`), `note` when it is
 not empty.
 
+### set_texture_displacement
+Add, edit, move or remove one layer of an object's stack, as the texture displacement panel does. Each layer applies
+where `paint_object` (`mode: texture`, `texture_layer`) paints it, and nothing reaches the print until the layers are
+baked into the mesh. One undo step per call that changes something; a call that changes nothing answers
+`changed: false` and takes none. Refused while an arrange, orient or bake runs, or the app's own mesh repair. When the
+call changes something, an open paint or texture panel is closed first, right before the undo step
+(`closed_toolbar_tool`).
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `object_id` | integer | Yes | Object index (0-based); the layers belong to the object |
+| `action` | string | Yes | `add` (first free slot), `edit` (the layer in slot `layer`), `remove` (the layer and its paint), `move` (to `to_position`) |
+| `layer` | integer 0..7 | edit, remove, move | The layer's slot. `add` takes none |
+| `to_position` | integer | move | 0-based position in slot order. A move swaps slots, so the layer may end in another slot: `layer` in the answer |
+| `texture` | string | No | A texture id from `get_texture_library`. `add` without a texture or `file_path` takes the library's first |
+| `file_path` | string | No | An image (png, jpg, bmp) to import into the library; an identical image already there is reused. `imported_texture.reused` says which |
+| `depth_mm` | number 0.01..10 | No | Displacement along the surface normal |
+| `tile_size_mm` | number 0.2..200 | No | Size of one tile |
+| `rotation_deg` | number 0..360 | No | |
+| `midlevel` | number 0..10 | No | The height that does not move the surface |
+| `smoothing` | number 0..1 | No | Blur of the height map |
+| `edge_fade_amount` | number 0.02..1 | No | How far `edge_fade` reaches in |
+| `offset` | [u, v] | No | Placement in texture repeats |
+| `invert`, `edge_fade`, `tile`, `color` | boolean | No | `color` needs a texture with colours |
+| `tile_method` | string | No | `repeat`, `mirrored_repeat` |
+| `projection` | string | No | `triplanar`, `cylindrical`, `spherical`, `unwrap`, `view`, `model_uv` (only a part with a UV channel) |
+| `blend` | string | No | `add`, `override`, `subtract`, `multiply`, `divide` |
+| `view_direction` | string | No | With `projection: view`: a named view, or `current` (the 3D view's camera now). Choosing `view` without one captures `current` |
+| `view_axes` | object | No | With `projection: view`: `{right, up}` in plate axes, as a layer reports them. Not with `view_direction` |
+| `projection_frame` | object / false | No | Project once through a rectangle: `{view or right+up, center (default: the object's centre), width_mm, height_mm}`, tiling off. `false` clears it. Not with `view_direction`, `view_axes` or a projection other than `view` |
+| `adjust_image` | object | No | `{brightness, contrast, sharpness, blur, hue_deg}`: saves an adjusted copy into the library and uses it |
+| `color_mix`, `color_mix_count`, `color_denoise` | boolean / integer | No | Stack-wide colour options |
+
+**Refused before anything changes:** a value outside the panel's range, an unknown texture or action, a missing
+file, a layer slot with no layer, `add` with all 8 slots used, `color` on a grayscale texture, `model_uv` without a UV
+channel, `view_direction` / `view_axes` with another projection, `adjust_image` on a layer with no image.
+
+**Stored but not active** (listed in the layer's `inactive_settings`): tile size under `model_uv`, blend on the base
+layer, edge fade amount with fade off, tile method with tile off, colour options with no layer colouring, placement
+under a projection frame.
+
+**Response:** `changed`, `action`, `object_id`, `layer` (the layer's whole state: image, settings, `view_axes`,
+`paint` per part, `painted`, `inactive_settings`, `warnings`; for `remove`, `removed_layer` instead), `stack_options`,
+`imported_texture` (`texture`, `name`, `path`, `reused`) when a file or an adjusted copy went to the library,
+`needs_bake` (some layer is painted), `next_steps` (paint a layer that is painted nowhere).
+
+```json
+{"object_id": 0, "action": "add", "texture": "builtin/Knurl.png", "depth_mm": 0.4}
+{"object_id": 0, "action": "add", "file_path": "/Users/me/bricks.png", "color": true}
+{"object_id": 0, "action": "edit", "layer": 0, "projection": "view", "view_direction": "top"}
+{"object_id": 0, "action": "edit", "layer": 0, "projection_frame": {"view": "front", "width_mm": 40, "height_mm": 30}}
+{"object_id": 0, "action": "move", "layer": 0, "to_position": 1}
+{"object_id": 0, "action": "edit", "layer": 0, "adjust_image": {"contrast": 0.3}}
+{"object_id": 0, "action": "remove", "layer": 1}
+```
+
 ---
 
 ## Printer Tools
@@ -4522,6 +4579,7 @@ nothing to suggest has no `next_steps`.
 | `render_plate_view`, on each view whose `uniform_image` is true (beside its `hint`) | `get_scene_info` | nothing printable on that plate was drawn |
 | | `render_plate_view` with `{plate_index, save_to_file: true}` | the plate's objects were drawn but the camera looked elsewhere: no views gives a contact sheet fitted to the plate |
 | `paint_object` with `mode: support` | `set_object_config` for that object: `enable_support` `"1"` and `support_type` `normal(manual)` (or `tree(manual)` when its type is a tree one), for support only where painted | the object has painted enforcers and `enable_support` is off for it, so they do nothing (`info_messages` says so too). Not for blockers alone or erased paint: turning support on is the opposite of what a blocker asks; and not with an `(auto)` type, which would also support every other overhang |
+| `set_texture_displacement` (add, edit, move) | `paint_object` with `mode: texture`, that `texture_layer`, `selection: all`, `state: painted` | the layer is painted on no part of the object, so it applies nowhere |
 | `paint_object` with `mode: texture` | `paint_object` with `mode: texture`, that `texture_layer`, `selection: all`, `state: painted` | the layer is painted on no part of the object, so it applies nowhere |
 | `split_object` `to: "parts"` | `get_object_components` for that object | the volume became two or more parts: their sizes, to find a fragment (`delete_object` with `volume_id` deletes one) |
 | `split_object` `to: "objects"`, `merge_parts` | `get_mesh_health`, `get_object_components` | as for `load_model`: a new object with the mesh warning icon, or a part of several shells |

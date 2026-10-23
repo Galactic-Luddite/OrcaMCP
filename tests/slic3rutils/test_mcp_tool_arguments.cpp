@@ -7,6 +7,7 @@
 #include "slic3r/GUI/OrcaMCP/OrcaMCPPrinterUtils.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPServer.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPServerInfo.hpp"
+#include "slic3r/GUI/OrcaMCP/OrcaMCPTextureDisplacement.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPToolArguments.hpp"
 #include "libslic3r/Model.hpp"
 
@@ -204,6 +205,37 @@ TEST_CASE("The brim ears a response lists are taken back as set_brim_ears' point
     const json ears = Slic3r::GUI::OrcaMCP::brim_ears_json(*object, 0);
     REQUIRE(ears.size() == 1);
     CHECK(refusal("set_brim_ears", {{"object_id", 0}, {"points", ears}, {"append", false}}) == "");
+}
+
+TEST_CASE("A texture layer a response reports is taken back by set_texture_displacement", "[McpToolArguments][orcamcp][tools]")
+{
+    // The request's own fields of layer_json (view_axes among them), sent back as an edit.
+    using namespace Slic3r;
+    using namespace Slic3r::GUI::OrcaMCP;
+    TextureDisplacementLayer layer;
+    layer.slot                   = 2;
+    layer.projection_method      = TextureProjectionMethod::ViewProjected;
+    layer.view_project_projective = true;
+    layer.view_project_right     = Vec3f(0, 1, 0);
+    layer.view_project_up        = Vec3f(0, 0, 1);
+    layer.offset                 = Vec2f(0.25f, 0.5f);
+    const json reported = layer_json(layer, 0, true, LayerTexture{}, std::nullopt, {}, false, {layer}, TextureDisplacementOptions{},
+                                     Transform3d::Identity());
+    json arguments = json::object();
+    for (const auto& [key, value] : reported.items())
+        if (listed_schema("set_texture_displacement").at("properties").contains(key))
+            arguments[key] = value;
+    REQUIRE(arguments.contains("view_axes"));
+    arguments["object_id"] = 0;
+    arguments["action"]    = "edit";
+    CHECK(refusal("set_texture_displacement", arguments) == "");
+    json bad_axes = {{"object_id", 0}, {"action", "edit"}, {"layer", 0}};
+    bad_axes["view_axes"]         = json::object();
+    bad_axes["view_axes"]["forward"] = json::array({0, 1, 0});
+    CHECK(::contains(refusal("set_texture_displacement", bad_axes), "has no key \"forward\""));
+    json cleared = {{"object_id", 0}, {"action", "edit"}, {"layer", 0}};
+    cleared["projection_frame"] = false;
+    CHECK(refusal("set_texture_displacement", cleared) == "");
 }
 
 TEST_CASE("The material mappings a send reports are taken back by both printer tools", "[McpToolArguments][orcamcp][tools]")
