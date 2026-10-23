@@ -234,6 +234,12 @@ MaskInput mask_input_of(const ModelVolume&, int volume_id);
 std::vector<int> layer_slots_of(const ModelVolume* owner);
 // [{layer, painted_facets, coverage_percent, stale?}] for `slots` from one part's reports; stale only when true.
 nlohmann::json texture_paint_layers_json(const std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>& row, const std::vector<int>& slots);
+// The texture state an object's description carries, cheap enough for every object of a scene (no selector is built):
+// {texture_layers: the owner's layer count, needs_bake: needs_bake_fast, model_uv: some model part has a UV channel}.
+nlohmann::json texture_object_fields(const ModelObject&);
+// A volume row's: {model_uv: the part has a UV channel, texture_layers: its layer count when it owns the stack (else 0),
+// texture_paint_layers: the slots whose mask is not empty}.
+nlohmann::json texture_volume_fields(const ModelObject&, std::size_t volume_idx);
 // Some layer of the stack is painted, readably, on some part.
 bool needs_bake(const std::vector<TextureDisplacementLayer>&, const std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>>&);
 // A readable mask (no triangle beyond the mesh's `facet_count`) with state 1 in it: what needs_bake counts as painted.

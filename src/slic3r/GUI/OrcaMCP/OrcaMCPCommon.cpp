@@ -3,6 +3,7 @@
 #include "OrcaMCPMeshHealth.hpp"
 #include "OrcaMCPPlateUtils.hpp"
 #include "OrcaMCPQuit.hpp"
+#include "OrcaMCPTextureDisplacement.hpp"
 #include "OrcaMCPSliceCredit.hpp"
 #include "OrcaMCPUiJob.hpp"
 #include "slic3r/GUI/BackgroundSlicingProcess.hpp"
@@ -718,6 +719,7 @@ nlohmann::json object_summary_json(const ModelObject& object, int object_index, 
     }
     add_object_identity(summary, object, object_index);
     add_mesh_warning(summary, health);
+    summary.update(texture_object_fields(object));
     return summary;
 }
 

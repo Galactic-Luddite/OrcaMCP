@@ -1025,6 +1025,28 @@ nlohmann::json texture_paint_layers_json(const std::array<MaskReport, TEXTURE_DI
     return out;
 }
 
+nlohmann::json texture_object_fields(const ModelObject& object)
+{
+    const ModelVolume* owner = texture_stack_owner(object);
+    const bool         uv    = std::any_of(object.volumes.begin(), object.volumes.end(),
+                                           [](const ModelVolume* v) { return v->is_model_part() && v->has_texture_uv(); });
+    return {{"texture_layers", owner != nullptr ? int(owner->texture_displacement_layers.size()) : 0},
+            {"needs_bake", needs_bake_fast(object, owner)},
+            {"model_uv", uv}};
+}
+
+nlohmann::json texture_volume_fields(const ModelObject& object, std::size_t volume_idx)
+{
+    const ModelVolume& volume = *object.volumes.at(volume_idx);
+    nlohmann::json     slots  = nlohmann::json::array();
+    for (int slot = 0; slot < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
+        if (!volume.texture_displacement_facet(slot).empty())
+            slots.push_back(slot);
+    return {{"model_uv", volume.has_texture_uv()},
+            {"texture_layers", &volume == texture_stack_owner(object) ? int(volume.texture_displacement_layers.size()) : 0},
+            {"texture_paint_layers", std::move(slots)}};
+}
+
 bool needs_bake(const std::vector<TextureDisplacementLayer>& stack, const std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>>& reports)
 {
     for (const TextureDisplacementLayer& layer : stack) {

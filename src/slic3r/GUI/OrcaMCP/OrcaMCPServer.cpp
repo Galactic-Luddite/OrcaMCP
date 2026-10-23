@@ -27,6 +27,7 @@
 #include "OrcaMCPSliceCredit.hpp"
 #include "OrcaMCPSliceProgress.hpp"
 #include "OrcaMCPToolArguments.hpp"
+#include "OrcaMCPTextureDisplacement.hpp"
 #include "OrcaMCPTransport.hpp"
 #include "OrcaMCPUiJob.hpp"
 #include "slic3r/GUI/GUI.hpp"
@@ -1062,7 +1063,9 @@ void OrcaMCPServer::register_builtin_tools()
         ToolCategory::Scene,
         "Plates, objects, bed and occupancy",
         "The scene: every plate (plate_index; is_current marks the plate per-plate tools act on, whose "
-        "area `bed` is) and the objects on it, with position, size, filaments and mesh_warning. Call it "
+        "area `bed` is) and the objects on it, with position, size, filaments and mesh_warning, and the texture "
+        "displacement state of each object: texture_layers (its layer count), needs_bake (some layer is "
+        "painted and not yet baked into the mesh) and model_uv (a part carries a UV channel). Call it "
         "first. An object's object_id is what every tool's object_id takes; object_index is the same "
         "number, kept for older readers, and internal_id is the app's own number, which no tool takes. "
         "Each plate also carries `occupancy`, the complete list of what stands on it in plate "
@@ -3727,7 +3730,8 @@ void OrcaMCPServer::register_builtin_tools()
         "3MF brings its geometry only, never its settings, and never renames the project. To open a 3MF as "
         "the project, with its settings, use load_project. next_steps names get_mesh_health for a "
         "loaded object with the mesh warning icon, and get_object_components for one with a part made "
-        "of several shells (a loose part or stray fragment).",
+        "of several shells (a loose part or stray fragment). loaded_objects carry get_scene_info's texture "
+        "fields (texture_layers, needs_bake, model_uv): model_uv is true for an OBJ that brought its UVs.",
         {
             {"type", "object"},
             {"properties", {
@@ -5590,7 +5594,7 @@ void OrcaMCPServer::register_builtin_tools()
         ToolCategory::Models,
         "One object's transform, volumes, slots",
         "One object's position, rotation, scale and bounding box, every volume (part, modifier, negative "
-        "volume, support blocker) with its type, filament, and bounding_box and position in plate mm on instance 0, and, as rotate_object reports them, the placement fields: instance_placement (each instance's plate and whether it is inside it), plate_index (instance 0's plate), plate_indices and on_bed (every instance inside its own plate).",
+        "volume, support blocker) with its type, filament, and bounding_box and position in plate mm on instance 0, and its texture state (model_uv; texture_layers, the layer count on the part that owns the stack; texture_paint_layers, the slots whose mask holds paint; the object also has texture_layers, needs_bake and model_uv), and, as rotate_object reports them, the placement fields: instance_placement (each instance's plate and whether it is inside it), plate_index (instance 0's plate), plate_indices and on_bed (every instance inside its own plate).",
         {
             {"type", "object"},
             {"properties", {
@@ -5665,6 +5669,7 @@ void OrcaMCPServer::register_builtin_tools()
                 result["volumes"]        = OrcaMCP::volume_rows_json(*obj);
                 result["filament"]       = obj->config.has("extruder") ? obj->config.extruder() : 1;
                 result["filaments_used"] = OrcaMCP::effective_object_filaments(*obj);
+                result.update(OrcaMCP::texture_object_fields(*obj));
 
                 return result;
             });

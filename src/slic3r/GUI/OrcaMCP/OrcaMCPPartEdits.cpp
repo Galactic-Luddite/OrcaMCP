@@ -6,6 +6,7 @@
 #include "OrcaMCPInstanceEdits.hpp"
 #include "OrcaMCPNextSteps.hpp"
 #include "OrcaMCPPaintSelect.hpp"
+#include "OrcaMCPTextureDisplacement.hpp"
 #include "OrcaMCPUiJob.hpp"
 
 #include "slic3r/GUI/Plater.hpp"
@@ -208,13 +209,15 @@ nlohmann::json volume_rows_json(const ModelObject& object)
     for (const VolumeFilament& v : describe_volume_filaments(object)) {
         const BoundingBoxf3 box    = volume_world_box(object, std::size_t(v.volume_id));
         const Vec3d         centre = box.center();
-        rows.push_back({{"volume_id", v.volume_id},
-                        {"name", v.name},
-                        {"type", v.type},
-                        {"own_filament", v.own_filament > 0 ? nlohmann::json(v.own_filament) : nlohmann::json(nullptr)},
-                        {"effective_filament", v.effective_filament},
-                        {"bounding_box", bbox_json(box)},
-                        {"position", {{"x", centre.x()}, {"y", centre.y()}, {"z", centre.z()}}}});
+        nlohmann::json row = {{"volume_id", v.volume_id},
+                              {"name", v.name},
+                              {"type", v.type},
+                              {"own_filament", v.own_filament > 0 ? nlohmann::json(v.own_filament) : nlohmann::json(nullptr)},
+                              {"effective_filament", v.effective_filament},
+                              {"bounding_box", bbox_json(box)},
+                              {"position", {{"x", centre.x()}, {"y", centre.y()}, {"z", centre.z()}}}};
+        row.update(texture_volume_fields(object, std::size_t(v.volume_id)));
+        rows.push_back(std::move(row));
     }
     return rows;
 }

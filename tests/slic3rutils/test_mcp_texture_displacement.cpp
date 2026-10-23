@@ -718,6 +718,53 @@ TEST_CASE("a part's texture paint is told per layer slot, a stale mask apart", "
     CHECK(texture_paint_layers_json(reports[0], {9, -1}).empty());
 }
 
+TEST_CASE("an object and its volume rows say their texture state without a selector", "[McpTexture][orcamcp]")
+{
+    Model        model;
+    ModelObject* object = cube_object(model);
+    ModelVolume* part   = object->volumes.front();
+
+    SECTION("a plain object has none")
+    {
+        const nlohmann::json fields = texture_object_fields(*object);
+        CHECK(fields["texture_layers"] == 0);
+        CHECK(fields["needs_bake"] == false);
+        CHECK(fields["model_uv"] == false);
+        const nlohmann::json row = texture_volume_fields(*object, 0);
+        CHECK(row["texture_layers"] == 0);
+        CHECK(row["model_uv"] == false);
+        CHECK(row["texture_paint_layers"].empty());
+    }
+    SECTION("layers, paint and a stale mask")
+    {
+        paint_facets(*part, 2, 4);
+        part->texture_displacement_layers = {layer_in(2), layer_in(5)};
+        PaintData stale;
+        stale.triangles_to_split.emplace_back(40, 0);
+        stale.used_states[1] = true;
+        part->texture_displacement_facet(5).set_data(PaintData(stale));
+
+        const nlohmann::json fields = texture_object_fields(*object);
+        CHECK(fields["texture_layers"] == 2);
+        CHECK(fields["needs_bake"] == true);
+        const nlohmann::json row = texture_volume_fields(*object, 0);
+        CHECK(row["texture_layers"] == 2);
+        CHECK(row["texture_paint_layers"] == nlohmann::json::array({2, 5}));
+
+        part->texture_displacement_facet(2).set_data(PaintData());
+        CHECK(texture_object_fields(*object)["needs_bake"] == false); // only the stale mask is left
+    }
+    SECTION("only the first model part owns the stack")
+    {
+        part->texture_displacement_layers = {layer_in(0)};
+        ModelVolume* second = object->add_volume(part->mesh());
+        second->texture_displacement_layers = {layer_in(0), layer_in(1)};
+        CHECK(texture_volume_fields(*object, 0)["texture_layers"] == 1);
+        CHECK(texture_volume_fields(*object, 1)["texture_layers"] == 0);
+        CHECK(texture_object_fields(*object)["texture_layers"] == 1);
+    }
+}
+
 TEST_CASE("what a mesh edit dropped is told from the state before", "[McpTexture][orcamcp]")
 {
     Model        model;

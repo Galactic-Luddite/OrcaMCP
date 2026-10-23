@@ -190,7 +190,10 @@ and a stray shell; the object list's warning icon shows for it):
       "filaments_used": [1],
       "filament_override_count": 0,
       "mesh_warning": true,
-      "mesh_warning_reason": "Error: 3 non-manifold edges."
+      "mesh_warning_reason": "Error: 3 non-manifold edges.",
+      "texture_layers": 0,
+      "needs_bake": false,
+      "model_uv": false
     }],
     "prime_tower": {
       "printed": false,
@@ -300,6 +303,15 @@ Then `mesh_warning_reason` is the list's one-line reason (`"Error: 25 non-manifo
 this response's `active_warnings` carries a `MeshErrors` entry for the object saying what an agent can
 do about it. `get_mesh_health` has the numbers and each volume's share; `with_model_object_features`
 adds the object's numbers here.
+
+#### Texture displacement state
+
+Every object also says where it stands with texture displacement, without building anything (cheap for
+a scene of many objects): `texture_layers` (the layers of its stack, which lives on its first model
+part), `needs_bake` (some layer is painted, readably, and not yet baked into the mesh: what
+`bake_texture_displacement` would change) and `model_uv` (some model part carries a UV channel, which
+only an OBJ with an MTL brings). `load_model`'s `loaded_objects` carry the same three.
+`get_texture_displacement` has each layer.
 
 #### Occupancy: everything standing on the plate
 
@@ -649,7 +661,7 @@ G-code preview, model files are refused too; `new_project` returns to an editabl
 |-------|-------------|
 | `status` | `success`, or `error` when the file failed to load, **loaded but added no objects** (for example a ZIP, whose file picker cannot open under MCP), did not produce a G-code preview (unreadable G-code), or was refused (see above) |
 | `file` | The path loaded |
-| `loaded_objects` | One entry per object the load added, in the same shape as `get_scene_info`'s `model_objects`: `object_id` (the index every tool takes), `object_index` (the same number, kept for older readers), `internal_id` (the app's own number, which no tool takes), `name`, `instance_count`, `volume_count`, `position`, `rotation_degrees`, `scale` `{x,y,z}` of its first instance, `bounding_box` `{size_x, size_y, size_z, min, max}` and `mesh_warning` (with `mesh_warning_reason` when the object list shows its warning icon). A merged multi-part file shows as one object with several volumes; a model scaled to fit the bed shows its scale. Empty for a G-code preview. |
+| `loaded_objects` | One entry per object the load added, in the same shape as `get_scene_info`'s `model_objects`: `object_id` (the index every tool takes), `object_index` (the same number, kept for older readers), `internal_id` (the app's own number, which no tool takes), `name`, `instance_count`, `volume_count`, `position`, `rotation_degrees`, `scale` `{x,y,z}` of its first instance, `bounding_box` `{size_x, size_y, size_z, min, max}` and `mesh_warning` (with `mesh_warning_reason` when the object list shows its warning icon) and the texture fields `texture_layers`, `needs_bake`, `model_uv`. A merged multi-part file shows as one object with several volumes; a model scaled to fit the bed shows its scale. Empty for a G-code preview. |
 | `filaments_added` | Filament slots the import added, because the model uses more filaments than the scene had (0 when none) |
 | `project_renamed_to` | Present only if the project's name changed: never for a model file, and always for a G-code preview (named after the file, so a later `save_project {}` writes there) |
 | `info_messages` | What happened, then what the slicer would have shown. A 3MF import says whether the file carried presets that were not applied. A prompt that offered a choice ends with the answer given, e.g. `"Object too large: ... scale it down to fit the print bed automatically? (auto-answered Yes)"`; the multi-part question also names the other `multipart` value |
@@ -2463,6 +2475,11 @@ negative volume, support blocker) with its type and filament. It does not check 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `object_id` | integer | Yes | Object index |
+
+**Texture fields:** the object has `texture_layers`, `needs_bake` and `model_uv` as `get_scene_info`
+describes them, and each volume row (here, and in the part tools' `volumes`) has `model_uv` (the part has
+a UV channel), `texture_layers` (its layer count when it owns the stack, else `0`) and
+`texture_paint_layers` (the slots whose mask holds paint, `[]` for none).
 
 **Placement fields:** alongside `position`, `bounding_box`, `rotation_degrees` and `scale`, the
 response carries the same placement fields the transform tools return:
