@@ -210,7 +210,15 @@ TEST_CASE("A texture layer, its image and its paint survive a project round trip
     REQUIRE(state1 != painted.end());
     CHECK(state1->facet_count == 4);
 
-    // The part's UV channel: a project does not keep it yet. (Pinned so a change is noticed; the 3MF
-    // writer changes this in the next commit.)
-    CHECK_FALSE(back.has_texture_uv());
+    // The part's UV channel is kept, every corner as the part held it (V as flipped at the OBJ load).
+    const ModelVolume& original = *model.objects.front()->volumes.front();
+    REQUIRE(back.has_texture_uv());
+    REQUIRE(back.texture_uv.size() == original.texture_uv.size());
+    for (size_t i = 0; i < original.texture_uv.size(); ++i) {
+        CHECK_THAT(back.texture_uv[i].x(), WithinAbs(original.texture_uv[i].x(), 1e-6));
+        CHECK_THAT(back.texture_uv[i].y(), WithinAbs(original.texture_uv[i].y(), 1e-6));
+    }
+    // So a model_uv layer still maps through it after the reopen.
+    CHECK(l.projection_method == TextureProjectionMethod::Cylindrical);
+    CHECK(new_layer(4, back.has_texture_uv()).projection_method == TextureProjectionMethod::ModelUV);
 }
