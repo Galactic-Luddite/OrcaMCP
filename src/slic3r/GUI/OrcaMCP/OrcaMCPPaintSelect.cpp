@@ -365,6 +365,13 @@ bool parse_state_mapping(const nlohmann::json& value, PaintStateMap& out, std::s
     return true;
 }
 
+std::string state_names(PaintMode mode)
+{
+    if (mode == PaintMode::Texture)
+        return "none or painted";
+    return mode == PaintMode::FuzzySkin ? "none or enforcer" : "none, enforcer or blocker";
+}
+
 bool parse_state_param(const nlohmann::json& params, PaintMode mode, const StateParam& param, int& out, std::string& error)
 {
     if (mode == PaintMode::Color) {
@@ -384,14 +391,15 @@ bool parse_state_param(const nlohmann::json& params, PaintMode mode, const State
         return true;
     }
     const std::string key    = param.state_key;
-    const std::string states = mode == PaintMode::FuzzySkin ? "none or enforcer" : "none, enforcer or blocker";
+    const std::string states = state_names(mode);
     if (!params.contains(key) || !params[key].is_string()) {
         error = std::string("mode '") + paint_mode_name(mode) + "' needs " + key + ": the state " + param.purpose + " (" + states + ")";
         return false;
     }
     if (!parse_paint_state(mode, params[key].get<std::string>(), out)) {
         error = "Unknown " + key + " for mode '" + paint_mode_name(mode) + "': expected " + states +
-                (mode == PaintMode::FuzzySkin ? " (fuzzy skin has no blocker: it is painted or it is not)" : "");
+                (mode == PaintMode::FuzzySkin ? " (fuzzy skin has no blocker: it is painted or it is not)" :
+                 mode == PaintMode::Texture ? " (a texture layer applies where it is painted)" : "");
         return false;
     }
     return true;

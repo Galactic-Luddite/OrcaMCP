@@ -187,6 +187,8 @@ inline constexpr StateParam k_repaint_from{"match_filament", "match_state", "who
 // project is at hand (color_slot_error, state_mapping_error). A number may come as a numeric string or
 // a whole float, as every other integer parameter may. False, with `error` naming the parameter and
 // what it is for, when it is missing or cannot be read as one.
+// The state names a mode's messages list: "none or painted" for texture, "none or enforcer" for fuzzy skin.
+std::string state_names(PaintMode mode);
 bool parse_state_param(const nlohmann::json& params, PaintMode mode, const StateParam& param, int& out, std::string& error);
 
 }}} // namespace Slic3r::GUI::OrcaMCP

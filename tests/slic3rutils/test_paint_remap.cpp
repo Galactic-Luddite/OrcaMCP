@@ -255,3 +255,84 @@ TEST_CASE("a valid state is accepted whatever the error string held before the c
     error = "left over from an earlier check";
     CHECK(parse_state_param(nlohmann::json{{"filament", 2}}, PaintMode::Color, k_paint_with, state, error));
 }
+
+// A texture displacement layer's mask is one more paint channel: one annotation per layer slot, holding the
+// single state "painted".
+TEST_CASE("a texture layer's mask is written and read as its own channel", "[orcamcp][PaintRemap]")
+{
+    Model        model;
+    ModelObject* object = model.add_object();
+    object->add_instance();
+    ModelVolume* volume = object->add_volume(TriangleMesh(its_make_cube(10.0, 10.0, 10.0)), ModelVolumeType::MODEL_PART, false);
+    const std::size_t facets = volume->mesh().its.indices.size();
+    REQUIRE(facets == 12);
+
+    CHECK(&annotation_for(*volume, PaintChannel::texture(3)) == &volume->texture_displacement_facet(3));
+    CHECK(&annotation_for(*volume, PaintChannel(PaintMode::Seam)) == &volume->seam_facets);
+
+    std::vector<int> states(facets, 0);
+    for (int i = 0; i < 4; ++i)
+        states[size_t(i)] = 1;
+    REQUIRE(apply_facet_states(*volume, PaintChannel::texture(3), states, true));
+
+    std::map<int, int> counts;
+    for (const PaintedStateInfo& info : read_volume_paint(*volume, PaintChannel::texture(3)))
+        counts[info.state] = info.facet_count;
+    CHECK(counts == std::map<int, int>{{0, int(facets) - 4}, {1, 4}});
+
+    CHECK(has_volume_paint(*volume, PaintChannel::texture(3)));
+    CHECK_FALSE(has_volume_paint(*volume, PaintChannel::texture(2)));
+    for (int slot : {0, 1, 2, 4, 5, 6, 7})
+        CHECK(volume->texture_displacement_facet(slot).empty());
+    for (PaintMode mode : {PaintMode::Color, PaintMode::Support, PaintMode::Seam, PaintMode::FuzzySkin})
+        CHECK_FALSE(has_volume_paint(*volume, mode));
+
+    SECTION("a second state is refused")
+    {
+        states[5] = 2;
+        CHECK_FALSE(apply_facet_states(*volume, PaintChannel::texture(1), states, true));
+        CHECK(volume->texture_displacement_facet(1).empty());
+    }
+    SECTION("the base a write is built on is the layer's own")
+    {
+        const PaintData base = annotation_for(*volume, PaintChannel::texture(3)).get_data();
+        CHECK(paint_base_unchanged(*volume, PaintChannel::texture(3), base));
+        CHECK_FALSE(paint_base_unchanged(*volume, PaintChannel::texture(2), base));
+    }
+    SECTION("clearing resets that layer only")
+    {
+        REQUIRE(apply_facet_states(*volume, PaintChannel::texture(5), states, true));
+        CHECK(clear_volume_paint(*volume, PaintChannel::texture(3)));
+        CHECK_FALSE(clear_volume_paint(*volume, PaintChannel::texture(3)));
+        CHECK(has_volume_paint(*volume, PaintChannel::texture(5)));
+    }
+}
+
+TEST_CASE("texture paint names its states none and painted", "[orcamcp][PaintRemap]")
+{
+    int state = -1;
+    CHECK(parse_paint_state(PaintMode::Texture, "painted", state));
+    CHECK(state == 1);
+    CHECK(parse_paint_state(PaintMode::Texture, "Enforcer", state));
+    CHECK(state == 1);
+    CHECK(parse_paint_state(PaintMode::Texture, "none", state));
+    CHECK(state == 0);
+    CHECK_FALSE(parse_paint_state(PaintMode::Texture, "blocker", state));
+    CHECK_FALSE(parse_paint_state(PaintMode::Support, "painted", state));
+    CHECK(max_paint_state_for(PaintMode::Texture) == 1);
+    CHECK(std::string(paint_mode_name(PaintMode::Texture)) == "texture");
+    CHECK(paint_state_label(PaintMode::Texture, 0) == "none");
+    CHECK(paint_state_label(PaintMode::Texture, 1) == "painted");
+    CHECK(paint_state_label(PaintMode::Texture, 2) == "state 2");
+    for (int s : {0, 1}) {
+        CHECK(parse_paint_state(PaintMode::Texture, paint_state_label(PaintMode::Texture, s), state));
+        CHECK(state == s);
+    }
+    CHECK(state_names(PaintMode::Texture) == "none or painted");
+
+    std::string error;
+    CHECK_FALSE(parse_state_param(nlohmann::json{{"state", "blocker"}}, PaintMode::Texture, k_paint_with, state, error));
+    CHECK(error.find("none or painted") != std::string::npos);
+    CHECK(state_mapping_error(PaintMode::Texture, PaintStateMap{{0, 1}}, 4).empty());
+    CHECK_FALSE(state_mapping_error(PaintMode::Texture, PaintStateMap{{0, 2}}, 4).empty());
+}

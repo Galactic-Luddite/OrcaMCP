@@ -160,8 +160,20 @@ bool resolve_paint_target(const nlohmann::json&  params,
 // The `mode` parameter both paint readers/clearers share: absent means all four annotations,
 // present means exactly one. Kept here, once, so get_object_paint and clear_object_paint cannot
 // drift the way a copy of this block did before this was factored out.
+// The one refusal of mode texture until paint_object and the paint readers take a texture layer.
+const char* const TEXTURE_MODE_REFUSAL = "mode texture needs texture_layer: get_texture_displacement reports each layer's paint";
+
+bool mode_is_texture(const nlohmann::json& params)
+{
+    return params.contains("mode") && params["mode"].is_string() && params["mode"].get<std::string>() == "texture";
+}
+
 bool resolve_paint_modes(const nlohmann::json& params, std::vector<PaintMode>& out, std::string& error)
 {
+    if (mode_is_texture(params)) {
+        error = TEXTURE_MODE_REFUSAL;
+        return false;
+    }
     out = {PaintMode::Color, PaintMode::Support, PaintMode::Seam, PaintMode::FuzzySkin};
     if (!params.contains("mode"))
         return true;
@@ -755,6 +767,8 @@ nlohmann::json run_paint_remap(const nlohmann::json& params, const PaintRemapReq
 nlohmann::json paint_by_state(const nlohmann::json& params)
 {
     PaintMode mode = PaintMode::Color;
+    if (mode_is_texture(params))
+        return error_response(TEXTURE_MODE_REFUSAL);
     if (params.contains("mode") && !(params["mode"].is_string() && parse_paint_mode(params["mode"].get<std::string>(), mode)))
         return error_response("Unknown mode; expected color, support, seam or fuzzy_skin");
     bool replace = false;
@@ -965,6 +979,8 @@ void OrcaMCPServer::register_paint_tools()
                     // is_string first: get<std::string>() on a number throws nlohmann's
                     // type_error.302, which the dispatcher forwards verbatim in place of the
                     // message below. Same leniency the scalar parameters already get in this file.
+                    if (mode_is_texture(params))
+                        return nlohmann::json{{"status", "error"}, {"message", TEXTURE_MODE_REFUSAL}};
                     if (params.contains("mode") &&
                         !(params["mode"].is_string() && parse_paint_mode(params["mode"].get<std::string>(), mode)))
                         return nlohmann::json{{"status", "error"},

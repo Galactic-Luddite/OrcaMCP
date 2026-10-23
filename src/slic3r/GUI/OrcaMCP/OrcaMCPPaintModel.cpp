@@ -2,6 +2,7 @@
 #include "OrcaMCPPaintModel.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cctype>
 
 namespace Slic3r { namespace GUI { namespace OrcaMCP {
@@ -38,6 +39,7 @@ const char* paint_mode_name(PaintMode mode)
     case PaintMode::Support:   return "support";
     case PaintMode::Seam:      return "seam";
     case PaintMode::FuzzySkin: return "fuzzy_skin";
+    case PaintMode::Texture:   return "texture";
     }
     return "color";
 }
@@ -48,6 +50,7 @@ FacetsAnnotation& annotation_for_mode(ModelVolume& mv, PaintMode mode)
     case PaintMode::Support:   return mv.supported_facets;
     case PaintMode::Seam:      return mv.seam_facets;
     case PaintMode::FuzzySkin: return mv.fuzzy_skin_facets;
+    case PaintMode::Texture:   assert(false && "a texture mask needs its layer: use annotation_for"); break;
     case PaintMode::Color:     break;
     }
     return mv.mmu_segmentation_facets;
@@ -56,6 +59,20 @@ FacetsAnnotation& annotation_for_mode(ModelVolume& mv, PaintMode mode)
 const FacetsAnnotation& annotation_for_mode(const ModelVolume& mv, PaintMode mode)
 {
     return annotation_for_mode(const_cast<ModelVolume&>(mv), mode);
+}
+
+FacetsAnnotation& annotation_for(ModelVolume& mv, const PaintChannel& channel)
+{
+    if (channel.mode == PaintMode::Texture) {
+        assert(channel.texture_layer >= 0 && channel.texture_layer < int(TEXTURE_DISPLACEMENT_MAX_LAYERS));
+        return mv.texture_displacement_facet(channel.texture_layer);
+    }
+    return annotation_for_mode(mv, channel.mode);
+}
+
+const FacetsAnnotation& annotation_for(const ModelVolume& mv, const PaintChannel& channel)
+{
+    return annotation_for(const_cast<ModelVolume&>(mv), channel);
 }
 
 int max_paint_state() { return int(EnforcerBlockerType::ExtruderMax); }
@@ -68,6 +85,8 @@ int max_paint_state_for(PaintMode mode)
     case PaintMode::Seam:      return int(EnforcerBlockerType::BLOCKER);
     // FUZZY_SKIN is an alias of ENFORCER, and the fuzzy skin gizmo has no blocker at all.
     case PaintMode::FuzzySkin: return int(EnforcerBlockerType::FUZZY_SKIN);
+    // A texture layer's mask holds one state: painted (the panel deserializes it with ENFORCER as the limit).
+    case PaintMode::Texture:   return int(EnforcerBlockerType::ENFORCER);
     case PaintMode::Color:     break;
     }
     return max_paint_state();
@@ -81,11 +100,11 @@ bool parse_paint_state(PaintMode mode, const std::string& name, int& out_state)
     if (lower == "none") { out_state = int(EnforcerBlockerType::NONE); return true; }
     // "fuzzy_skin" is the token paint_state_label hands back for FuzzySkin's enforcer state, so it
     // has to parse back to the same state or a caller who echoes a read into a write gets rejected.
-    if (lower == "enforcer" || (mode == PaintMode::FuzzySkin && lower == "fuzzy_skin")) {
+    if (lower == "enforcer" || (mode == PaintMode::FuzzySkin && lower == "fuzzy_skin") || (mode == PaintMode::Texture && lower == "painted")) {
         out_state = int(EnforcerBlockerType::ENFORCER);
         return true;
     }
-    if (lower == "blocker" && mode != PaintMode::FuzzySkin) {
+    if (lower == "blocker" && mode != PaintMode::FuzzySkin && mode != PaintMode::Texture) {
         out_state = int(EnforcerBlockerType::BLOCKER);
         return true;
     }
@@ -106,8 +125,8 @@ std::string paint_state_label(PaintMode mode, int state)
     if (state == int(EnforcerBlockerType::NONE))
         return "none";
     if (state == int(EnforcerBlockerType::ENFORCER))
-        return mode == PaintMode::FuzzySkin ? "fuzzy_skin" : "enforcer";
-    if (state == int(EnforcerBlockerType::BLOCKER))
+        return mode == PaintMode::FuzzySkin ? "fuzzy_skin" : mode == PaintMode::Texture ? "painted" : "enforcer";
+    if (state == int(EnforcerBlockerType::BLOCKER) && mode != PaintMode::Texture)
         return "blocker";
     return "state " + std::to_string(state);
 }
@@ -277,9 +296,9 @@ bool build_paint_write(const TriangleMesh&     mesh,
     return true;
 }
 
-bool apply_paint_data(ModelVolume& mv, PaintMode mode, PaintData&& data)
+bool apply_paint_data(ModelVolume& mv, const PaintChannel& channel, PaintData&& data)
 {
-    FacetsAnnotation& annotation = annotation_for_mode(mv, mode);
+    FacetsAnnotation& annotation = annotation_for(mv, channel);
     // FacetsAnnotation::set's own body (Model.cpp, FacetsAnnotation::set) with its serialize()
     // already done on the worker: compare, move, and touch() only on a real change, so an
     // unchanged write still leaves the undo stack alone.
@@ -289,26 +308,26 @@ bool apply_paint_data(ModelVolume& mv, PaintMode mode, PaintData&& data)
     return true;
 }
 
-std::vector<PaintData> capture_paint_base(const PaintTarget& target, PaintMode mode)
+std::vector<PaintData> capture_paint_base(const PaintTarget& target, const PaintChannel& channel)
 {
     std::vector<PaintData> base;
     base.reserve(target.volumes.size());
     for (ModelVolume* mv : target.volumes)
-        base.push_back(annotation_for_mode(*mv, mode).get_data());
+        base.push_back(annotation_for(*mv, channel).get_data());
     return base;
 }
 
-bool paint_base_unchanged(const ModelVolume& mv, PaintMode mode, const PaintData& base)
+bool paint_base_unchanged(const ModelVolume& mv, const PaintChannel& channel, const PaintData& base)
 {
-    return annotation_for_mode(mv, mode).get_data() == base;
+    return annotation_for(mv, channel).get_data() == base;
 }
 
-bool apply_facet_states(ModelVolume& mv, PaintMode mode, const std::vector<int>& states, bool replace)
+bool apply_facet_states(ModelVolume& mv, const PaintChannel& channel, const std::vector<int>& states, bool replace)
 {
     PaintWrite write;
-    if (!build_paint_write(mv.mesh(), mode, states, replace, annotation_for_mode(mv, mode).get_data(), write))
+    if (!build_paint_write(mv.mesh(), channel.mode, states, replace, annotation_for(mv, channel).get_data(), write))
         return false;
-    return apply_paint_data(mv, mode, std::move(write.data));
+    return apply_paint_data(mv, channel, std::move(write.data));
 }
 
 std::vector<PaintedStateInfo> summarize_paint_data(const TriangleMesh& mesh, const PaintData& data)
@@ -320,21 +339,21 @@ std::vector<PaintedStateInfo> summarize_paint_data(const TriangleMesh& mesh, con
     return summarize_selector(selector, its_surface_area(mesh.its));
 }
 
-std::vector<PaintedStateInfo> read_volume_paint(const ModelVolume& mv, PaintMode mode)
+std::vector<PaintedStateInfo> read_volume_paint(const ModelVolume& mv, const PaintChannel& channel)
 {
-    return summarize_paint_data(mv.mesh(), annotation_for_mode(mv, mode).get_data());
+    return summarize_paint_data(mv.mesh(), annotation_for(mv, channel).get_data());
 }
 
-bool has_volume_paint(const ModelVolume& mv, PaintMode mode)
+bool has_volume_paint(const ModelVolume& mv, const PaintChannel& channel)
 {
     // The same test clear_volume_paint makes before it writes, so the two cannot disagree about
     // whether a clear would change anything.
-    return !annotation_for_mode(mv, mode).empty();
+    return !annotation_for(mv, channel).empty();
 }
 
-bool clear_volume_paint(ModelVolume& mv, PaintMode mode)
+bool clear_volume_paint(ModelVolume& mv, const PaintChannel& channel)
 {
-    FacetsAnnotation& annotation = annotation_for_mode(mv, mode);
+    FacetsAnnotation& annotation = annotation_for(mv, channel);
     if (annotation.empty())
         return false;
     // FacetsAnnotation::reset() clears triangles_to_split/bitstream but not used_states, so a

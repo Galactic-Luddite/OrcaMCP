@@ -20,9 +20,28 @@ namespace Slic3r { namespace GUI { namespace OrcaMCP {
 // same type and the same machinery (Model.hpp:875-884: supported_facets, seam_facets,
 // mmu_segmentation_facets, fuzzy_skin_facets); only the meaning of the per-facet state differs,
 // which is why one tool with a mode parameter closes four gizmo-shaped gaps.
-enum class PaintMode { Color, Support, Seam, FuzzySkin };
+// Texture is the texture displacement panel's per-layer mask (ModelVolume::texture_displacement_facet): one
+// annotation per layer slot, so it is addressed by a PaintChannel, not by the mode alone.
+enum class PaintMode { Color, Support, Seam, FuzzySkin, Texture };
 
-// "color" | "support" | "seam" | "fuzzy_skin", any case. Returns false and leaves `out` alone
+// What a paint call addresses: a mode, and for Texture the layer slot (0..7) whose mask it is. Converts
+// implicitly from a PaintMode, so the four modes pass as before.
+struct PaintChannel
+{
+    PaintMode mode          = PaintMode::Color;
+    int       texture_layer = -1; // the slot, Texture only
+
+    PaintChannel(PaintMode m) : mode(m) {}
+    static PaintChannel texture(int slot)
+    {
+        PaintChannel c(PaintMode::Texture);
+        c.texture_layer = slot;
+        return c;
+    }
+};
+
+// "color" | "support" | "seam" | "fuzzy_skin", any case (texture is not parsed here: it needs a layer, so its
+// callers read texture_layer too). Returns false and leaves `out` alone
 // otherwise. Case-insensitive to match parse_paint_axis: both parsers are reached from the same
 // MCP tool's parameters, and having them disagree about case costs a caller a wasted round trip.
 // Brim ears are deliberately not a mode: they are BrimPoints on the ModelObject (Model.hpp:390),
@@ -32,6 +51,9 @@ const char* paint_mode_name(PaintMode mode);
 
 FacetsAnnotation&       annotation_for_mode(ModelVolume& mv, PaintMode mode);
 const FacetsAnnotation& annotation_for_mode(const ModelVolume& mv, PaintMode mode);
+// The annotation a channel addresses: annotation_for_mode for the four modes, the layer's mask for Texture.
+FacetsAnnotation&       annotation_for(ModelVolume& mv, const PaintChannel& channel);
+const FacetsAnnotation& annotation_for(const ModelVolume& mv, const PaintChannel& channel);
 
 // The largest state a facet can hold: int(EnforcerBlockerType::ExtruderMax), 32
 // (TriangleSelector.hpp:31-32). A project with more filament slots than that cannot paint
@@ -48,7 +70,7 @@ int max_paint_state();
 int max_paint_state_for(PaintMode mode);
 
 // Raw EnforcerBlockerType value for a caller-supplied state name, for every mode except Color:
-// "none" -> 0, "enforcer" -> 1, "blocker" -> 2. FuzzySkin also accepts "fuzzy_skin" as a synonym
+// "none" -> 0, "enforcer" -> 1, "blocker" -> 2. Texture: "none" -> 0, "painted" or "enforcer" -> 1, no blocker. FuzzySkin also accepts "fuzzy_skin" as a synonym
 // for "enforcer" (both -> 1) but rejects "blocker" (TriangleSelector.hpp:19 aliases FUZZY_SKIN to
 // ENFORCER, and GLGizmoFuzzySkin.hpp:29-30 paints only FUZZY_SKIN and NONE); the synonym exists
 // because paint_state_label(FuzzySkin, 1) reads back as "fuzzy_skin", and that token has to parse
@@ -208,22 +230,22 @@ bool build_paint_write(const TriangleMesh&     mesh,
                        const PaintData&        base,
                        PaintWrite&             out);
 
-// Main thread: write `data` into the annotation `mode` selects. FacetsAnnotation::set's own
+// Main thread: write `data` into the annotation `channel` selects. FacetsAnnotation::set's own
 // contract minus the serialize it would have run here -- compare, and touch() only when something
 // actually changed -- so this costs a comparison rather than a pass over every facet, and an
 // unchanged write still does not dirty the undo stack. True when the annotation changed.
-bool apply_paint_data(ModelVolume& mv, PaintMode mode, PaintData&& data);
+bool apply_paint_data(ModelVolume& mv, const PaintChannel& channel, PaintData&& data);
 
 // Main thread: what each targeted volume currently carries for `mode`, copied so a worker can
 // build a `replace: false` write on top of it. Only the paint path needs this, which is why the
 // plan itself is captured without it.
-std::vector<PaintData> capture_paint_base(const PaintTarget& target, PaintMode mode);
+std::vector<PaintData> capture_paint_base(const PaintTarget& target, const PaintChannel& channel);
 
 // Main thread: true when `mv` still carries exactly the paint `base` was captured from. A
 // `replace: false` write is computed on top of that base while the GUI thread is free, so a gizmo
 // stroke landing on the volume in between would be silently discarded by it. Asked before the
 // write, which is the last point at which that loss can still be refused instead.
-bool paint_base_unchanged(const ModelVolume& mv, PaintMode mode, const PaintData& base);
+bool paint_base_unchanged(const ModelVolume& mv, const PaintChannel& channel, const PaintData& base);
 
 // Any thread: every state carrying at least one facet in `data`, ascending by state, state 0
 // (unpainted) included so a caller can see how much of the volume is still bare. An unpainted
@@ -238,21 +260,21 @@ std::vector<PaintedStateInfo> summarize_paint_data(const TriangleMesh& mesh, con
 //   * the call was applied but the annotation already held exactly this.
 // A caller that must distinguish the two validates the size and the range itself first; the tool
 // layer does, so that it can report which entry was wrong.
-bool apply_facet_states(ModelVolume& mv, PaintMode mode, const std::vector<int>& states, bool replace);
+bool apply_facet_states(ModelVolume& mv, const PaintChannel& channel, const std::vector<int>& states, bool replace);
 
-// summarize_paint_data over the annotation `mode` selects.
-std::vector<PaintedStateInfo> read_volume_paint(const ModelVolume& mv, PaintMode mode);
+// summarize_paint_data over the annotation `channel` selects.
+std::vector<PaintedStateInfo> read_volume_paint(const ModelVolume& mv, const PaintChannel& channel);
 
-// True when the annotation `mode` selects carries data -- i.e. exactly when clear_volume_paint
+// True when the annotation `channel` selects carries data -- i.e. exactly when clear_volume_paint
 // would change something. Lets a caller decide whether a clear is worth an undo snapshot before
 // it mutates anything, which is the only order in which that question can be asked: a snapshot
 // has to be taken before the write it protects.
-bool has_volume_paint(const ModelVolume& mv, PaintMode mode);
+bool has_volume_paint(const ModelVolume& mv, const PaintChannel& channel);
 
-// FacetsAnnotation::reset() on the member `mode` selects, leaving the other three alone.
+// FacetsAnnotation::reset() on the member `channel` selects, leaving the other three alone.
 // Returns false when the annotation was already empty, so a caller can tell "cleared" from
 // "there was nothing to clear".
-bool clear_volume_paint(ModelVolume& mv, PaintMode mode);
+bool clear_volume_paint(ModelVolume& mv, const PaintChannel& channel);
 
 // ---- Renumbering painted states (remap_paint, paint_object's selection "state") ---------------
 
