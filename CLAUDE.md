@@ -1397,6 +1397,7 @@ echo "BU Windows CI's compiler cache keeps objects built with the old version af
 echo "BV two classes named Slic3r::IslandLocator (ConnectedBodies.hpp, MultiMaterialSegmentation.cpp) share one destructor symbol, aborting every painted slice (PR #16774; 0 = bug): $(U src/libslic3r/MultiMaterialSegmentation.cpp | grep -B6 '^class IslandLocator' | grep -c 'namespace {')"
 echo "BW the texture bake and prepare jobs still run their work inline, which ours moved into plan_/apply_ functions MCP also calls (a move: 1 = keep ours; 0 = upstream changed that code): $(U src/slic3r/GUI/Jobs/TextureDisplacementBakeJob.cpp | grep -c 'const auto moved = \[this\](size_t i)') / $(U src/slic3r/GUI/Jobs/TextureDisplacementPrepareJob.cpp | grep -c 'm_results\[i\] = GLGizmoTextureDisplacement::prepare_mesh')"
 echo "BX the texture panel still holds the seam-path search and the palette's mix pick inline, which ours moved into TextureDisplacementObject and compose_palette (a move: 1 = keep ours; 0 = upstream changed that code): $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'std::priority_queue<QN') / $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'mixes = pick_mixes(\*m_mix_ranking')"
+echo "BY the texture panel's Unjoin renames no group: unjoining the lowest chart of a group leaves the others in the group it was named for (a move to unjoin_island fixes it; 1 = bug still there): $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'layer->island_groups\[size_t(chart)\] = chart;')"
 ```
 
 Items M and N: upstream's `HttpServer::stop` closes every connection at once, so a reply still being
@@ -2110,6 +2111,12 @@ adds the public statics `palette_inputs` / `compose_palette` / `color_settings` 
 cache stays: `cached_palette()` calls `compose_palette`, `color_settings_for()` keeps its cache). `filament_palette()` gained
 an overload taking the extruder colours and the bundle, so a caller reads the app on the main thread itself. On a 1, upstream still has the inline code and ours stands; on a 0, upstream changed
 that code: redo the move on its version and re-run `slic3rutils_tests "[TextureObject],[TextureColorPalette]"`.
+
+Item BY: a join group's id is its lowest member's chart number (`join_island_groups` relabels to the lower of the two). The
+panel's Unjoin set only the chart's own entry to its number, so unjoining the group's lowest chart left the others in the
+group named after it, still "joined" to a chart that had left. Ours calls `unjoin_island` (`TextureDisplacementObject.cpp`,
+which MCP's `set_texture_unwrap` calls too): when the chart is its group's name, the others take the next-lowest member's
+number. On a 0, upstream fixed the line: take its version and re-run `slic3rutils_tests "[McpTexture]"`.
 
 Item I is not a fork patch -- we deliberately carry nothing for it (see
 `docs/superpowers/plans/2026-09-17-next-release-plan.md`, Stage 3). It is here so the sync notices

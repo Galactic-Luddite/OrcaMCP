@@ -780,9 +780,7 @@ nlohmann::json capture_stack(const nlohmann::json& params, std::optional<int> on
     const LibraryCopy library = library_copy();
     for (const Slic3r::TextureDisplacementLayer& layer : owner->texture_displacement_layers) {
         StackLayerFacts facts;
-        facts.layer = layer;
-        if (!layer.empty())
-            facts.color_capable = Slic3r::height_texture_has_color(layer);
+        facts.layer = layer; // holds the image's bytes: whether it has colours is read off the main thread
         if (const auto index = library_index_of(library.entries, layer)) {
             facts.texture.id     = library.ids[size_t(*index)];
             facts.texture.source = texture_source_name(library.entries[size_t(*index)].source);
@@ -807,6 +805,9 @@ nlohmann::json get_texture_displacement(const nlohmann::json& params)
         return captured;
 
     // The mask reports walk the paint, so they are made here, off the main thread, from the copies.
+    for (StackLayerFacts& facts : pending.layers)
+        if (!facts.layer.empty())
+            facts.color_capable = Slic3r::height_texture_has_color(facts.layer);
     const auto reports = mask_reports(pending.inputs);
     StackAnswer stack  = texture_stack_json(pending.layers, reports, only_volume, pending.owner_has_uv, pending.options, pending.to_world);
 
@@ -935,23 +936,34 @@ nlohmann::json get_texture_unwrap(const nlohmann::json& params)
     if (!refusal.is_null())
         return refusal;
 
-    // Pure mesh work on the copies, off the main thread.
+    // Pure mesh work on the copies, off the main thread. The solve cannot be interrupted, so the call's time and a quit are
+    // checked before it and after it.
+    using Clock                = std::chrono::steady_clock;
+    const auto deadline        = Clock::now() + tool_wait_cap();
+    const auto stopped         = [&]() { return Slic3r::this_thread_cancelled() || Clock::now() > deadline; };
+    const auto stopped_answer = [&]() {
+        return error_response(Slic3r::this_thread_cancelled() ? "The unwrap was stopped (the app is quitting)"
+                                                              : "The unwrap took longer than this call may wait, so it is not answered: call again (the solve is kept, so "
+                                                                "the next call finds it ready), or paint a smaller patch");
+    };
     const indexed_triangle_set patch = unwrap_patch(*in.mesh, in.mask, in.to_world);
     if (patch.indices.empty())
         return error_response("Layer " + std::to_string(*slot) + " has no painted triangle to unwrap");
+    if (stopped())
+        return stopped_answer();
     const Slic3r::PatchUnwrap unwrap = layer_unwrap(patch, in.layer);
-    if (Slic3r::this_thread_cancelled())
-        return error_response("The unwrap was stopped (the app is quitting)");
+    if (stopped())
+        return stopped_answer();
     if (unwrap.empty())
         return error_response("The layer's paint leaves nothing to unwrap");
     return unwrap_answer(in, in.layer, unwrap, include_vertices);
 }
 
-// The unwrap tool's change on the main thread. `expected` is what the plan was made from. With `may_close`, an open
+// The unwrap tool's change on the main thread. `expected` is what the plan was made from. An open
 // toolbar tool is closed first, only now that the call changes something; closing flushes the tool's paint into the model,
 // so the model is read again, and when it is no longer what was planned `replan` gets the new input (nothing is applied).
-nlohmann::json apply_unwrap_edit(const nlohmann::json& params, const UnwrapInput& expected, const UnwrapEdit& edit, bool may_close,
-                                 std::string& closed_tool, std::optional<UnwrapInput>& replan)
+nlohmann::json apply_unwrap_edit(const nlohmann::json& params, const UnwrapInput& expected, const UnwrapEdit& edit, std::string& closed_tool,
+                                 std::optional<UnwrapInput>& replan)
 {
     wxLogNull                 no_log;
     McpDialogSuppressionGuard guard;
@@ -969,10 +981,14 @@ nlohmann::json apply_unwrap_edit(const nlohmann::json& params, const UnwrapInput
 
     std::string          unused;
     Slic3r::ModelObject* object = resolve_object_id(params, plater->model(), now.object_id, unused);
-    if (may_close) {
-        if (const auto failed = close_toolbar_tool_for_change(*plater, now.object_id, object->volumes.size(), closed_tool))
+    {
+        std::string closed_now;
+        const auto  failed = close_toolbar_tool_for_change(*plater, now.object_id, object->volumes.size(), closed_now);
+        if (!closed_now.empty())
+            closed_tool = closed_now;
+        if (failed)
             return guard.report(with_closed_tool(*failed, closed_tool));
-        if (!closed_tool.empty()) {
+        if (!closed_now.empty()) {
             UnwrapInput after;
             if (const nlohmann::json refusal = capture_unwrap_input(params, expected.slot, /*for_edit=*/true, after); !refusal.is_null())
                 return finish(refusal);
@@ -1041,9 +1057,10 @@ nlohmann::json set_texture_unwrap(const nlohmann::json& params)
     std::optional<UnwrapEdit> edit = plan(in, error);
     if (!edit)
         return error_response(error);
-    for (int round = 0; round < 2 && edit->changed; ++round) {
+    // Each round closes an open toolbar tool again: one reopened while the plan was redone is closed before the write.
+    for (int round = 0; round < 3 && edit->changed; ++round) {
         std::optional<UnwrapInput> replan;
-        const nlohmann::json       applied = run_on_main_thread([&]() { return apply_unwrap_edit(params, in, *edit, /*may_close=*/round == 0, closed_tool, replan); });
+        const nlohmann::json       applied = run_on_main_thread([&]() { return apply_unwrap_edit(params, in, *edit, closed_tool, replan); });
         if (!replan) {
             if (applied.value("status", "") != "success")
                 return applied;
@@ -1054,6 +1071,8 @@ nlohmann::json set_texture_unwrap(const nlohmann::json& params)
         edit = plan(in, error);
         if (!edit)
             return with_closed_tool(error_response(error), closed_tool);
+        if (round == 2)
+            return with_closed_tool(error_response("The paint kept changing while the unwrap was worked out, so nothing was changed: call again"), closed_tool);
     }
     return answer_of(in, *edit);
 }
@@ -1118,6 +1137,7 @@ nlohmann::json set_texture_unwrap_schema()
     nlohmann::json properties = {
         {"object_id", {{"type", "integer"}, {"minimum", 0}, {"description", "Object index (0-based)"}}},
         {"layer", {{"type", "integer"}, {"minimum", 0}, {"maximum", int(Slic3r::TEXTURE_DISPLACEMENT_MAX_LAYERS) - 1}, {"description", "The slot of an unwrap layer that is painted on the object's first model part"}}},
+        {"unwrap_id", {{"type", "string"}, {"description", "The unwrap_id get_texture_unwrap (or the last answer) gave: with it, chart and vertex numbers are refused if the paint, the mesh or the seams changed since. Without it they are taken as they are"}}},
         {"seam_angle_deg", bounded_range(5., 90., "Edges sharper than this cut the unwrap into islands (the panel's Seam angle); once the layer has any seam, only seams cut")},
         {"auto_connect_islands", {{"type", "boolean"}, {"description", "Lay islands out as a connected net; turning it on lays them out now"}}},
         {"add_seams", int_pair_list("Mesh edges to cut along, as [vertex, vertex] pairs of the owner part's mesh")},
@@ -1306,8 +1326,10 @@ void OrcaMCPServer::register_texture_tools()
         "the seams and the seam angle (once the layer has any seam, only the seams cut). Each island has its area_mm2, centroid and bounding_box (the unwrap's mm), its "
         "placement (offset, rotation_deg, scale), its join group and the neighbours it shares an edge with; also the seams "
         "(pairs of mesh vertices), the seam angle, auto_connect_islands and the vertex edits. include_vertices lists every "
-        "unwrapped vertex (vertex, source_vertex, chart, uv), up to 20000. Chart and vertex numbers hold for this unwrap "
-        "only: set_texture_unwrap's entries are accepted back as they are. Refused for a layer that is not an unwrap or is "
+        "unwrapped vertex (vertex, source_vertex, chart, uv), up to 20000, and at most 5000 islands are listed "
+        "(islands_truncated). Chart and vertex numbers hold only until the paint, the mesh or the seams change; unwrap_id "
+        "names this unwrap, and set_texture_unwrap refuses numbers given with another. set_texture_unwrap's entries are "
+        "accepted back as they are. Refused for a layer that is not an unwrap or is "
         "painted nowhere on that part. Reading it changes nothing.",
         {
             {"type", "object"},
@@ -1332,7 +1354,7 @@ void OrcaMCPServer::register_texture_tools()
         "the nearest vertices, cut_islands), then the unwrap is made anew when seams or the angle changed (its charts are "
         "numbered anew, and the islands are laid out as a net when the layer asks for it), relayout, islands (placement by "
         "chart), join, unjoin, average_scale, clear_uv_edits, uv_edits. Chart and vertex numbers name the unwrap as get_texture_unwrap "
-        "reports it before this call, so a call that changes seams or the angle takes no island or vertex edit: send those "
+        "reports it before this call (pass its unwrap_id to have a stale number refused), so a call that changes seams or the angle takes no island or vertex edit: send those "
         "in a second call. Refused: an unknown chart or vertex, a join of charts that share no edge, a seam that is no mesh "
         "edge, a layer that is not an unwrap or is painted nowhere on the owner part. One undo step named as the panel names "
         "the edit, none for no change (changed false); an open toolbar tool is closed first when the call changes something. "

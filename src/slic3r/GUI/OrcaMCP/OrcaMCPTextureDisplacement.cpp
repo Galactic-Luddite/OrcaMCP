@@ -12,6 +12,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <tuple>
 
 #include "slic3r/GUI/TextureDisplacementObject.hpp"
 
@@ -1190,6 +1191,13 @@ std::optional<UnwrapRequest> read_unwrap_request(const json& params, std::string
     UnwrapRequest req;
     Reader        r{params, error};
 
+    if (params.contains("unwrap_id")) {
+        if (!params.at("unwrap_id").is_string()) {
+            error = "unwrap_id must be the text get_texture_unwrap gave";
+            return std::nullopt;
+        }
+        req.unwrap_id = params.at("unwrap_id").get<std::string>();
+    }
     if (params.contains("seam_angle_deg")) {
         double v = 0;
         if (!r.number("seam_angle_deg", v))
@@ -1341,7 +1349,6 @@ ChartFacts chart_facts(const PatchUnwrap& unwrap)
     out.high.assign(count, Vec2f::Constant(std::numeric_limits<float>::lowest()));
     out.neighbours.resize(count);
     const auto chart_of = [&](int vertex) { return vertex >= 0 && size_t(vertex) < unwrap.vertex_chart.size() ? unwrap.vertex_chart[size_t(vertex)] : -1; };
-    std::map<std::pair<int, int>, std::set<int>> edge_charts;
     for (const stl_triangle_vertex_indices& tri : unwrap.indices) {
         const int chart = chart_of(tri[0]);
         if (chart < 0 || size_t(chart) >= count || tri[1] < 0 || tri[2] < 0 || size_t(tri[0]) >= unwrap.uvs.size() ||
@@ -1350,12 +1357,6 @@ ChartFacts chart_facts(const PatchUnwrap& unwrap)
         const Vec2f e1 = unwrap.uvs[size_t(tri[1])] - unwrap.uvs[size_t(tri[0])];
         const Vec2f e2 = unwrap.uvs[size_t(tri[2])] - unwrap.uvs[size_t(tri[0])];
         out.area[size_t(chart)] += 0.5 * std::abs(double(e1.x()) * double(e2.y()) - double(e1.y()) * double(e2.x()));
-        for (int k = 0; k < 3; ++k) {
-            const int a = tri[k] < int(unwrap.source_vertex.size()) ? unwrap.source_vertex[size_t(tri[k])] : -1;
-            const int b = tri[(k + 1) % 3] < int(unwrap.source_vertex.size()) ? unwrap.source_vertex[size_t(tri[(k + 1) % 3])] : -1;
-            if (a >= 0 && b >= 0)
-                edge_charts[{std::min(a, b), std::max(a, b)}].insert(chart);
-        }
     }
     for (size_t i = 0; i < unwrap.uvs.size() && i < unwrap.vertex_chart.size(); ++i) {
         const int chart = unwrap.vertex_chart[i];
@@ -1364,11 +1365,32 @@ ChartFacts chart_facts(const PatchUnwrap& unwrap)
         out.low[size_t(chart)]  = out.low[size_t(chart)].cwiseMin(unwrap.uvs[i]);
         out.high[size_t(chart)] = out.high[size_t(chart)].cwiseMax(unwrap.uvs[i]);
     }
-    for (const auto& [edge, charts] : edge_charts)
-        for (const int a : charts)
-            for (const int b : charts)
-                if (a != b)
-                    out.neighbours[size_t(a)].insert(b);
+    // Two charts are neighbours where both have the same mesh edge on their outline: the outline edges (in unwrapped
+    // vertices) by the mesh edge they stand on, sorted, then equal neighbours with different charts linked.
+    struct OutlineEdge
+    {
+        int a, b, chart;
+        bool operator<(const OutlineEdge& o) const { return std::tie(a, b, chart) < std::tie(o.a, o.b, o.chart); }
+    };
+    std::vector<OutlineEdge> outline;
+    outline.reserve(unwrap.boundary_edges.size());
+    for (const auto& [u, v] : unwrap.boundary_edges) {
+        if (u < 0 || v < 0 || size_t(u) >= unwrap.source_vertex.size() || size_t(v) >= unwrap.source_vertex.size() || size_t(u) >= unwrap.vertex_chart.size())
+            continue;
+        const int a = unwrap.source_vertex[size_t(u)], b = unwrap.source_vertex[size_t(v)];
+        outline.push_back({std::min(a, b), std::max(a, b), unwrap.vertex_chart[size_t(u)]});
+    }
+    std::sort(outline.begin(), outline.end());
+    for (size_t i = 0; i < outline.size();) {
+        size_t j = i;
+        while (j < outline.size() && outline[j].a == outline[i].a && outline[j].b == outline[i].b)
+            ++j;
+        for (size_t x = i; x < j; ++x)
+            for (size_t y = i; y < j; ++y)
+                if (outline[x].chart != outline[y].chart && outline[x].chart >= 0 && size_t(outline[x].chart) < count)
+                    out.neighbours[size_t(outline[x].chart)].insert(outline[y].chart);
+        i = j;
+    }
     return out;
 }
 
@@ -1377,6 +1399,29 @@ json   point2(const Vec2f& v) { return {rounded(v.x()), rounded(v.y())}; }
 
 } // namespace
 
+std::string unwrap_id(const PatchUnwrap& unwrap, const TextureDisplacementLayer& layer)
+{
+    std::uint64_t h = 1469598103934665603ull;
+    const auto    mix = [&h](const void* data, std::size_t bytes) {
+        const unsigned char* p = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < bytes; ++i) {
+            h ^= p[i];
+            h *= 1099511628211ull;
+        }
+    };
+    mix(&unwrap.chart_count, sizeof(int));
+    mix(unwrap.source_vertex.data(), unwrap.source_vertex.size() * sizeof(int));
+    mix(unwrap.vertex_chart.data(), unwrap.vertex_chart.size() * sizeof(int));
+    mix(unwrap.indices.data(), unwrap.indices.size() * sizeof(stl_triangle_vertex_indices));
+    for (const auto& [key, uv] : layer.lscm_uv_overrides) {
+        mix(&key, sizeof(key));
+        mix(uv.data(), 2 * sizeof(float));
+    }
+    char text[17];
+    std::snprintf(text, sizeof text, "%016llx", static_cast<unsigned long long>(h));
+    return text;
+}
+
 json unwrap_json(const PatchUnwrap& unwrap, const TextureDisplacementLayer& layer, bool include_vertices)
 {
     json seams = json::array();
@@ -1384,7 +1429,8 @@ json unwrap_json(const PatchUnwrap& unwrap, const TextureDisplacementLayer& laye
         seams.push_back({s.first, s.second});
     const ChartFacts facts = chart_facts(unwrap);
     json             islands = json::array();
-    for (int c = 0; c < unwrap.chart_count; ++c) {
+    const int shown_charts = int(std::min(size_t(std::max(unwrap.chart_count, 0)), max_unwrap_islands));
+    for (int c = 0; c < shown_charts; ++c) {
         const TextureIsland isl = size_t(c) < layer.islands.size() ? layer.islands[size_t(c)] : TextureIsland{};
         const Vec2f centroid = size_t(c) < unwrap.chart_centroid.size() ? unwrap.chart_centroid[size_t(c)] : Vec2f::Zero();
         json        neighbours = json::array();
@@ -1416,6 +1462,8 @@ json unwrap_json(const PatchUnwrap& unwrap, const TextureDisplacementLayer& laye
                 {"seams", seams},
                 {"islands", islands},
                 {"uv_edits", uv_edits},
+                {"unwrap_id", unwrap_id(unwrap, layer)},
+                {"islands_truncated", shown_charts < unwrap.chart_count},
                 {"note", "Chart and vertex numbers hold for this unwrap only: changing the seams or the seam angle numbers them anew."}};
     if (!mesh_vertex_edits.empty())
         out["mesh_vertex_uv_edits"] = mesh_vertex_edits;
@@ -1553,13 +1601,19 @@ std::optional<UnwrapEdit> edit_unwrap(const TextureDisplacementLayer& before, co
     if (stop())
         return std::nullopt;
     const int         charts = unwrap.chart_count;
+    if (req.unwrap_id && (numbered || !req.cut_islands.empty()) && *req.unwrap_id != unwrap_id(unwrap, layer)) {
+        error = "unwrap_id " + *req.unwrap_id + " is not this unwrap's (" + unwrap_id(unwrap, layer) + "): the paint, the mesh or the seams changed since "
+                "the chart and vertex numbers were read, so nothing was changed; read get_texture_unwrap again";
+        return std::nullopt;
+    }
     std::set<std::string> kinds;
 
     // Settings.
     bool resolve = false, relayout = req.relayout;
+    bool angle_changed = false;
     if (req.seam_angle_deg && *req.seam_angle_deg != layer.lscm_seam_angle_deg) {
         layer.lscm_seam_angle_deg = *req.seam_angle_deg;
-        resolve                   = true;
+        angle_changed             = true;
         kinds.insert("settings");
     }
     if (req.auto_connect_islands && *req.auto_connect_islands != layer.auto_connect_islands) {
@@ -1647,6 +1701,8 @@ std::optional<UnwrapEdit> edit_unwrap(const TextureDisplacementLayer& before, co
         }
         seam_step("cut", was);
     }
+    // The library drops the angle once any seam exists, so then a new angle numbers nothing anew.
+    resolve      = angle_changed && seams.empty();
     out.resolved = resolve || sorted_seams(seams) != seams_before;
     if (out.resolved && numbered) {
         error = "Chart and vertex numbers (join, unjoin, islands, uv_edits) name the unwrap as it is before the call, and this call changes the seams or "
@@ -1684,14 +1740,26 @@ std::optional<UnwrapEdit> edit_unwrap(const TextureDisplacementLayer& before, co
     }
     if (!req.islands.empty()) {
         const auto was = layer.islands;
+        std::set<int> listed;
+        for (const IslandEdit& edit : req.islands)
+            listed.insert(edit.chart);
         for (const IslandEdit& edit : req.islands) {
             if (!fits(edit.chart)) {
                 error = chart_error("islands", edit.chart, new_charts);
                 return std::nullopt;
             }
             TextureIsland& island = layer.islands[size_t(edit.chart)];
-            if (edit.offset)
+            if (edit.offset) {
+                // As the pane's drag does: a pure move carries the chart's whole join group, the charts the call does not name.
+                if (!edit.rotation_deg && !edit.scale) {
+                    const Vec2f delta = *edit.offset - island.offset;
+                    const int   group = island_group_of(layer.island_groups, edit.chart);
+                    for (int c = 0; c < new_charts; ++c)
+                        if (c != edit.chart && !listed.count(c) && island_group_of(layer.island_groups, c) == group)
+                            layer.islands[size_t(c)].offset += delta;
+                }
                 island.offset = *edit.offset;
+            }
             if (edit.rotation_deg)
                 island.rotation_deg = *edit.rotation_deg;
             if (edit.scale)
@@ -1736,8 +1804,7 @@ std::optional<UnwrapEdit> edit_unwrap(const TextureDisplacementLayer& before, co
         const auto islands_was = layer.islands;
         const auto groups_was  = layer.island_groups;
         layer.islands[size_t(chart)] = TextureIsland{};
-        if (size_t(chart) < layer.island_groups.size())
-            layer.island_groups[size_t(chart)] = chart;
+        unjoin_island(layer.island_groups, chart, new_charts);
         if (!islands_equal(islands_was, layer.islands) || !groups_equal(groups_was, layer.island_groups))
             kinds.insert("unjoin");
     }

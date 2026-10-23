@@ -4084,8 +4084,8 @@ unwrap, a mask that no longer fits its mesh, or a layer painted nowhere on that 
 (`[[vertex, vertex]]`, mesh vertices of the owner part), `islands` (each `chart`, `area_mm2`, `centroid`,
 `bounding_box {min, max}` in the unwrap's mm, `offset`, `rotation_deg`, `scale`, `group` (charts of one group move
 together), `neighbours` (charts sharing a mesh edge)), `uv_edits` (`[{vertex, uv}]`, unwrapped vertices; edits stored by
-mesh vertex are `mesh_vertex_uv_edits`), `vertices` (`vertex`, `source_vertex`, `chart`, `uv`), `note`. Chart and vertex
-numbers hold for this unwrap only: changing the seams or the seam angle numbers them anew. The panel always packs
+mesh vertex are `mesh_vertex_uv_edits`), `vertices` (`vertex`, `source_vertex`, `chart`, `uv`), `unwrap_id`, `islands_truncated` (at most 5000 islands are listed), `note`. Chart and vertex
+numbers hold only until the paint, the mesh or the seams change; `unwrap_id` names this unwrap, and `set_texture_unwrap` given it refuses numbers of another. The panel always packs
 islands with no gap, so there is no padding setting.
 
 ### set_texture_unwrap
@@ -4103,6 +4103,7 @@ while an arrange, orient or bake runs or the app's own mesh repair.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `object_id`, `layer` | integer | The object and the unwrap layer's slot |
+| `unwrap_id` | string | The id `get_texture_unwrap` gave: `join`, `unjoin`, `islands`, `cut_islands` and `uv_edits` are refused when the unwrap is another (read it again). Without it they are taken as they are |
 | `seam_angle_deg` | number 5..90 | Edges sharper than this cut islands apart, as long as the layer has no seam: with any seam, only seams cut (the panel's rule) |
 | `auto_connect_islands` | boolean | Lay islands out as a connected net; turning it on does so now |
 | `add_seams`, `remove_seams` | `[[v, v]]` | Mesh edges (vertices of the owner part's mesh); a pair that is no mesh edge is refused for `add_seams` |
@@ -4110,7 +4111,7 @@ while an arrange, orient or bake runs or the app's own mesh repair.
 | `clear_seams` | boolean | Remove every seam first |
 | `cut_islands` | `[chart]` | Cut each chart in two across its longest axis |
 | `relayout` | boolean | Lay the islands out as a connected net again (hand placements go) |
-| `islands` | `[{chart, offset?, rotation_deg?, scale?}]` | Set a chart's own placement (unwrap mm; scale 0.001..1000). Only the fields given change; joined charts do not follow. An entry of `get_texture_unwrap`'s `islands` is accepted as it is |
+| `islands` | `[{chart, offset?, rotation_deg?, scale?}]` | Set a chart's own placement (unwrap mm; scale 0.001..1000). Only the fields given change; a placement that moves only `offset` carries the chart's join group (charts the call does not name), as dragging an island in the pane does. An entry of `get_texture_unwrap`'s `islands` is accepted as it is |
 | `join` | `[{chart, to?}]` | Unfold a chart against a neighbour it shares an edge with (default: the nearest) and group the two |
 | `unjoin` | `[chart]` | Back to the chart's own packed place, out of its group |
 | `average_scale` | boolean | Every island takes the mean scale |

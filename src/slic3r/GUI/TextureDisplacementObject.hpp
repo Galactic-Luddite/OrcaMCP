@@ -75,6 +75,10 @@ int island_group_of(const std::vector<int> &groups, int c);
 // Merges chart `b`'s join group into chart `a`'s (materialising `groups` to `chart_count` first).
 void join_island_groups(std::vector<int> &groups, int a, int b, int chart_count);
 
+// Takes chart `chart` out of its join group, the rest staying grouped. A group is named after its lowest member, so when
+// `chart` is that member the others are renamed after the next-lowest. `groups` is materialised to `chart_count` first.
+void unjoin_island(std::vector<int> &groups, int chart, int chart_count);
+
 // Why smoothed_baked_mesh() gave nothing, for the panel's two messages.
 enum class TextureSmoothSkip { None, NothingPainted, NoInteriorVertices };
 // The owner's mesh with the displaced surface relaxed over the vertices of its painted triangles (the

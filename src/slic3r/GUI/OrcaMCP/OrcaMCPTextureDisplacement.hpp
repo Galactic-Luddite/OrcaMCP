@@ -268,6 +268,7 @@ struct IslandEdit
 };
 struct UnwrapRequest
 {
+    std::optional<std::string> unwrap_id;      // from get_texture_unwrap: refuse chart / vertex numbers when the unwrap is another
     std::optional<float> seam_angle_deg;       // 5..90 (SetSeamAngle's clamp, refused outside)
     std::optional<bool>  auto_connect_islands;
     std::vector<std::pair<int, int>>                 add_seams, remove_seams; // mesh vertex pairs
@@ -285,12 +286,17 @@ struct UnwrapRequest
 // request: the panel and the bake always pack with none.
 std::optional<UnwrapRequest> read_unwrap_request(const nlohmann::json& params, std::string& error);
 
-// The most vertices unwrap_json lists.
+// The most vertices and islands unwrap_json lists.
 constexpr std::size_t max_unwrap_vertices = 20000;
+constexpr std::size_t max_unwrap_islands  = 5000;
+// What the chart and vertex numbers of `unwrap` are tied to: its charts, vertices and triangles and the layer's vertex edits.
+// Changes when the paint, the mesh or the seams do; island placements and joins leave it.
+std::string unwrap_id(const PatchUnwrap&, const TextureDisplacementLayer&);
 // {chart_count, vertex_count, triangle_count, seam_angle_deg, auto_connect_islands, seams [[v, v]],
 // islands [{chart, area_mm2, centroid, bounding_box {min, max}, offset, rotation_deg, scale, group, neighbours}],
 // uv_edits [{vertex, uv}] (and mesh_vertex_uv_edits [{mesh_vertex, uv}] for edits stored by mesh vertex), vertices?
-// [{vertex, source_vertex, chart, uv}] (the first max_unwrap_vertices; truncated), note}. The unwrap is the layer's
+// [{vertex, source_vertex, chart, uv}] (the first max_unwrap_vertices; truncated), unwrap_id, islands_truncated (the first
+// max_unwrap_islands are listed), note}. The unwrap is the layer's
 // with its uv edits applied; coordinates are the unwrap's mm. Everything in it is taken back by read_unwrap_request.
 nlohmann::json unwrap_json(const PatchUnwrap&, const TextureDisplacementLayer&, bool include_vertices);
 

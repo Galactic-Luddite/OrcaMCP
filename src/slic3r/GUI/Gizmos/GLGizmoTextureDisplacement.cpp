@@ -2983,8 +2983,7 @@ void GLGizmoTextureDisplacement::run_uv_command(int cmd, float value)
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Unjoin texture island"), UndoRedo::SnapshotType::GizmoAction);
         layer->islands[size_t(chart)] = TextureIsland{}; // back to its own packed position
         // Break its join link too, so it stops moving with the others (the rest stay grouped).
-        if (size_t(chart) < layer->island_groups.size())
-            layer->island_groups[size_t(chart)] = chart;
+        unjoin_island(layer->island_groups, chart, m_uv_editor_unwrap.chart_count);
         rebuild_preview();
     }
     else if (cmd == int(Command::PickTexture)) {

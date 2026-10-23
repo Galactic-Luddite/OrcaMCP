@@ -392,4 +392,34 @@ void join_island_groups(std::vector<int> &groups, int a, int b, int chart_count)
             x = g;
 }
 
+void unjoin_island(std::vector<int> &groups, int chart, int chart_count)
+{
+    if (chart < 0 || chart_count <= 0 || chart >= chart_count)
+        return;
+    if (int(groups.size()) < chart_count) {
+        const size_t old = groups.size();
+        groups.resize(size_t(chart_count));
+        for (size_t i = old; i < groups.size(); ++i)
+            groups[i] = int(i);
+    }
+    for (size_t i = 0; i < groups.size(); ++i)
+        if (groups[i] < 0)
+            groups[i] = int(i);
+    const int group = groups[size_t(chart)];
+    if (group == chart) {
+        // The group is named after this chart: the others take the name of the next-lowest of them.
+        int next = -1;
+        for (size_t i = 0; i < groups.size(); ++i)
+            if (int(i) != chart && groups[i] == group) {
+                next = int(i);
+                break;
+            }
+        if (next >= 0)
+            for (size_t i = 0; i < groups.size(); ++i)
+                if (int(i) != chart && groups[i] == group)
+                    groups[i] = next;
+    }
+    groups[size_t(chart)] = chart;
+}
+
 } // namespace Slic3r::GUI

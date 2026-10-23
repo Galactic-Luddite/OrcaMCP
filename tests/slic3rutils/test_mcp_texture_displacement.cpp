@@ -1301,6 +1301,145 @@ TEST_CASE("an unwrap lists at most max_unwrap_vertices vertices", "[McpTexture][
     CHECK(unwrap_json(unwrap, TextureDisplacementLayer{}, false)["islands"].size() == 1);
 }
 
+TEST_CASE("unjoining a group's lowest chart leaves the others grouped without it", "[McpTexture][orcamcp]")
+{
+    std::vector<int> groups = {0, 0, 2, 0};
+    unjoin_island(groups, 0, 4);
+    CHECK(island_group_of(groups, 0) == 0);
+    CHECK(island_group_of(groups, 1) == 1);
+    CHECK(island_group_of(groups, 3) == 1);
+    CHECK(island_group_of(groups, 1) != island_group_of(groups, 0));
+
+    groups = {0, 0, 2, 0};
+    unjoin_island(groups, 3, 4); // a member that is not the name
+    CHECK(island_group_of(groups, 3) == 3);
+    CHECK(island_group_of(groups, 1) == island_group_of(groups, 0));
+
+    groups = {};
+    unjoin_island(groups, 1, 3); // not grouped at all
+    CHECK(island_group_of(groups, 1) == 1);
+    CHECK(island_group_of(groups, 0) == 0);
+
+    CubeUnwrap cube;
+    const json u = unwrap_json(cube.unwrap, cube.layer, false);
+    const int  a = u["islands"][0]["neighbours"][0].get<int>();
+    const int  b = u["islands"][0]["neighbours"][1].get<int>();
+    TextureDisplacementLayer layer = cube.ok({{"join", {{{"chart", a}, {"to", 0}}}}}).layer;
+    layer = cube.ok(layer, {{"join", {{{"chart", b}, {"to", 0}}}}}).layer;
+    REQUIRE(island_group_of(layer.island_groups, a) == island_group_of(layer.island_groups, 0));
+    const UnwrapEdit apart = cube.ok(layer, {{"unjoin", {0}}});
+    CHECK(island_group_of(apart.layer.island_groups, a) != island_group_of(apart.layer.island_groups, 0));
+    CHECK(island_group_of(apart.layer.island_groups, a) == island_group_of(apart.layer.island_groups, b));
+}
+
+TEST_CASE("moving one island of a join group moves the group, as dragging does", "[McpTexture][orcamcp]")
+{
+    CubeUnwrap cube;
+    const json u = unwrap_json(cube.unwrap, cube.layer, false);
+    const int  n = u["islands"][0]["neighbours"][0].get<int>();
+    const TextureDisplacementLayer joined = cube.ok({{"join", {{{"chart", n}, {"to", 0}}}}}).layer;
+    const Vec2f was_n = joined.islands[size_t(n)].offset;
+    const Vec2f was_0 = joined.islands[0].offset;
+
+    const UnwrapEdit moved = cube.ok(joined, {{"islands", {{{"chart", 0}, {"offset", {was_0.x() + 5, was_0.y() + 7}}}}}});
+    CHECK(moved.layer.islands[0].offset == Vec2f(was_0.x() + 5, was_0.y() + 7));
+    CHECK_THAT(moved.layer.islands[size_t(n)].offset.x(), WithinAbs(was_n.x() + 5, 1e-4));
+    CHECK_THAT(moved.layer.islands[size_t(n)].offset.y(), WithinAbs(was_n.y() + 7, 1e-4));
+
+    // A chart the call names keeps the placement it is given, and a rotation or scale moves no one else.
+    const UnwrapEdit both = cube.ok(joined, {{"islands", {{{"chart", 0}, {"offset", {1, 1}}}, {{"chart", n}, {"offset", {9, 9}}}}}});
+    CHECK(both.layer.islands[size_t(n)].offset == Vec2f(9, 9));
+    const UnwrapEdit turned = cube.ok(joined, {{"islands", {{{"chart", 0}, {"rotation_deg", 45}}}}});
+    CHECK(turned.layer.islands[size_t(n)].offset == was_n);
+}
+
+TEST_CASE("chart numbers are tied to an unwrap id", "[McpTexture][orcamcp]")
+{
+    CubeUnwrap cube;
+    const json  u  = unwrap_json(cube.unwrap, cube.layer, false);
+    const std::string id = u["unwrap_id"];
+    REQUIRE(id.size() == 16);
+    CHECK(cube.ok({{"unwrap_id", id}, {"islands", {{{"chart", 1}, {"scale", 2}}}}}).changed);
+    const std::string stale = cube.refused({{"unwrap_id", "0000000000000000"}, {"islands", {{{"chart", 1}, {"scale", 2}}}}});
+    CHECK(stale.find("read get_texture_unwrap again") != std::string::npos);
+    CHECK(cube.refused({{"unwrap_id", "0000000000000000"}, {"cut_islands", {1}}}).find("unwrap_id") != std::string::npos);
+    CHECK(cube.refused({{"unwrap_id", "0000000000000000"}, {"uv_edits", {{{"vertex", 1}, {"uv", {0, 0}}}}}}).find("unwrap_id") != std::string::npos);
+    // Without it, today's behaviour; and a settings-only call has no numbers to check.
+    CHECK(cube.ok({{"islands", {{{"chart", 1}, {"scale", 2}}}}}).changed);
+    CHECK_FALSE(cube.ok({{"unwrap_id", "0000000000000000"}}).changed);
+
+    // A placement leaves the id alone; a seam, or a vertex edit, changes it.
+    const UnwrapEdit placed = cube.ok({{"islands", {{{"chart", 1}, {"scale", 2}}}}});
+    CHECK(unwrap_json(placed.unwrap, placed.layer, false)["unwrap_id"] == id);
+    const UnwrapEdit cut = cube.ok({{"cut_islands", {0}}});
+    CHECK(unwrap_json(cut.unwrap, cut.layer, false)["unwrap_id"] != id);
+    const UnwrapEdit edited = cube.ok({{"uv_edits", {{{"vertex", 1}, {"uv", {4, 4}}}}}});
+    CHECK(unwrap_json(edited.unwrap, edited.layer, false)["unwrap_id"] != id);
+}
+
+TEST_CASE("a seam angle changed while seams stand renumbers nothing", "[McpTexture][orcamcp]")
+{
+    CubeUnwrap cube;
+    const auto&               tri = cube.mesh.indices[0];
+    TextureDisplacementLayer  seamed = cube.layer;
+    seamed.lscm_seam_edges = {{std::min(tri[0], tri[1]), std::max(tri[0], tri[1])}};
+    const UnwrapEdit angle = cube.ok(seamed, {{"seam_angle_deg", 80}});
+    CHECK(angle.changed);
+    CHECK_FALSE(angle.resolved);
+    // So island edits may go with it.
+    CHECK(cube.ok(seamed, {{"seam_angle_deg", 80}, {"islands", {{{"chart", 0}, {"scale", 2}}}}}).changed);
+    // Without seams the angle does renumber.
+    CHECK(cube.ok({{"seam_angle_deg", 80}}).resolved);
+}
+
+TEST_CASE("every neighbour a cube's charts report is a face sharing an edge", "[McpTexture][orcamcp]")
+{
+    CubeUnwrap cube;
+    const json u = unwrap_json(cube.unwrap, cube.layer, false);
+    for (const json& island : u["islands"]) {
+        CHECK(island["neighbours"].size() == 4);
+        for (const json& n : island["neighbours"])
+            CHECK(n != island["chart"]);
+    }
+}
+
+TEST_CASE("an unwrap lists at most max_unwrap_islands islands", "[McpTexture][orcamcp]")
+{
+    PatchUnwrap unwrap;
+    unwrap.chart_count    = int(max_unwrap_islands) + 3;
+    unwrap.chart_centroid.assign(size_t(unwrap.chart_count), Vec2f::Zero());
+    const json capped = unwrap_json(unwrap, TextureDisplacementLayer{}, false);
+    CHECK(capped["islands"].size() == max_unwrap_islands);
+    CHECK(capped["islands_truncated"] == true);
+}
+
+TEST_CASE("a whole get_texture_unwrap answer is taken back by edit_unwrap and changes nothing", "[McpTexture][orcamcp]")
+{
+    CubeUnwrap cube;
+    TextureDisplacementLayer layer = cube.ok({{"relayout", true}}).layer;
+    const int neighbour = unwrap_json(cube.unwrap, cube.layer, false)["islands"][0]["neighbours"][0].get<int>();
+    layer = cube.ok(layer, {{"join", {{{"chart", neighbour}, {"to", 0}}}}}).layer;
+    const auto& tri = cube.mesh.indices[0];
+    layer.lscm_seam_edges = {{std::min(tri[0], tri[1]), std::max(tri[0], tri[1])}};
+    layer = cube.ok(layer, {{"seam_angle_deg", 50}}).layer;
+    const PatchUnwrap unwrap = layer_unwrap(cube.patch, layer);
+    const json reported = unwrap_json(unwrap, layer, true);
+
+    // Every field of the answer the request also takes, the seams as add_seams.
+    const json schema = OrcaMCPServer::registered_tools().at("set_texture_unwrap").input_schema;
+    json       arguments = json::object();
+    for (const auto& [key, value] : reported.items())
+        if (schema.at("properties").contains(key))
+            arguments[key] = value;
+    arguments["add_seams"] = reported["seams"];
+    REQUIRE(arguments.contains("islands"));
+    REQUIRE(arguments.contains("unwrap_id"));
+    const UnwrapEdit same = cube.ok(layer, arguments);
+    CHECK_FALSE(same.changed);
+    CHECK(same.snapshot.empty());
+    CHECK(same.unwrap.chart_count == unwrap.chart_count);
+}
+
 TEST_CASE("only an imported texture can be deleted", "[McpTexture][orcamcp]")
 {
     CHECK_FALSE(user_texture_delete_refusal(entry("Mine", "/u/Mine.png", TextureSource::User), "user/Mine.png").has_value());
