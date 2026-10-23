@@ -222,3 +222,25 @@ TEST_CASE("A texture layer, its image and its paint survive a project round trip
     CHECK(l.projection_method == TextureProjectionMethod::Cylindrical);
     CHECK(new_layer(4, back.has_texture_uv()).projection_method == TextureProjectionMethod::ModelUV);
 }
+
+TEST_CASE("A model_uv layer is still a model_uv layer after a project round trip", "[McpTexture][3mf]")
+{
+    Model model = load_obj_model(fixture("cube.obj"));
+    REQUIRE(only_volume(model).has_texture_uv());
+    const std::vector<unsigned char> png = file_bytes(fixture("cube.png"));
+    REQUIRE_FALSE(png.empty());
+
+    TextureDisplacementLayer layer = make_layer(0, png);
+    layer.projection_method        = TextureProjectionMethod::ModelUV;
+    model.objects.front()->volumes.front()->texture_displacement_layers.push_back(layer);
+
+    ScopedTemporaryFile file(".3mf");
+    store_project(model, file.string());
+
+    ScopedTemporaryDir backup_dir("orca_texfiles_modeluv");
+    Model              reloaded;
+    REQUIRE(load_project(file.string(), reloaded, backup_dir));
+    const ModelVolume& back = only_volume(reloaded);
+    REQUIRE(back.texture_displacement_layers.size() == 1);
+    CHECK(back.texture_displacement_layers.front().projection_method == TextureProjectionMethod::ModelUV);
+}
