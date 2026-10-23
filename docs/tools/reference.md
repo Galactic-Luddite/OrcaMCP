@@ -38,7 +38,7 @@ into a call that reports success and changes nothing. See [Error Handling](#erro
 | **Layer Ranges** | `get_object_layer_ranges`, `set_object_layer_range`, `delete_object_layer_range` |
 | **Filaments & colour** | `get_filaments`, `add_filament_slot`, `delete_filament_slot`, `set_object_filament`, `set_mixed_filament`, `delete_mixed_filament`, `set_filament_color`, `get_flush_volumes`, `set_flush_volumes`, `auto_calc_flush_volumes`, `get_toolchanger_config`, `suggest_color_mix`, `get_color_palette` |
 | **Painting** | `paint_object`, `remap_paint`, `get_object_paint`, `clear_object_paint`, `set_brim_ears`, `pick_facet` |
-| **Texture displacement** | `get_texture_library`, `delete_user_texture`, `set_texture_displacement` |
+| **Texture displacement** | `get_texture_library`, `delete_user_texture`, `get_texture_displacement`, `set_texture_displacement`, `get_texture_unwrap`, `set_texture_unwrap`, `bake_texture_displacement`, `prepare_texture_mesh` |
 | **Slicing** | `slice_all`, `cancel_slice`, `wait_for_slice` (bridge-only), `get_slicing_status`, `export_gcode`, `get_print_estimate`, `add_layer_gcode`, `delete_layer_gcode` |
 | **Visualization** | `render_plate_view`, `get_preview_base64`, `set_gcode_view_type`, `show_view` |
 | **Printers** | `get_printers`, `select_printer`, `add_physical_printer`, `discover_printers`, `send_to_printer`, `get_printer_status`, `printer_control`, `list_printer_files`, `print_printer_file`, `match_project_to_printer` |
@@ -4794,6 +4794,12 @@ nothing to suggest has no `next_steps`.
 | `paint_object` with `mode: support` | `set_object_config` for that object: `enable_support` `"1"` and `support_type` `normal(manual)` (or `tree(manual)` when its type is a tree one), for support only where painted | the object has painted enforcers and `enable_support` is off for it, so they do nothing (`info_messages` says so too). Not for blockers alone or erased paint: turning support on is the opposite of what a blocker asks; and not with an `(auto)` type, which would also support every other overhang |
 | `set_texture_displacement` (add, edit, move) | `paint_object` with `mode: texture`, that `texture_layer`, `selection: all`, `state: painted` | the layer is painted on no part of the object, so it applies nowhere |
 | `paint_object` with `mode: texture` | `paint_object` with `mode: texture`, that `texture_layer`, `selection: all`, `state: painted` | the layer is painted on no part of the object, so it applies nowhere |
+| `bake_texture_displacement`, `prepare_texture_mesh` | `slice_all` | the mesh changed, so the plate (every plate, when the bake added mixed filament slots) lost its slice |
+| | `get_filaments` | a colour bake added mixed filament slots |
+| | `bake_texture_displacement` | layers are still painted after the call (`needs_bake`) |
+| `repair_mesh`, `split_object`, `merge_parts`, `cut_object`, `set_volume_type`, `assemble_objects`, `delete_object` (`volume_id`), `reload_from_disk`, `replace_volume_with_file` | `set_texture_displacement` (`action: add`) | `texture_changes.layers_lost`: the edit dropped texture layers |
+| | `get_object_paint` with `mode: texture` | `texture_changes.paint_lost`: texture paint is gone and has to be painted again |
+| | `get_texture_displacement` | texture data that no longer fits is kept (`stacks_unused`, `uv_lost`, `unwrap_edits_stale`, `paint_unused`, `paint_reassigned`) |
 | `split_object` `to: "parts"` | `get_object_components` for that object | the volume became two or more parts: their sizes, to find a fragment (`delete_object` with `volume_id` deletes one) |
 | `split_object` `to: "objects"`, `merge_parts` | `get_mesh_health`, `get_object_components` | as for `load_model`: a new object with the mesh warning icon, or a part of several shells |
 | `add_volume` | `move_object` with `object_id` and `volume_id` | a primitive: it stands beside the object |

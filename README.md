@@ -20,7 +20,7 @@
 ## What this is
 
 OrcaMCP is OrcaSlicer with a [Model Context Protocol](https://modelcontextprotocol.io/) server
-built into the application. Point Claude Code, or any MCP client, at it and the agent gets 107
+built into the application. Point Claude Code, or any MCP client, at it and the agent gets 115
 tools that do what you do with the mouse: load and cut models, paint them, change any setting,
 slice, look at the result, and send it to the printer. It runs on your machine and talks to your
 printers over your own network. Nothing goes to a cloud.
@@ -106,6 +106,12 @@ that used to mean an afternoon in menus.
 - "Put the seam on the back edge where nobody will see it."
 - "Fuzzy skin on the grip, smooth everywhere else."
 - "Which parts of this model are painted, and with what?"
+
+**Texture**
+
+- "Give the handle a knurled texture, only where I hold it, and bake it."
+- "Put the brick pattern on the front face only, two layers deep, then slice it."
+- "Which of my objects have texture layers that are painted but not baked yet?"
 
 **Color and multi-material**
 
@@ -195,7 +201,7 @@ that used to mean an afternoon in menus.
    claude mcp add --transport http orca-slicer http://127.0.0.1:13618/mcp
    ```
 
-   That reaches the one window on that port, and only while it runs, with the app's 103 tools. The
+   That reaches the one window on that port, and only while it runs, with the app's 111 tools. The
    bridge adds four of its own (`start_orca`, `wait_for_slice`, `list_instances`, `select_instance`)
    and answers while the app is down, so it stays the recommended way. See
    [Configuration](docs/setup/configuration.md).
@@ -234,7 +240,7 @@ API, with no cloud account and no closed network plugin. Details, limits and set
 
 ## Tools
 
-107 tools, by category: 103 in the app, and 4 the bridge answers itself. Parameters and examples
+115 tools, by category: 111 in the app, and 4 the bridge answers itself. Parameters and examples
 for each are in the [tools reference](docs/tools/reference.md).
 
 | Category | Tools |
@@ -248,6 +254,7 @@ for each are in the [tools reference](docs/tools/reference.md).
 | **Layer ranges** | `delete_object_layer_range`, `get_object_layer_ranges`, `set_object_layer_range` |
 | **Filaments and color** | `add_filament_slot`, `auto_calc_flush_volumes`, `delete_filament_slot`, `delete_mixed_filament`, `get_color_palette`, `get_filaments`, `get_flush_volumes`, `get_toolchanger_config`, `set_filament_color`, `set_flush_volumes`, `set_mixed_filament`, `set_object_filament`, `suggest_color_mix` |
 | **Painting** | `clear_object_paint`, `get_object_paint`, `paint_object`, `pick_facet`, `remap_paint`, `set_brim_ears` |
+| **Texture displacement** | `bake_texture_displacement`, `delete_user_texture`, `get_texture_displacement`, `get_texture_library`, `get_texture_unwrap`, `prepare_texture_mesh`, `set_texture_displacement`, `set_texture_unwrap` |
 | **Slicing** | `add_layer_gcode`, `cancel_slice`, `delete_layer_gcode`, `export_gcode`, `get_print_estimate`, `get_slicing_status`, `slice_all` |
 | **Adaptive layers** | `apply_adaptive_layer_height`, `clear_adaptive_layer_height` |
 | **Vision** | `get_preview_base64`, `render_plate_view`, `set_gcode_view_type`, `show_view` |

@@ -88,7 +88,7 @@ cd build && ctest --output-on-failure
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Transport | HTTP + stdio bridge | OrcaSlicer is a GUI app; pure stdio doesn't work. `/mcp` is also MCP's Streamable HTTP, so a client can connect without the bridge, to one running instance and its 103 tools (`docs/setup/configuration.md`) |
+| Transport | HTTP + stdio bridge | OrcaSlicer is a GUI app; pure stdio doesn't work. `/mcp` is also MCP's Streamable HTTP, so a client can connect without the bridge, to one running instance and its 111 tools (`docs/setup/configuration.md`) |
 | Server location | Embedded in OrcaSlicer | Reuse existing HTTP server, from port 13618; several instances each take their own port (see "Several instances at once") |
 | Protocol | JSON-RPC 2.0 over HTTP | Standard MCP protocol |
 | Threading | Main thread via CallAfter | OpenGL/GUI operations require main thread |
@@ -99,9 +99,9 @@ cd build && ctest --output-on-failure
 
 **Status**: Complete & Tested ✓
 
-### MCP Tools (103 in the app, 107 reachable)
+### MCP Tools (111 in the app, 115 reachable)
 
-The registry holds 107: the app serves 103 through `tools/list`, and four are registered as
+The registry holds 115: the app serves 111 through `tools/list`, and four are registered as
 bridge-only and served by the bridge: `start_orca`, which launches OrcaSlicer and so cannot be
 answered by it, `wait_for_slice`, a wait the app's one request thread could not do without
 stalling every other call, and `list_instances` / `select_instance`, which choose the running app
@@ -495,6 +495,11 @@ gh release upload v2.3.2.10 ./path/to/new/artifact.exe -R okets/OrcaMCP
 | `src/slic3r/GUI/OrcaMCP/OrcaMCPArrangeTools.cpp` | `arrange_objects` (one plate, `plate_index`, or `all_plates`), `set_instance_count` and `fill_bed_with_instances`, and where the arrange menu's options are kept and written; their decisions apart from the app in `OrcaMCPArrangeOptions.cpp` (the options, their keys and refusals) and `OrcaMCPInstanceEdits.cpp` (instance refusals, crowded copies) (unit-tested in `tests/slic3rutils/test_arrange_options.cpp`, `test_instance_edits.cpp`) |
 | `src/slic3r/GUI/OrcaMCP/OrcaMCPPlateTools.cpp` | `set_plate_settings` (the plate settings dialog's OK, the name editor, the lock icon) and the plate settings `get_scene_info` reports; the decisions -- reading and refusing a plate's settings, the global bed type's refusals, the vase settings -- in `OrcaMCPPlateSettings.cpp` (unit-tested in `tests/slic3rutils/test_plate_settings.cpp`) |
 | `src/slic3r/GUI/OrcaMCP/OrcaMCPMeshRepair.cpp` | `repair_mesh`'s decisions apart from the app: its refusals, which step a plan leads to, the words for each, and its answer (unit-tested in `tests/slic3rutils/test_mesh_repair.cpp`); the tool's three steps are in `OrcaMCPMeshTools.cpp` |
+| `src/slic3r/GUI/OrcaMCP/OrcaMCPTextureDisplacement.cpp` | The texture tools' decisions apart from the app: every layer setting with its bounds, `layer_json` / `read_layer_request` (the answer's shape is accepted back), `inactive_settings`, the texture library list, `texture_stack_json`, the unwrap request and answer (`unwrap_json`, `read_unwrap_request`), the bake and prepare requests and plans (`read_bake_request`, `bake_options`, `read_prepare_request`, the uniform-subdivision cap), the paint-mask reports (`mask_has_paint`, `needs_bake_fast`), `texture_state_of` and the `texture_changes` of mesh edits (`add_texture_changes`, `rekey_texture_state`) (unit-tested in `tests/slic3rutils/test_mcp_texture_displacement.cpp`, `[McpTexture][orcamcp]`) |
+| `src/slic3r/GUI/OrcaMCP/OrcaMCPTextureTools.cpp` | `get_texture_library`, `delete_user_texture`, `get_texture_displacement`, `set_texture_displacement` (image import and reuse, `edit_stack`: refusals, then library writes, then the panel closed, then one snapshot) and `get_texture_unwrap` / `set_texture_unwrap` (capture on the main thread, edit on copies on the HTTP thread, apply on the main thread, re-planned once when closing the panel changed the input) |
+| `src/slic3r/GUI/OrcaMCP/OrcaMCPTextureBakeTools.cpp` | `bake_texture_displacement` and `prepare_texture_mesh`: capture, plan, finish (see "Texture bake: the plan off the main thread"); `register_texture_bake_tools` |
+| `src/slic3r/GUI/TextureDisplacementObject.cpp` | The texture panel's model-side logic as free functions of a `ModelObject`, with no wx and no app (item BX): stack owner, parts, layer moves and swaps, seam paths, chart cuts, join and unjoin (item BY), the smoothed baked mesh (unit-tested in `tests/slic3rutils/test_texture_color_palette.cpp`, `[TextureObject]`) |
+| `tests/slic3rutils/test_mcp_texture_files.cpp` | A textured OBJ's UV channel (`tests/data/textured_cube`) and a texture stack's round trip through a project 3MF, UV channel included (`[McpTexture][3mf]`); `tests/libslic3r/test_3mf.cpp` holds the 3MF format's own cases (item BZ) |
 | `src/slic3r/GUI/OrcaMCP/OrcaMCPMainThreadGate.hpp` | How a call hands work to the main thread and waits, and how quitting releases it: the gate is `QueuedCalls` (`src/slic3r/Utils/QueuedCall.hpp`), with `call_through` for a tool's json (see "Threading Model"; unit-tested in `tests/slic3rutils/test_mcp_shutdown.cpp`, `test_queued_call.cpp`) |
 | `src/slic3r/GUI/OrcaMCP/OrcaMCPQuit.cpp` | Quitting while a modal dialog is open: which dialogs are open, ending the innermost unanswered, holding the close until they are gone, and `quit_app`'s refusals (unit-tested in `tests/slic3rutils/test_mcp_quit.cpp`); the wx side (modal hook, turn timer) is `OrcaMCPQuitApp.cpp` |
 | `src/slic3r/GUI/OrcaMCP/OrcaMCPLoginServer.cpp` | Where the cloud login's callback is answered: a second port of the MCP server, on its thread (unit-tested in `tests/slic3rutils/test_http_server.cpp`) |
@@ -757,6 +762,21 @@ was captured), close an open toolbar tool only if something is to be applied, an
 The call's start is taken before the capture; plans are held to start + `tool_wait_cap`, and applying stops
 once that plus `batch_apply_reserve` (10 s: the bridge leaves 15 s past the cap) has passed, the plans not
 yet applied being `timed_out`. An object deleted meanwhile is `deleted_meanwhile` (counted under `failed`).
+
+### Texture bake: the plan off the main thread
+
+`bake_texture_displacement` and `prepare_texture_mesh` (`OrcaMCPTextureBakeTools.cpp`) take `repair_mesh`'s three steps, over the
+panel's own jobs' functions (item BW): **capture** on the main thread (`capture_texture_bake`, `capture_texture_prepare`;
+refused while the pipeline is busy, a UI job runs, the app's own bake or repair runs, or the object has no layer with an image
+or no paint), **plan** on the HTTP thread on copies (`plan_texture_bake`, `plan_texture_prepare`, `plan_remesh`; stopped by
+`this_thread_cancelled()` or the call's wait cap, `tool_wait_cap`, which answers `timed_out` with nothing changed), **apply** on
+the main thread only if the object is still as it was captured (`texture_bake_applies_to`, which compares part ids, drops and
+the preview adjustment). An open toolbar tool (the texture panel) is closed only in the first round and only when something will
+change; if closing changed what the plan read (strokes the panel had not flushed), the call plans once more and never closes
+twice. The classic pipeline is two phases under ONE `Plater::TakeSnapshot`: the prepare is planned and applied (no snapshot of
+its own), the bake input is rebuilt from the prepared model with the resting drops recomputed, planned, and applied. Smoothing
+runs on the main thread (`smoothed_baked_mesh` reads the live volume; linear work). A colour bake adds mixed filament slots,
+which are not an undo step (`undo_warning`). `set_texture_unwrap` follows the same shape with `apply_unwrap_edit`.
 
 ### Shutdown: never wait on something that waits on the main thread
 
@@ -1158,6 +1178,7 @@ it as a project and renamed it silently, and a later `save_project {}` overwrote
 | Presets not installed | `install_presets` (its reload of every preset can raise an error dialog; the wizard's own windows are never opened) |
 | Filament slots | `add_filament_slot`, `delete_filament_slot` (the app's slot delete can ask about a merge into a mix, and re-select the Filament settings, which asks about unsaved changes -- refused before that) |
 | Parts and mesh edits | `split_object`, `add_volume`, `set_volume_type`, `assemble_objects`, `merge_parts`, `invalidate_cut_info`, `delete_object`, `repair_mesh`, `reload_from_disk`, `replace_volume_with_file` (the object list's actions they run can prompt: a floating piece, a cut piece's delete, a file to load, a file that moved, a file of several parts) |
+| Texture displacement | `set_texture_displacement` (reads an image file; a bad file is silent in the wx log), `set_texture_unwrap`, `bake_texture_displacement`, `prepare_texture_mesh`, and `paint_object` / `clear_object_paint` with `mode: texture` (they close an open texture or paint panel first, which can take its own undo step; no dialog is ever shown by the bake or prepare apply steps) |
 | Slicing & Printing | `slice_all`, `get_slicing_status`, `get_print_estimate`, `export_gcode`, `send_to_printer` (the first four apply a settings change the slicer has not taken in yet, and that update can raise an error dialog: `OrcaMCP::apply_pending_update` takes the caller's open guard) |
 
 Error messages that would have been shown in dialogs are captured and returned in the response as `error_messages` (for failures) or `info_messages` (for non-critical information). A tool that assembles `info_messages` itself from `messages()` lists the errors there too; `report()` and `notices()` keep them apart.
@@ -1215,7 +1236,7 @@ agent must be able to do. "MCP cannot repair a mesh: the GUI's repair is not exp
 repair exists", and an agent told a user repair works only on Windows; the object list's Repair
 (`ObjectList::fix_through_cgal`, CGAL) runs on every platform.
 
-**Endpoints with active_warnings:** `get_scene_info`, `slice_all`, `get_slicing_status`, `get_print_estimate`, `load_model`, `arrange_objects`, `auto_orient`, all transform tools, `repair_mesh`, `undo`, `redo`
+**Endpoints with active_warnings:** `get_scene_info`, `slice_all`, `get_slicing_status`, `get_print_estimate`, `load_model`, `arrange_objects`, `auto_orient`, all transform tools, `repair_mesh`, `bake_texture_displacement`, `prepare_texture_mesh`, `undo`, `redo`
 
 The `count` field is always present (even when 0) to help confirm issues have been resolved.
 

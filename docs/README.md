@@ -9,7 +9,7 @@ Welcome to the OrcaMCP documentation. This folder contains detailed documentatio
 | [CLAUDE.md](../CLAUDE.md) | **Start here** - AI agent quick reference guide |
 | [Architecture](architecture/) | System design and technical decisions |
 | [ADRs](adr/) | Architecture Decision Records |
-| [Tools Reference](tools/) | Complete API reference for all 107 MCP tools |
+| [Tools Reference](tools/) | Complete API reference for all 115 MCP tools |
 | [Contributing](contributing/) | How to contribute to OrcaMCP |
 | [Setup](setup/) | Building, configuration, and troubleshooting |
 | [Release](release/) | Update process and release workflows |
@@ -37,7 +37,7 @@ docs/
 │   ├── README.md            # ADR index and template
 │   └── 0001-*.md            # Individual decision records
 ├── tools/
-│   ├── reference.md         # All 107 tools with parameters
+│   ├── reference.md         # All 115 tools with parameters
 │   └── workflows.md         # Common multi-tool patterns
 ├── contributing/
 │   ├── adding-tools.md      # Guide for new MCP tools
@@ -61,13 +61,15 @@ Claude Code CLI  ←→  orcamcp-bridge.py  ←→  OrcaSlicer HTTP Server (port
     (stdio)              (Python)                    (C++)
 ```
 
-### The 107 Tools
-OrcaMCP provides 107 tools (103 in the app, 4 in the bridge) across these categories:
+### The 115 Tools
+OrcaMCP provides 115 tools (111 in the app, 4 in the bridge) across these categories:
 - **Scene**: Project management (new, load, save, export)
 - **Models**: Import and manipulation
 - **Transforms**: Move, rotate, scale, mirror, cut
 - **Plates**: Multi-plate management
 - **Config**: Presets and settings
+- **Painting**: Colour, support, seam and fuzzy-skin paint
+- **Texture displacement**: Texture layers, their paint and unwrap, and baking them into the mesh
 - **Slicing**: Generate G-code
 - **Visualization**: Render plate views
 - **Printers**: Send to physical printers

@@ -299,6 +299,56 @@ its parts.
 
 ---
 
+## Texture Workflow: Texture a Part
+
+**Goal:** Put a surface texture on part of an object and print it. A texture layer is a plan until it is
+baked into the mesh: nothing prints before step 6.
+
+```
+1. get_texture_library        Pick a texture by id (colour textures: "color": true)
+        ↓
+2. set_texture_displacement   action "add": the texture, depth, projection (one layer per call)
+        ↓
+3. paint_object               mode "texture", that texture_layer: where the layer applies
+        ↓
+4. set_texture_unwrap         Only for projection "unwrap": seams and islands (get_texture_unwrap first)
+        ↓
+5. get_texture_displacement   The layers, their paint, needs_bake (optional check)
+        ↓
+6. bake_texture_displacement  Turns the painted layers into geometry (one undo step)
+        ↓
+7. slice_all, wait_for_slice  The relief is in the G-code
+        ↓
+8. render_plate_view          layer_view shows the result
+```
+
+```json
+// 1: find a texture (or import a file in step 2 with file_path)
+{"name": "get_texture_library", "arguments": {}}
+
+// 2: add a layer on object 0
+{"name": "set_texture_displacement", "arguments": {"object_id": 0, "action": "add", "texture": "builtin/Knurl.png", "depth_mm": 0.4, "projection": "view", "view_direction": "front"}}
+
+// 3: paint where it goes (a box on the grip; or selection "visible" paints what a view sees)
+{"name": "paint_object", "arguments": {"object_id": 0, "mode": "texture", "texture_layer": 0, "selection": "box", "state": "painted", "box": {"min": [0, 0, 0], "max": [40, 30, 20]}}}
+
+// 6: bake
+{"name": "bake_texture_displacement", "arguments": {"object_id": 0}}
+
+// 7: slice
+{"name": "slice_all", "arguments": {}}
+{"name": "wait_for_slice", "arguments": {}}
+```
+
+`next_steps` leads through it: a layer painted nowhere points at `paint_object`, painted-but-unbaked paint at
+`bake_texture_displacement`, and a bake at `slice_all`. A coarse mesh gives a coarse relief: `prepare_texture_mesh`
+(`remesh`, `subdivide`) before painting refines it, though the default bake refines by itself. A colour layer
+(`color: true` in the library) is baked as colour paint and may add mixed filament slots (`get_filaments`). One
+`undo` reverts the bake, but not slots it added. Editing the mesh afterwards (`repair_mesh`, `split_object`, ...)
+drops texture paint; the answer's `texture_changes` says what was lost.
+
+---
+
 ## Multi-Plate Workflow
 
 **Goal:** Organize objects across multiple build plates.
