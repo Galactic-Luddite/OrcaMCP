@@ -1001,7 +1001,9 @@ once, and an agent sees them and chooses:
 4. **Quitting**: a tool call waiting for the GUI when the app quits gets -32002 and was not run; one
    blocked on the network gets its tool error ("Request cancelled", "Printer discovery was
    cancelled") within about a second. `quit_app` itself is served after the call ahead of it on the
-   one HTTP thread, e.g. a `discover_printers` runs out its timeout first. A Bambu cloud sign-in
+   one HTTP thread, e.g. a `discover_printers` runs out its timeout first. The same for a `bake_texture_displacement` or
+   `prepare_texture_mesh` running: a `quit_app` sent behind it waits until the bake stops at its own wait cap, while a
+   quit from the app's window stops it at once (the bake asks the quit's cancel check from inside every stage). A Bambu cloud sign-in
    callback in flight is not cancellable (the network plugin's own calls); if it still runs 5 s into
    the quit, the process ends there, without its teardown (the config is saved first). A quit,
    `new_project` or `load_project` during a slice first waits for the slice to cancel (upstream's
@@ -1422,7 +1424,7 @@ echo "BW the texture bake and prepare jobs still run their work inline, which ou
 echo "BX the texture panel still holds the seam-path search and the palette's mix pick inline, which ours moved into TextureDisplacementObject and compose_palette (a move: 1 = keep ours; 0 = upstream changed that code): $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'std::priority_queue<QN') / $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'mixes = pick_mixes(\*m_mix_ranking')"
 echo "BY the texture panel's Unjoin renames no group: unjoining the lowest chart of a group leaves the others in the group it was named for (a move to unjoin_island fixes it; 1 = bug still there): $(U src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp | grep -c 'layer->island_groups\[size_t(chart)\] = chart;')"
 echo "BZ upstream's 3MF drops a part's UV channel (ModelVolume::texture_uv) on save (rel2506/16; a feature: non-zero = upstream has its own, compare): $(U src/libslic3r/Format/bbs_3mf.cpp | grep -c 'texture_uv')"
-echo "CA the texture bake's stages never ask the cancel hook from inside (align edges, displace, the decimation's setup, regularize, relocate, repair, the colour pass), nor do the isotropic remesh or the uniform subdivision, so a cancel waits out the stage (rel2506/17; 1 = upstream still lacks the checks): $(U src/libslic3r/TextureBake/TextureBakeFlip.hpp | grep -q 'stop' && echo 0 || echo 1) / $(U src/libslic3r/TextureBake/TextureBakeDisplace.cpp | awk '/^TriSoup apply_displacement/{f=1} f&&/on_progress\(/{print 0; d=1; exit} f&&/^}/{print 1; d=1; exit} END{if(!d) print "unknown"}') / $(U src/libslic3r/MeshBoolean.hpp | grep -A4 'remesh_isotropic' | grep -q 'function' && echo 0 || echo 1) / $(U src/libslic3r/TextureDisplacement.hpp | grep 'subdivide_mesh_uniform' | grep -q 'progress' && echo 0 || echo 1)"
+echo "CA the texture bake's stages never ask the cancel hook from inside (align edges, displace, the decimation's setup, regularize, relocate, repair, the colour pass), nor do the isotropic remesh or the uniform subdivision, so a cancel waits out the stage (rel2506/17; 1 = upstream still lacks the checks: keep ours; 0 = upstream added its own): $(U src/libslic3r/TextureBake/TextureBakeFlip.hpp | grep -c 'const StopFn &stop' | sed 's/^[1-9].*/0/;s/^0$/1/') / $(U src/libslic3r/TextureBake/TextureBakeDisplace.cpp | awk '/^TriSoup apply_displacement/{f=1} f&&/on_progress\(/{print 0; d=1; exit} f&&/^}/{print 1; d=1; exit} END{if(!d) print "unknown"}') / $(U src/libslic3r/MeshBoolean.hpp | grep -A4 'remesh_isotropic' | grep -c 'std::function<bool()>' | sed 's/^[1-9].*/0/;s/^0$/1/') / $(U src/libslic3r/TextureDisplacement.hpp | grep -A1 '^indexed_triangle_set subdivide_mesh_uniform' | grep -c 'progress' | sed 's/^[1-9].*/0/;s/^0$/1/')"
 ```
 
 Items M and N: upstream's `HttpServer::stop` closes every connection at once, so a reply still being
@@ -2174,9 +2176,8 @@ Measured on the -O0 build: the longest ask-free stretch of a 0.2 mm bake fell fr
 in a 0.15 mm bake (about 40 s) takes 0.13-0.16 s; a remesh that runs 48 s stops in under a second. Still uncancelled:
 single calls into libraries -- TriangleSelector's constructor, `deserialize` and `get_facets_strict` (about 2.7 s per
 800 k triangles in the classic pipeline), `its_face_neighbors`, the unwrap, `cut_mesh_at_steps`, the PNG decode and the
-CGAL conversions around the remesh -- which are linear and bounded by the shutdown rule in "Shutdown". On a 1 for the
-first count, take upstream's and keep ours as a patch; on a 0 for one, upstream polls that stage itself: take its version
-and re-run `libslic3r_tests "[cancel]"`.
+CGAL conversions around the remesh -- which are linear and bounded by the shutdown rule in "Shutdown". On a 1 (upstream still lacks the checks)
+keep ours; on a 0 for one, upstream added its own polls in that stage: take upstream's and re-run `libslic3r_tests "[cancel]"`.
 
 Item I is not a fork patch -- we deliberately carry nothing for it (see
 `docs/superpowers/plans/2026-09-17-next-release-plan.md`, Stage 3). It is here so the sync notices

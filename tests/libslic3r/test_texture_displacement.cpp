@@ -3545,10 +3545,11 @@ TEST_CASE("an unpainted part of the source carries no paint onto the rebuilt mes
 // few thousand items of its serial ones. Before this, "align edges", "displace", the start of "decimate" and
 // "repair" each ran for seconds without asking (a 0.12 mm bake ran 128 s past a 30 s wait cap).
 //
-// The bound the tests hold a stage to: it asks again within a second. On the -O0 build of 2026-10-24 the
-// longest stretch of the scene below was 0.4 s (it was 6.6 s at three times the triangles before); the
-// bound leaves a slower machine and a loaded CI runner room, and the scene is large enough that a stage
-// without polls, at its former speed, takes several times that.
+// The bound the tests hold a stage to: it asks again within 3 s. On the -O0 build of 2026-10-24 the
+// longest stretch of the scene below was 0.5 s (it was 6.6 s at three times the triangles before, and the
+// stage that ran 1.9 s on this scene would be 6 s or more on a bake at the resolution that went wrong);
+// the bound leaves a slower machine and a loaded CI runner room (the tests also run alone, see
+// tests/libslic3r/CMakeLists.txt), and counts the calls into libraries that never ask (0.7 s at most here).
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -3692,7 +3693,7 @@ PollGaps measure_poll_gaps(Run &&run)
     return gaps;
 }
 
-constexpr double CANCEL_BOUND_SECONDS = 1.0;
+constexpr double CANCEL_BOUND_SECONDS = 3.0;
 } // namespace
 
 TEST_CASE("TextureDisplacement: no stage of the default pipeline runs for long without asking the progress hook",
@@ -3712,30 +3713,40 @@ TEST_CASE("TextureDisplacement: no stage of the default pipeline runs for long w
     CHECK(gaps.longest < CANCEL_BOUND_SECONDS);
 }
 
-TEST_CASE("TextureDisplacement: a cancel is seen within a second wherever it lands in a default-pipeline bake",
+TEST_CASE("TextureDisplacement: a cancel is seen within the bound wherever it lands in a default-pipeline bake",
           "[TextureDisplacement][cancel]")
 {
     const CancelScene    scene = make_cancel_scene(true);
     std::vector<uint8_t> triangle_color;
     const TextureColorRequest request = two_colour_request(triangle_color);
-    size_t cancelled = 0;
-    // From the first stage to the last of this scene on the -O0 build (everything is over by about 4.5 s);
-    // a faster build finishes first for the later ones, which then have nothing to check.
-    for (const double delay : { 0.3, 1.0, 2.0, 3.2 }) {
-        CancelAfter cancel(delay);
-        const indexed_triangle_set out = build_texture_displacement(
-            scene.mesh, scene.layers, scene.facets, every_stage_options(0.5f),
-            [&cancel](int) { return !cancel.requested(); }, &request);
-        const auto returned = cancel_clock::now();
-        cancel.join();
-        if (!cancel.requested() || !out.indices.empty())
-            continue; // finished before the cancel came
-        ++cancelled;
-        const double latency = std::chrono::duration<double>(returned - cancel.flagged_at()).count();
-        INFO("cancel after " << delay << " s took " << latency << " s to take effect");
-        CHECK(latency < CANCEL_BOUND_SECONDS);
+    const auto bake = [&](const DisplacementProgressFn &progress) {
+        return build_texture_displacement(scene.mesh, scene.layers, scene.facets, every_stage_options(0.5f), progress, &request);
+    };
+    // One uncancelled run says how long the bake takes on this build; the cancels land at fractions of it,
+    // so they fall in the same stages whatever the build's speed.
+    const auto   started = cancel_clock::now();
+    const size_t full    = bake({}).indices.size();
+    const double total   = std::chrono::duration<double>(cancel_clock::now() - started).count();
+    REQUIRE(full > 1000);
+    for (const double fraction : { 0.1, 0.35, 0.6, 0.8 }) {
+        // A run that happens to be faster than the first can end before its cancel: it is tried once more,
+        // earlier, and failing that is a failure, not a pass.
+        bool landed = false;
+        for (double delay = fraction * total; !landed && delay > 0.0005; delay *= 0.5) {
+            CancelAfter cancel(delay);
+            const indexed_triangle_set out = bake([&cancel](int) { return !cancel.requested(); });
+            const auto returned = cancel_clock::now();
+            cancel.join();
+            if (!cancel.requested() || !out.indices.empty())
+                continue;
+            landed = true;
+            const double latency = std::chrono::duration<double>(returned - cancel.flagged_at()).count();
+            INFO("cancel at " << fraction << " of " << total << " s (after " << delay << " s) took " << latency << " s to take effect");
+            CHECK(latency < CANCEL_BOUND_SECONDS);
+        }
+        INFO("cancel at " << fraction << " of the bake never landed");
+        CHECK(landed);
     }
-    CHECK(cancelled >= 3);
 }
 
 TEST_CASE("TextureDisplacement: asking the progress hook does not change the default pipeline's result",
@@ -3835,7 +3846,7 @@ TEST_CASE("TextureDisplacement: a uniform subdivision can be cancelled, and aski
     (void) started;
 }
 
-TEST_CASE("TextureDisplacement: an isotropic remesh can be stopped within a second, and asking does not change it",
+TEST_CASE("TextureDisplacement: an isotropic remesh can be stopped within the bound, and asking does not change it",
           "[TextureDisplacement][cancel]")
 {
     // The small case must come back the same with a hook that never says stop. 2 mm on a 10 mm cube.

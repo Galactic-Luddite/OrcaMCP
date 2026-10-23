@@ -108,4 +108,7 @@ set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 orcaslicer_copy_test_dlls()
 
-orcaslicer_discover_tests(${_TEST_NAME}_tests)
+# The [cancel] tests time how fast a stopped bake answers, so they run alone: beside `ctest -j` they would
+# be timed against other tests' load.
+catch_discover_tests(${_TEST_NAME}_tests ADD_TAGS_AS_LABELS TEST_SPEC "~[cancel]")
+catch_discover_tests(${_TEST_NAME}_tests ADD_TAGS_AS_LABELS TEST_SPEC "[cancel]" PROPERTIES RUN_SERIAL TRUE)

@@ -141,7 +141,9 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
     const auto     report = [&](const char *stage, double f) {
         poll_stage    = stage;
         poll_fraction = f;
-        return !on_progress || on_progress(stage, f);
+        if (on_progress && !on_progress(stage, f))
+            result.canceled = true; // sticky, whichever stage's own poll saw the no
+        return !result.canceled;
     };
     // Asked by the stages from this thread only (see TextureBakeCancel.hpp). Sticky: once the hook has
     // said stop, every later ask says it too, and `result.canceled` is set for the caller to read.
@@ -435,6 +437,8 @@ PipelineResult run_pipeline(const TriSoup &input, const HeightSampleFn &sample,
         }
     }
 
+    if (result.canceled)
+        return result; // some stage's own hook said no: nothing of this run is to be used
     result.geometry       = std::move(displaced);
     result.face_parent_id = std::move(parent);
     return result;
