@@ -937,6 +937,78 @@ TEST_CASE("the library list names each texture by id and counts every source", "
     CHECK(error.find("builtin, user or pack") != std::string::npos);
 }
 
+TEST_CASE("a stack is told in slot order with each part's paint", "[McpTexture][orcamcp]")
+{
+    Model        model;
+    ModelObject* object = cube_object(model);
+    object->add_volume(TriangleMesh(its_make_cube(5., 5., 5.)), ModelVolumeType::MODEL_PART, false);
+    ModelVolume* first  = object->volumes[0];
+    ModelVolume* second = object->volumes[1];
+    paint_facets(*second, 3, 6);
+
+    std::vector<MaskInput> inputs;
+    for (int i = 0; i < 2; ++i) {
+        MaskInput input;
+        input.volume_id = i;
+        input.name      = "part " + std::to_string(i);
+        input.mesh      = std::make_shared<TriangleMesh>(object->volumes[size_t(i)]->mesh());
+        for (size_t slot = 0; slot < input.masks.size(); ++slot)
+            input.masks[slot] = object->volumes[size_t(i)]->texture_displacement_facet(int(slot)).get_data();
+        inputs.push_back(std::move(input));
+    }
+    (void) first;
+    const auto reports = mask_reports(inputs);
+
+    // Layers handed over out of order: slot 3 painted on the second part only, slot 1 painted nowhere.
+    StackLayerFacts upper, lower;
+    upper.layer = layer_in(3);
+    lower.layer = layer_in(1);
+    TextureDisplacementOptions options;
+
+    SECTION("every part")
+    {
+        const StackAnswer answer = texture_stack_json({upper, lower}, reports, std::nullopt, false, options, Transform3d::Identity());
+        const json&       layers = answer.json.at("layers");
+        REQUIRE(layers.size() == 2);
+        CHECK(layers[0]["layer"] == 1);
+        CHECK(layers[0]["base"] == true);
+        CHECK(layers[1]["layer"] == 3);
+        CHECK(layers[1]["base"] == false);
+        CHECK(layers[1]["position"] == 1);
+        CHECK(layers[0]["painted"] == false);
+        CHECK(layers[1]["painted"] == true);
+        REQUIRE(layers[1]["paint"].size() == 2);
+        CHECK(layers[1]["paint"][0]["painted_facets"] == 0);
+        CHECK(layers[1]["paint"][1]["painted_facets"] == 6);
+        CHECK(answer.json["needs_bake"] == true);
+        CHECK(answer.json["free_layers"] == int(TEXTURE_DISPLACEMENT_MAX_LAYERS) - 2);
+        CHECK(answer.json.contains("stack_options"));
+        CHECK(answer.first_unpainted_layer == 1);
+    }
+    SECTION("one part's paint shows alone, but the bake and the next step read them all")
+    {
+        const StackAnswer answer = texture_stack_json({upper, lower}, reports, 0, false, options, Transform3d::Identity());
+        const json&       paint  = answer.json["layers"][1]["paint"];
+        REQUIRE(paint.size() == 1);
+        CHECK(paint[0]["volume_id"] == 0);
+        CHECK(answer.json["layers"][1]["painted"] == false);
+        CHECK(answer.json["needs_bake"] == true);
+    }
+    SECTION("nothing painted needs no bake")
+    {
+        const StackAnswer answer = texture_stack_json({lower}, reports, std::nullopt, false, options, Transform3d::Identity());
+        CHECK(answer.json["needs_bake"] == false);
+        CHECK(answer.first_unpainted_layer == 1);
+    }
+    SECTION("no layers")
+    {
+        const StackAnswer answer = texture_stack_json({}, reports, std::nullopt, false, options, Transform3d::Identity());
+        CHECK(answer.json["layers"].empty());
+        CHECK(answer.json["free_layers"] == int(TEXTURE_DISPLACEMENT_MAX_LAYERS));
+        CHECK_FALSE(answer.first_unpainted_layer.has_value());
+    }
+}
+
 TEST_CASE("only an imported texture can be deleted", "[McpTexture][orcamcp]")
 {
     CHECK_FALSE(user_texture_delete_refusal(entry("Mine", "/u/Mine.png", TextureSource::User), "user/Mine.png").has_value());

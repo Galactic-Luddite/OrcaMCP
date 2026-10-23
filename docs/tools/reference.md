@@ -3628,7 +3628,8 @@ takes the panel's own "Leaving ..." undo step. The answer's `closed_toolbar_tool
   undo step (plus the open paint panel's own "Leaving ..." step when this call had to close one; a refused call, or a repaint of what is there, closes nothing and takes none), refused while an arrange, orient or bake runs or when the slot holds no layer. The answer
   adds `texture_layer`, `needs_bake` (some layer of the object is painted, so a bake would change the
   mesh) and, when the layer is now painted on no part, a `next_steps` entry that paints it on the whole object.
-  <!-- TODO(T6/T8): name get_texture_displacement and bake_texture_displacement here once they exist. -->
+  `get_texture_displacement` reads each layer's paint per part.
+  <!-- TODO(T8): name bake_texture_displacement here once it exists. -->
 - **`visible`** paints the facets seen from `view`, in any mode: a facet whose normal faces the view
   (from the eye under a perspective `current` camera, along the view direction otherwise) and that no
   facet of any model part of the object hides (a ray from its centroid toward the viewer, started
@@ -3982,6 +3983,32 @@ the answer lists them in `still_used_by`. A file delete, not an undo step.
 
 **Response:** `deleted` (`texture`, `name`, `path`), `still_used_by` (`[{object_id, layer}]`), `note` when it is
 not empty.
+
+### get_texture_displacement
+Read an object's texture displacement layers, in slot order, as `set_texture_displacement` takes them. Changes
+nothing.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `object_id` | integer | Yes | Object index (0-based); the layers belong to the object |
+| `volume_id` | integer | No | Show the paint of this model part only (a volume index from `get_object_info`); a part that is not a model part is refused |
+
+**Response:** `layers` (each: `layer` the slot, `position` in slot order, `base` for the lowest, `image`
+`{texture (the id, null for an image only the project holds), name, source, path}`, `color_capable`, every setting
+`set_texture_displacement` takes, `view_axes` for a view projection, `unwrap` for an unwrap projection, `paint` per model
+part `{volume_id, name, painted, stale, painted_facets, coverage_percent}`, `painted`, `inactive_settings`, `warnings`),
+`free_layers` (an object holds 8), `stack_options` (the bake's settings, as `bake_texture_displacement` takes them),
+`needs_bake` (some layer is painted on some part, so a bake would change the mesh), `stack_volume_id` (the model
+part that owns the layers), `ignored_stacks` (layers kept on other parts, which nothing applies), `parts` (the model
+parts whose paint `paint_object` addresses), and `next_steps` (paint the first layer that is painted nowhere).
+`volume_id` limits `paint` only: `needs_bake` and the next step read every part. A mask that no longer fits its mesh
+is `stale` and counts as unpainted.
+
+```json
+{"object_id": 0}
+{"object_id": 0, "volume_id": 1}
+```
 
 ### set_texture_displacement
 Add, edit, move or remove one layer of an object's stack, as the texture displacement panel does. Each layer applies

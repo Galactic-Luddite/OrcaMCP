@@ -1428,6 +1428,39 @@ json layer_json(const TextureDisplacementLayer& layer, int position, bool base, 
     return out;
 }
 
+StackAnswer texture_stack_json(std::vector<StackLayerFacts> layers, const std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>>& reports,
+                               std::optional<int> only_volume, bool owner_has_uv, const TextureDisplacementOptions& options,
+                               const Transform3d& volume_to_world)
+{
+    std::sort(layers.begin(), layers.end(), [](const StackLayerFacts& a, const StackLayerFacts& b) { return a.layer.slot < b.layer.slot; });
+    std::vector<TextureDisplacementLayer> stack;
+    for (const StackLayerFacts& facts : layers)
+        stack.push_back(facts.layer);
+
+    StackAnswer answer;
+    json        rows = json::array();
+    for (size_t position = 0; position < layers.size(); ++position) {
+        const StackLayerFacts&  facts = layers[position];
+        const size_t            slot  = size_t(std::clamp(facts.layer.slot, 0, int(TEXTURE_DISPLACEMENT_MAX_LAYERS) - 1));
+        std::vector<MaskReport> shown;
+        bool                    painted_anywhere = false;
+        for (const auto& row : reports) {
+            painted_anywhere |= row[slot].painted_facets > 0;
+            if (!only_volume || row[slot].volume_id == *only_volume)
+                shown.push_back(row[slot]);
+        }
+        if (!painted_anywhere && !answer.first_unpainted_layer)
+            answer.first_unpainted_layer = facts.layer.slot;
+        rows.push_back(layer_json(facts.layer, int(position), position == 0, facts.texture, facts.color_capable, shown, owner_has_uv, stack, options,
+                                  volume_to_world));
+    }
+    answer.json = {{"layers", rows},
+                   {"free_layers", int(TEXTURE_DISPLACEMENT_MAX_LAYERS) - int(layers.size())},
+                   {"needs_bake", needs_bake(stack, reports)},
+                   {"stack_options", stack_options_json(options)}};
+    return answer;
+}
+
 json stack_options_json(const TextureDisplacementOptions& o)
 {
     return {{"pipeline", o.pipeline_v2 ? "default" : "classic"},

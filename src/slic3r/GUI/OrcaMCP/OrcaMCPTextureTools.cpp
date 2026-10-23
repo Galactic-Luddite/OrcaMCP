@@ -713,6 +713,111 @@ nlohmann::json set_texture_displacement(const nlohmann::json& params)
 }
 
 
+// ---- Reading the stack ----
+
+// What get_texture_displacement needs of the model, copied so the mask reports can be made off the main thread.
+struct PendingStack
+{
+    std::vector<StackLayerFacts>                               layers;
+    Slic3r::TextureDisplacementOptions                         options;
+    Slic3r::Transform3d                                        to_world     = Slic3r::Transform3d::Identity();
+    bool                                                       owner_has_uv = false;
+    int                                                        owner_volume_id = -1;
+    std::vector<MaskInput>                                     inputs;
+    nlohmann::json                                             ignored = nlohmann::json::array();
+    nlohmann::json                                             parts   = nlohmann::json::array();
+};
+
+// Every model part with its eight masks, and the stacks on parts that do not own it.
+void capture_parts(const Slic3r::ModelObject& object, const Slic3r::ModelVolume& owner, PendingStack& out)
+{
+    for (size_t i = 0; i < object.volumes.size(); ++i) {
+        const Slic3r::ModelVolume* v = object.volumes[i];
+        if (v != &owner && !v->texture_displacement_layers.empty())
+            out.ignored.push_back({{"volume_id", i}, {"name", v->name}, {"layers", v->texture_displacement_layers.size()}});
+        if (v == &owner)
+            out.owner_volume_id = int(i);
+        if (!v->is_model_part())
+            continue;
+        MaskInput input;
+        input.volume_id = int(i);
+        input.name      = v->name;
+        input.mesh      = v->mesh_ptr();
+        for (int slot = 0; slot < int(Slic3r::TEXTURE_DISPLACEMENT_MAX_LAYERS); ++slot)
+            input.masks[size_t(slot)] = v->texture_displacement_facet(slot).get_data();
+        out.inputs.push_back(std::move(input));
+        out.parts.push_back({{"volume_id", i}, {"name", v->name}});
+    }
+}
+
+nlohmann::json capture_stack(const nlohmann::json& params, std::optional<int> only_volume, PendingStack& out, int& object_id)
+{
+    std::string          error;
+    Slic3r::GUI::Plater* plater = wxGetApp().plater();
+    Slic3r::ModelObject* object = resolve_object_id(params, plater->model(), object_id, error);
+    if (object == nullptr)
+        return error_response(error);
+    if (only_volume) {
+        if (const auto refusal = volume_id_error(object_id, *object, *only_volume))
+            return error_response(*refusal);
+        if (!object->volumes[size_t(*only_volume)]->is_model_part())
+            return error_response("volume_id " + std::to_string(*only_volume) + " of object " + std::to_string(object_id) +
+                                  " is not a model part, and only a model part holds texture paint");
+    }
+    const Slic3r::ModelVolume* owner = texture_stack_owner(*object);
+    if (owner == nullptr)
+        return error_response("Object " + std::to_string(object_id) + " has no model part, so it holds no texture layers");
+
+    out.options      = owner->texture_displacement_options;
+    out.to_world     = Slic3r::texture_displacement_volume_to_world(*owner);
+    out.owner_has_uv = owner->has_texture_uv();
+    const LibraryCopy library = library_copy();
+    for (const Slic3r::TextureDisplacementLayer& layer : owner->texture_displacement_layers) {
+        StackLayerFacts facts;
+        facts.layer = layer;
+        if (!layer.empty())
+            facts.color_capable = Slic3r::height_texture_has_color(layer);
+        if (const auto index = library_index_of(library.entries, layer)) {
+            facts.texture.id     = library.ids[size_t(*index)];
+            facts.texture.source = texture_source_name(library.entries[size_t(*index)].source);
+        }
+        out.layers.push_back(std::move(facts));
+    }
+    capture_parts(*object, *owner, out);
+    return {{"status", "success"}};
+}
+
+nlohmann::json get_texture_displacement(const nlohmann::json& params)
+{
+    std::string error;
+    const auto  only_volume = read_volume_id(params, error);
+    if (!error.empty())
+        return error_response(error);
+
+    PendingStack pending;
+    int          object_id = -1;
+    nlohmann::json captured = run_on_main_thread([&]() { return capture_stack(params, only_volume, pending, object_id); });
+    if (captured.value("status", "") != "success")
+        return captured;
+
+    // The mask reports walk the paint, so they are made here, off the main thread, from the copies.
+    const auto reports = mask_reports(pending.inputs);
+    StackAnswer stack  = texture_stack_json(pending.layers, reports, only_volume, pending.owner_has_uv, pending.options, pending.to_world);
+
+    nlohmann::json answer = std::move(stack.json);
+    answer["status"]          = "success";
+    answer["object_id"]       = object_id;
+    answer["stack_volume_id"] = pending.owner_volume_id;
+    answer["parts"]           = pending.parts;
+    answer["ignored_stacks"]  = pending.ignored;
+    if (only_volume)
+        answer["volume_id"] = *only_volume;
+    if (stack.first_unpainted_layer)
+        add_next_steps(answer, texture_paint_next_steps(object_id, *stack.first_unpainted_layer, false));
+    return answer;
+}
+
+
 // A number property held to the panel's range for `key` (layer_setting_bounds), so the schema and the reader cannot drift.
 nlohmann::json bounded_property(const char* key, const char* type, const std::string& description)
 {
@@ -850,6 +955,32 @@ void OrcaMCPServer::register_texture_tools()
         set_texture_displacement_schema(),
         [](const nlohmann::json& params) -> nlohmann::json {
             return set_texture_displacement(params);
+        }
+    });
+
+    register_tool({
+        "get_texture_displacement",
+        ToolCategory::TextureDisplacement,
+        "Read an object's texture layers",
+        "Read an object's texture displacement layers, as set_texture_displacement takes them: in slot order (layer is the "
+        "slot, position the place in that order; the lowest is the base layer, which ignores blend), each with every setting "
+        "set_texture_displacement sets, its texture (image.texture is the id get_texture_library lists, null for an image only "
+        "the project holds), inactive_settings (stored but greyed out in the panel, with why), and its paint on each model "
+        "part: painted_facets, coverage_percent of the part's surface, and stale for a mask that no longer fits its mesh. "
+        "volume_id limits paint to one model part. Also stack_options (the bake's settings), needs_bake (some layer is painted, "
+        "so a bake would change the mesh), free_layers (an object holds 8), stack_volume_id (the part that owns the layers: "
+        "the first model part), ignored_stacks (layers on other parts, which nothing applies) and parts (the model parts "
+        "paint addresses). Reading it changes nothing.",
+        {
+            {"type", "object"},
+            {"properties", {
+                {"object_id", {{"type", "integer"}, {"minimum", 0}, {"description", "Object index (0-based)"}}},
+                {"volume_id", {{"type", "integer"}, {"minimum", 0}, {"description", "Show the paint of this model part only (the volume index get_object_info lists)"}}}
+            }},
+            {"required", {"object_id"}}
+        },
+        [](const nlohmann::json& params) -> nlohmann::json {
+            return get_texture_displacement(params);
         }
     });
 }

@@ -303,6 +303,24 @@ nlohmann::json layer_json(const TextureDisplacementLayer& layer, int position, b
                           std::optional<bool> color_capable, const std::vector<MaskReport>& paint, bool owner_has_uv,
                           const std::vector<TextureDisplacementLayer>& stack, const TextureDisplacementOptions& options,
                           const Transform3d& volume_to_world);
+// One layer of a stack as get_texture_displacement tells it: the layer and what the library and the image say of it.
+struct StackLayerFacts
+{
+    TextureDisplacementLayer layer;
+    LayerTexture             texture;
+    std::optional<bool>      color_capable;
+};
+struct StackAnswer
+{
+    nlohmann::json     json;                       // {layers, free_layers, needs_bake, stack_options}
+    std::optional<int> first_unpainted_layer;      // the lowest slot painted on no part (whatever `only_volume` shows)
+};
+// The whole stack, layers in slot order (the panel's), each as layer_json tells it with the paint of the model parts in
+// `reports` (parallel to the parts, `volume_id` in each report): of `only_volume` alone when given. `needs_bake` and
+// `first_unpainted_layer` always read every part.
+StackAnswer texture_stack_json(std::vector<StackLayerFacts> layers, const std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>>& reports,
+                               std::optional<int> only_volume, bool owner_has_uv, const TextureDisplacementOptions& options,
+                               const Transform3d& volume_to_world);
 // {pipeline (default | classic), displace_border, smooth {enabled, strength (percent), passes,
 // ignore_outer_ring}, resolution_mm (null = auto), budget_k (null = auto), color_mix, color_mix_count,
 // color_denoise}

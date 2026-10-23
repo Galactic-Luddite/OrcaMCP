@@ -1468,6 +1468,31 @@
     },
     {
       "category": "Texture displacement",
+      "description": "Read an object's texture displacement layers, as set_texture_displacement takes them: in slot order (layer is the slot, position the place in that order; the lowest is the base layer, which ignores blend), each with every setting set_texture_displacement sets, its texture (image.texture is the id get_texture_library lists, null for an image only the project holds), inactive_settings (stored but greyed out in the panel, with why), and its paint on each model part: painted_facets, coverage_percent of the part's surface, and stale for a mask that no longer fits its mesh. volume_id limits paint to one model part. Also stack_options (the bake's settings), needs_bake (some layer is painted, so a bake would change the mesh), free_layers (an object holds 8), stack_volume_id (the part that owns the layers: the first model part), ignored_stacks (layers on other parts, which nothing applies) and parts (the model parts paint addresses). Reading it changes nothing.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "object_id": {
+            "description": "Object index (0-based)",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "volume_id": {
+            "description": "Show the paint of this model part only (the volume index get_object_info lists)",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "object_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_texture_displacement",
+      "summary": "Read an object's texture layers"
+    },
+    {
+      "category": "Texture displacement",
       "description": "The textures a texture displacement layer can use, as its picker lists them: built-in, imported into this data folder's texture library (set_texture_displacement's file_path imports one there; an identical image already there is reused), and those of installed texture packs. Each has a texture id a layer takes (a name alone works when only one texture has it), and color: true when it has colours a layer can print with filaments, false for a grayscale height map, null when the file is not a PNG that is read directly. Reading it changes nothing.",
       "inputSchema": {
         "additionalProperties": false,

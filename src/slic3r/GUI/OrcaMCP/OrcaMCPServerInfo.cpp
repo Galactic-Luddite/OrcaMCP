@@ -208,6 +208,11 @@ json tool_examples()
             {"imported_only", R"({"source": "user"})"},
             {"when_to_use", "Before adding a texture displacement layer: its texture ids, and which textures carry colours"}
         }},
+        {"get_texture_displacement", {
+            {"all", R"({"object_id": 0})"},
+            {"one_part", R"({"object_id": 0, "volume_id": 1})"},
+            {"when_to_use", "Before editing an object's texture layers: their slots, settings and paint, and whether a bake would change the mesh"}
+        }},
         {"set_texture_displacement", {
             {"add", R"({"object_id": 0, "action": "add", "texture": "builtin/Knurl.png", "depth_mm": 0.4})"},
             {"import", R"({"object_id": 0, "action": "add", "file_path": "/Users/me/bricks.png", "depth_mm": 0.6})"},
