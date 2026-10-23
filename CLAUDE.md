@@ -1280,6 +1280,36 @@ the `OrcaSlicer/orca-test-repo` revision upstream's green Build all of the merge
 HEAD: the newest commit older than that run's "Run external slicer regression tests" step). The old pin expects the
 old behaviour and fails the Linux job on code that now matches upstream (2026-10-23: three cases).
 
+### Every sync: review the change list for MCP tools to add, update or remove
+
+Full agentic parity means every new GUI capability upstream ships is an MCP gap until a tool covers it. At every
+sync, after the merge and the probes, review the upstream commits since the last merged one (`git log --no-merges
+<last-merged>..upstream/main`) with three agents in parallel, each read-only and each given this project's tool table:
+
+1. **GUI** (`src/slic3r/GUI`, excluding the Design tab, plus `src/slic3r/plugin` and `resources/web`): new user-facing
+   capabilities (gizmos, menu actions, plate options, export formats, dialogs) with their entry points; upstream
+   changes to functions, dialogs or behaviour our tools call or mirror (grep `src/slic3r/GUI/OrcaMCP` for each symbol
+   touched); deleted features a tool relies on; new modal dialogs an MCP call or an agent launch could meet.
+2. **libslic3r** (excluding CAD): new, renamed and removed config keys (diff `PrintConfig.{cpp,hpp}` and `Preset.cpp`),
+   new paint types, extrusion roles and model features, and whether the generic tools (`apply_config`,
+   `set_object_config`, `paint_object`) already cover them or a schema, enum or feature table must change; slicing
+   changes that alter what our tools report (estimates, layer counts, the G-code check, the prime tower).
+3. **Printers, network and CI** (`src/slic3r/Utils`, printer agents, `HttpServer`, `.github/workflows`, `deps`): new
+   print hosts and printer controls, interface changes our printer agents must follow, collisions with carried
+   fixes, and what a merge must preserve in the workflows.
+
+Each reports new capabilities (with a suggested tool or argument and a size), changes that break or alter existing
+tools, and removals. Then report to the user, before writing any tool:
+
+- **Each major new feature first, in its own short paragraph:** what a user can now do, what the MCP work is, its
+  effort, and a recommendation (do it, later, or skip). Never bury one as a line in a list: in 2026-10 texture
+  displacement, the sync's largest feature, was listed three times among a dozen items and the user missed it.
+- **Then the smaller gaps,** one plain sentence each on what it is.
+- **Effort estimates on request:** hours of agent work, tests, docs and a live check included, CI not.
+
+The 2026-10-22 sync's review, done this way, is the model: `docs/superpowers/plans/2026-10-23-batch1-fixall-drop-exclusion.md`
+came out of it.
+
 ### One-Liner for Quick Sync
 
 ```bash
