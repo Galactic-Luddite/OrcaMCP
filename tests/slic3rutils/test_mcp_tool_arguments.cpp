@@ -238,6 +238,35 @@ TEST_CASE("A texture layer a response reports is taken back by set_texture_displ
     CHECK(refusal("set_texture_displacement", cleared) == "");
 }
 
+TEST_CASE("An unwrap get_texture_unwrap reports is taken back by set_texture_unwrap", "[McpToolArguments][orcamcp][tools]")
+{
+    using namespace Slic3r;
+    using namespace Slic3r::GUI::OrcaMCP;
+    const indexed_triangle_set cube = its_make_cube(10., 10., 10.);
+    TextureDisplacementLayer   layer;
+    layer.slot                   = 1;
+    layer.projection_method      = TextureProjectionMethod::LSCM;
+    layer.lscm_uv_overrides.emplace_back(lscm_uv_override_key(2), Vec2f(0.5f, 1.5f));
+    const PatchUnwrap unwrap   = layer_unwrap(cube, layer);
+    const json        reported = unwrap_json(unwrap, layer, true);
+    REQUIRE(reported["islands"].size() > 1);
+    REQUIRE(reported["uv_edits"].size() == 1);
+
+    // Every request field the answer carries: islands (with their extra fields), vertex edits, the seams as seam pairs.
+    json arguments = {{"object_id", 0}, {"layer", 1}};
+    for (const char* key : {"islands", "uv_edits", "seam_angle_deg", "auto_connect_islands"})
+        arguments[key] = reported[key];
+    arguments["add_seams"] = json::array({json::array({0, 1})});
+    CHECK(refusal("set_texture_unwrap", arguments) == "");
+    std::string error;
+    CHECK(read_unwrap_request(arguments, error).has_value());
+
+    json bad = {{"object_id", 0}, {"layer", 1}, {"islands", json::array({{{"chart", 0}, {"size", 2}}})}};
+    CHECK(::contains(refusal("set_texture_unwrap", bad), "has no key \"size\""));
+    json lonely = {{"object_id", 0}};
+    CHECK(::contains(refusal("set_texture_unwrap", lonely), "layer"));
+}
+
 TEST_CASE("The material mappings a send reports are taken back by both printer tools", "[McpToolArguments][orcamcp][tools]")
 {
     // An upload with start_print false, then print_printer_file with the mapping the upload reported.

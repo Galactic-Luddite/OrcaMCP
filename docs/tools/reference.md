@@ -4068,6 +4068,70 @@ under a projection frame.
 {"object_id": 0, "action": "remove", "layer": 1}
 ```
 
+### get_texture_unwrap
+Read the unwrap of a texture layer whose projection is `unwrap`, as the texture panel's UV pane shows it: the layer's
+painted patch on the object's first model part (the part that owns the layers) cut into charts (islands) along the
+seams and the seam angle (once the layer has any seam, only the seams cut), each flattened to its true size in mm. Changes nothing. Refused for a layer that is not an
+unwrap, a mask that no longer fits its mesh, or a layer painted nowhere on that part.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `object_id` | integer | Yes | Object index (0-based) |
+| `layer` | integer 0..7 | Yes | The layer's slot |
+| `include_vertices` | boolean | No | Also list every unwrapped vertex, up to 20000 (`truncated` says so) |
+
+**Response:** `chart_count`, `vertex_count`, `triangle_count`, `seam_angle_deg`, `auto_connect_islands`, `seams`
+(`[[vertex, vertex]]`, mesh vertices of the owner part), `islands` (each `chart`, `area_mm2`, `centroid`,
+`bounding_box {min, max}` in the unwrap's mm, `offset`, `rotation_deg`, `scale`, `group` (charts of one group move
+together), `neighbours` (charts sharing a mesh edge)), `uv_edits` (`[{vertex, uv}]`, unwrapped vertices; edits stored by
+mesh vertex are `mesh_vertex_uv_edits`), `vertices` (`vertex`, `source_vertex`, `chart`, `uv`), `note`. Chart and vertex
+numbers hold for this unwrap only: changing the seams or the seam angle numbers them anew. The panel always packs
+islands with no gap, so there is no padding setting.
+
+### set_texture_unwrap
+Edit the unwrap of an `unwrap` layer as the UV pane does, in its order: settings, seams, a new unwrap when seams or
+the angle changed, layout, island placement, join, unjoin, average scale, vertex edits. Chart and vertex numbers
+name the unwrap as `get_texture_unwrap` reports it before the call, so **a call that changes seams or the seam angle
+takes no island or vertex edit**: send those in a second call. One undo step, named as the pane names the edit when
+the call makes one kind of edit (`Mark texture seam`, `Mark texture seam path`, `Cut texture island`, `Join texture
+island`, `Unjoin texture island`, `Average island scale`, `Clear texture seams`, `Clear texture UV edits`, `Move
+texture island`, `Edit texture UV`), else `Texture displacement editing`; none for a call that changes nothing
+(`changed: false`). An open paint or texture panel is closed first, only when the call changes something. Refused
+while an arrange, orient or bake runs or the app's own mesh repair.
+
+**Parameters** (all but `object_id` and `layer` optional):
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `object_id`, `layer` | integer | The object and the unwrap layer's slot |
+| `seam_angle_deg` | number 5..90 | Edges sharper than this cut islands apart, as long as the layer has no seam: with any seam, only seams cut (the panel's rule) |
+| `auto_connect_islands` | boolean | Lay islands out as a connected net; turning it on does so now |
+| `add_seams`, `remove_seams` | `[[v, v]]` | Mesh edges (vertices of the owner part's mesh); a pair that is no mesh edge is refused for `add_seams` |
+| `seam_paths` | `[{from: [x,y,z], to: [x,y,z]}]` | Shortest path over mesh edges between the vertices nearest the two plate-mm points (`seam_paths_snapped` says which) |
+| `clear_seams` | boolean | Remove every seam first |
+| `cut_islands` | `[chart]` | Cut each chart in two across its longest axis |
+| `relayout` | boolean | Lay the islands out as a connected net again (hand placements go) |
+| `islands` | `[{chart, offset?, rotation_deg?, scale?}]` | Set a chart's own placement (unwrap mm; scale 0.001..1000). Only the fields given change; joined charts do not follow. An entry of `get_texture_unwrap`'s `islands` is accepted as it is |
+| `join` | `[{chart, to?}]` | Unfold a chart against a neighbour it shares an edge with (default: the nearest) and group the two |
+| `unjoin` | `[chart]` | Back to the chart's own packed place, out of its group |
+| `average_scale` | boolean | Every island takes the mean scale |
+| `clear_uv_edits` | boolean | Drop every vertex edit (runs before `uv_edits`) |
+| `uv_edits` | `[{vertex, uv: [u, v]}]` | Move an unwrapped vertex to a place in the unwrap's mm, before its island's placement |
+
+When the seams or the angle changed, the unwrap is made anew: charts are renumbered (`charts_renumbered`) and the
+islands are laid out as a net if the layer connects islands, as the pane's Unwrap does; joins and vertex edits made
+before still name the old numbers (`notes`).
+
+**Response:** `changed`, `charts_renumbered`, the unwrap as `get_texture_unwrap` gives it, `seam_paths_snapped`,
+`notes`, `closed_toolbar_tool`.
+
+```json
+{"object_id": 0, "layer": 1, "seam_paths": [{"from": [0, 0, 0], "to": [10, 10, 10]}]}
+{"object_id": 0, "layer": 1, "cut_islands": [0]}
+{"object_id": 0, "layer": 1, "join": [{"chart": 2, "to": 0}]}
+{"object_id": 0, "layer": 1, "islands": [{"chart": 2, "offset": [12, 0], "rotation_deg": 90}]}
+```
+
 ---
 
 ## Printer Tools

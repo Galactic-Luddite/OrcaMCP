@@ -1514,6 +1514,37 @@
       "summary": "List the textures a layer can use"
     },
     {
+      "category": "Texture displacement",
+      "description": "Read the unwrap of a texture displacement layer whose projection is unwrap, as the texture panel's UV pane shows it: the painted patch of the object's first model part (the part that owns the layers) cut into charts (islands) along the seams and the seam angle (once the layer has any seam, only the seams cut). Each island has its area_mm2, centroid and bounding_box (the unwrap's mm), its placement (offset, rotation_deg, scale), its join group and the neighbours it shares an edge with; also the seams (pairs of mesh vertices), the seam angle, auto_connect_islands and the vertex edits. include_vertices lists every unwrapped vertex (vertex, source_vertex, chart, uv), up to 20000. Chart and vertex numbers hold for this unwrap only: set_texture_unwrap's entries are accepted back as they are. Refused for a layer that is not an unwrap or is painted nowhere on that part. Reading it changes nothing.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_vertices": {
+            "description": "Also list every unwrapped vertex (capped at 20000, truncated says so)",
+            "type": "boolean"
+          },
+          "layer": {
+            "description": "The layer's slot",
+            "maximum": 7,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "object_id": {
+            "description": "Object index (0-based)",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "object_id",
+          "layer"
+        ],
+        "type": "object"
+      },
+      "name": "get_texture_unwrap",
+      "summary": "Read a layer's unwrap: islands, seams"
+    },
+    {
       "category": "Filaments & colour",
       "description": "Get toolchanger / multi-extruder settings (retraction on toolchange, prime tower, filament map, ...) from the printer preset, print preset, and project config.",
       "inputSchema": {
@@ -3856,6 +3887,246 @@
       },
       "name": "set_texture_displacement",
       "summary": "Add, edit, move or remove texture layers"
+    },
+    {
+      "category": "Texture displacement",
+      "description": "Edit the unwrap of a texture displacement layer whose projection is unwrap, as the texture panel's UV pane does, in its order: seam_angle_deg and auto_connect_islands, seams (add_seams, remove_seams, clear_seams, seam_paths snapped to the nearest vertices, cut_islands), then the unwrap is made anew when seams or the angle changed (its charts are numbered anew, and the islands are laid out as a net when the layer asks for it), relayout, islands (placement by chart), join, unjoin, average_scale, clear_uv_edits, uv_edits. Chart and vertex numbers name the unwrap as get_texture_unwrap reports it before this call, so a call that changes seams or the angle takes no island or vertex edit: send those in a second call. Refused: an unknown chart or vertex, a join of charts that share no edge, a seam that is no mesh edge, a layer that is not an unwrap or is painted nowhere on the owner part. One undo step named as the panel names the edit, none for no change (changed false); an open toolbar tool is closed first when the call changes something. Answers the unwrap as get_texture_unwrap does.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "add_seams": {
+            "description": "Mesh edges to cut along, as [vertex, vertex] pairs of the owner part's mesh",
+            "items": {
+              "items": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "auto_connect_islands": {
+            "description": "Lay islands out as a connected net; turning it on lays them out now",
+            "type": "boolean"
+          },
+          "average_scale": {
+            "description": "Give every island the mean of the islands' scales",
+            "type": "boolean"
+          },
+          "clear_seams": {
+            "description": "Remove every seam first",
+            "type": "boolean"
+          },
+          "clear_uv_edits": {
+            "description": "Drop every vertex edit first",
+            "type": "boolean"
+          },
+          "cut_islands": {
+            "description": "Charts to cut in two across their longest axis (a seam is added)",
+            "items": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "islands": {
+            "description": "Place islands by chart; only the fields given change. An entry of get_texture_unwrap's islands is accepted as it is",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "area_mm2": {
+                  "type": "number"
+                },
+                "bounding_box": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "centroid": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "chart": {
+                  "description": "The chart (island) to place",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "group": {
+                  "type": "integer"
+                },
+                "neighbours": {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                "offset": {
+                  "description": "Where the island sits, in the unwrap's mm",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "rotation_deg": {
+                  "description": "Rotation about the island's own centre, in degrees",
+                  "type": "number"
+                },
+                "scale": {
+                  "description": "Size factor about the island's own centre (1: the size the unwrap gave it)",
+                  "maximum": 1000,
+                  "minimum": 0.001,
+                  "type": "number"
+                }
+              },
+              "required": [
+                "chart"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "join": {
+            "description": "Unfold a chart against a neighbour it shares an edge with and group the two, so they are one island",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "chart": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "to": {
+                  "description": "The neighbour to join to (default: the nearest one)",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "chart"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "layer": {
+            "description": "The slot of an unwrap layer that is painted on the object's first model part",
+            "maximum": 7,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "object_id": {
+            "description": "Object index (0-based)",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "relayout": {
+            "description": "Lay the islands out as a connected net again",
+            "type": "boolean"
+          },
+          "remove_seams": {
+            "description": "Seams to take away, as [vertex, vertex] pairs",
+            "items": {
+              "items": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "seam_angle_deg": {
+            "description": "Edges sharper than this cut the unwrap into islands (the panel's Seam angle); once the layer has any seam, only seams cut",
+            "maximum": 90.0,
+            "minimum": 5.0,
+            "type": "number"
+          },
+          "seam_paths": {
+            "description": "Seams along the shortest path over mesh edges between two points",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "from": {
+                  "description": "Plate mm; snapped to the nearest vertex of the owner part",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "to": {
+                  "description": "Plate mm; snapped to the nearest vertex of the owner part",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "from",
+                "to"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "unjoin": {
+            "description": "Charts to put back at their own packed place and out of their group",
+            "items": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "uv_edits": {
+            "description": "Move unwrapped vertices; the edit rides with its island",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "uv": {
+                  "description": "Its place in the unwrap's mm, before the island's placement",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "vertex": {
+                  "description": "An unwrapped vertex, as get_texture_unwrap lists with include_vertices",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "vertex",
+                "uv"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "object_id",
+          "layer"
+        ],
+        "type": "object"
+      },
+      "name": "set_texture_unwrap",
+      "summary": "Edit a layer's unwrap: seams, islands"
     },
     {
       "category": "Models",

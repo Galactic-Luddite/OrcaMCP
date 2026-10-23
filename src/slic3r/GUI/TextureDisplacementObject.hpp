@@ -69,6 +69,12 @@ std::vector<std::pair<int, int>> cut_island_seams(const indexed_triangle_set &it
 std::optional<std::pair<int, TextureIsland>> join_target(const PatchUnwrap &unwrap, const std::vector<TextureIsland> &islands,
                                                          int chart);
 
+// The join-group id of chart `c`: its explicit entry in `groups`, or `c` itself (its own singleton) when unset.
+// Two charts move together iff this matches.
+int island_group_of(const std::vector<int> &groups, int c);
+// Merges chart `b`'s join group into chart `a`'s (materialising `groups` to `chart_count` first).
+void join_island_groups(std::vector<int> &groups, int a, int b, int chart_count);
+
 // Why smoothed_baked_mesh() gave nothing, for the panel's two messages.
 enum class TextureSmoothSkip { None, NothingPainted, NoInteriorVertices };
 // The owner's mesh with the displaced surface relaxed over the vertices of its painted triangles (the

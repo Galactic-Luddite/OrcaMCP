@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -229,6 +230,8 @@ struct MaskReport
 std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>> mask_reports(const std::vector<MaskInput>&);
 // Some layer of the stack is painted, readably, on some part.
 bool needs_bake(const std::vector<TextureDisplacementLayer>&, const std::vector<std::array<MaskReport, TEXTURE_DISPLACEMENT_MAX_LAYERS>>&);
+// A readable mask (no triangle beyond the mesh's `facet_count`) with state 1 in it: what needs_bake counts as painted.
+bool mask_has_paint(const PaintData&, std::size_t facet_count);
 // One slot of the above, the cheap form: some model part holds a readable mask with state 1 in that slot.
 bool slot_painted_fast(const ModelObject&, int slot);
 // The cheap form for every-object reports: FacetsAnnotation::empty() per slot, no selector.
@@ -266,7 +269,6 @@ struct IslandEdit
 struct UnwrapRequest
 {
     std::optional<float> seam_angle_deg;       // 5..90 (SetSeamAngle's clamp, refused outside)
-    std::optional<float> island_padding_mm;    // -1 auto, else >= 0
     std::optional<bool>  auto_connect_islands;
     std::vector<std::pair<int, int>>                 add_seams, remove_seams; // mesh vertex pairs
     std::vector<std::pair<Vec3d, Vec3d>>             seam_paths;              // plate mm, snapped to the nearest vertices
@@ -277,12 +279,52 @@ struct UnwrapRequest
     bool clear_seams = false, clear_uv_edits = false, average_scale = false, relayout = false;
 };
 // The shapes: add_seams / remove_seams [[v, v]], seam_paths [{from: [x,y,z], to: [x,y,z]}], cut_islands /
-// unjoin [chart], join [{chart, to?}], islands [{chart, offset?, rotation_deg?, scale?}], uv_edits
-// [{vertex, uv: [u, v]}]; island scale 0.001..1000 (the panel's clamp).
+// unjoin [chart], join [{chart, to?}], islands [{chart, offset?, rotation_deg?, scale?}] (an entry of unwrap_json's
+// islands is taken back: its centroid, group, area_mm2, bounding_box and neighbours are read and ignored),
+// uv_edits [{vertex, uv: [u, v]}]; island scale 0.001..1000 (the panel's clamp). The padding between islands is no
+// request: the panel and the bake always pack with none.
 std::optional<UnwrapRequest> read_unwrap_request(const nlohmann::json& params, std::string& error);
-// {chart_count, vertex_count, triangle_count, seam_angle_deg, island_padding_mm, auto_connect_islands, seams,
-// islands [{chart, centroid, offset, rotation_deg, scale, group}], uv_edits, vertices? [{vertex, chart, uv}]}
+
+// The most vertices unwrap_json lists.
+constexpr std::size_t max_unwrap_vertices = 20000;
+// {chart_count, vertex_count, triangle_count, seam_angle_deg, auto_connect_islands, seams [[v, v]],
+// islands [{chart, area_mm2, centroid, bounding_box {min, max}, offset, rotation_deg, scale, group, neighbours}],
+// uv_edits [{vertex, uv}] (and mesh_vertex_uv_edits [{mesh_vertex, uv}] for edits stored by mesh vertex), vertices?
+// [{vertex, source_vertex, chart, uv}] (the first max_unwrap_vertices; truncated), note}. The unwrap is the layer's
+// with its uv edits applied; coordinates are the unwrap's mm. Everything in it is taken back by read_unwrap_request.
 nlohmann::json unwrap_json(const PatchUnwrap&, const TextureDisplacementLayer&, bool include_vertices);
+
+// The painted patch of a layer's mask, in the frame the panel and the bake unwrap it in
+// (texture_displacement_bake_frame of the owner's volume-to-world). Empty when nothing is painted.
+indexed_triangle_set unwrap_patch(const TriangleMesh& owner_mesh, const PaintData& mask, const Transform3d& volume_to_world);
+// The unwrap the panel shows for `layer`: its seams and angle, no padding, then its uv edits.
+PatchUnwrap layer_unwrap(const indexed_triangle_set& patch, const TextureDisplacementLayer& layer);
+
+// One call's edit of a layer's unwrap, worked out on a copy of the layer.
+struct UnwrapEdit
+{
+    TextureDisplacementLayer layer;       // the layer after the call (the layer as it was when nothing changed)
+    PatchUnwrap              unwrap;      // the unwrap after the call, uv edits applied
+    bool                     changed  = false;
+    bool                     resolved = false; // the seams or the angle changed: unwrapped anew, charts renumbered
+    std::string              snapshot;    // the undo step's name, empty when nothing changed
+    std::vector<std::string> notes;
+    std::vector<std::pair<int, int>> snapped_paths; // per seam_paths entry, the mesh vertices its ends snapped to
+};
+// What the panel's UV pane does for each part of `request`, in its order: settings, seams (add, remove, clear, paths,
+// cut), a new unwrap when seams or angle changed (then the connected net, when the layer lays islands out so), relayout,
+// island placement, join, unjoin, average scale, clear uv edits, uv edits. Chart and vertex numbers name the unwrap as it
+// is before the call, so a call that changes seams or the angle takes no island or uv edit. `mesh` is the owner's
+// mesh in its own frame, `patch` its painted patch (unwrap_patch), `volume_to_plate` the owner's transform to plate mm.
+// nullopt with `error` for a refusal (an unknown chart or vertex, a join of charts that share no edge, a seam that is no
+// mesh edge, nothing painted) or when `cancelled` says so.
+std::optional<UnwrapEdit> edit_unwrap(const TextureDisplacementLayer& before, const UnwrapRequest& request, const indexed_triangle_set& mesh,
+                                      const indexed_triangle_set& patch, const Transform3d& volume_to_plate,
+                                      const std::function<bool()>& cancelled, std::string& error);
+// The fields of a layer an unwrap edit writes are equal.
+bool same_unwrap_state(const TextureDisplacementLayer&, const TextureDisplacementLayer&);
+// Writes those fields of `from` into `to`.
+void copy_unwrap_state(const TextureDisplacementLayer& from, TextureDisplacementLayer& to);
 
 // ---- Answers ----
 
@@ -296,7 +338,7 @@ struct LayerTexture
 // {layer, position, base, image {texture (id or null), name, source, path}, color_capable, depth_mm,
 // tile_size_mm, rotation_deg, offset, invert, midlevel, smoothing, edge_fade, edge_fade_amount, tile,
 // tile_method, projection, blend, color, view_axes {right, up} in plate axes (view; set_texture_displacement's
-// own shape), projection_frame_active (view with a frame; read_layer_request ignores it), unwrap {seam_angle_deg, island_padding_mm, auto_connect_islands, seams, placed_islands, uv_edits}
+// own shape), projection_frame_active (view with a frame; read_layer_request ignores it), unwrap {seam_angle_deg, auto_connect_islands, seams, placed_islands, uv_edits}
 // (unwrap), paint [{volume_id, name, painted, stale, painted_facets, coverage_percent}], painted,
 // inactive_settings, warnings}
 nlohmann::json layer_json(const TextureDisplacementLayer& layer, int position, bool base, const LayerTexture& texture,

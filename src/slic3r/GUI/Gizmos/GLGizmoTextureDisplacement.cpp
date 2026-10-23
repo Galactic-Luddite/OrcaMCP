@@ -1544,31 +1544,12 @@ void GLGizmoTextureDisplacement::compute_shaded_active_faces(const std::vector<i
 
 int GLGizmoTextureDisplacement::island_group_of(const std::vector<int> &groups, int c)
 {
-    return (c >= 0 && size_t(c) < groups.size() && groups[size_t(c)] >= 0) ? groups[size_t(c)] : c;
+    return Slic3r::GUI::island_group_of(groups, c);
 }
 
 void GLGizmoTextureDisplacement::join_island_groups(std::vector<int> &groups, int a, int b, int chart_count)
 {
-    if (a < 0 || b < 0 || chart_count <= 0)
-        return;
-    // Materialise to a full explicit table first, so singletons (which were implicit) get a concrete id
-    // that the relabel loop below can match on.
-    if (int(groups.size()) < chart_count) {
-        const size_t old = groups.size();
-        groups.resize(size_t(chart_count));
-        for (size_t i = old; i < groups.size(); ++i)
-            groups[i] = int(i);
-    }
-    for (size_t i = 0; i < groups.size(); ++i)
-        if (groups[i] < 0)
-            groups[i] = int(i);
-    const int ga = groups[size_t(a)], gb = groups[size_t(b)];
-    if (ga == gb)
-        return;
-    const int g = std::min(ga, gb);
-    for (int &x : groups)
-        if (x == ga || x == gb)
-            x = g;
+    Slic3r::GUI::join_island_groups(groups, a, b, chart_count);
 }
 
 std::vector<int> GLGizmoTextureDisplacement::build_island_move_set(const TextureDisplacementLayer &layer, int primary) const

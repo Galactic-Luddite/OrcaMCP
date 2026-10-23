@@ -223,6 +223,18 @@ json tool_examples()
             {"remove", R"({"object_id": 0, "action": "remove", "layer": 1})"},
             {"then", "paint_object with mode texture and texture_layer paints where the layer applies"}
         }},
+        {"get_texture_unwrap", {
+            {"islands", R"({"object_id": 0, "layer": 1})"},
+            {"with_vertices", R"({"object_id": 0, "layer": 1, "include_vertices": true})"},
+            {"when_to_use", "Before editing an unwrap layer's seams or islands: chart numbers, areas, neighbours, placements"}
+        }},
+        {"set_texture_unwrap", {
+            {"seam_between_points", R"({"object_id": 0, "layer": 1, "seam_paths": [{"from": [0, 0, 0], "to": [10, 10, 10]}]})"},
+            {"cut_a_chart", R"({"object_id": 0, "layer": 1, "cut_islands": [0]})"},
+            {"join", R"({"object_id": 0, "layer": 1, "join": [{"chart": 2, "to": 0}]})"},
+            {"place_an_island", R"({"object_id": 0, "layer": 1, "islands": [{"chart": 2, "offset": [12, 0], "rotation_deg": 90}]})"},
+            {"order", "Seam changes and island edits go in separate calls: chart numbers are the unwrap before the call"}
+        }},
         {"delete_user_texture", {
             {"by_id", R"({"texture": "user/My bricks.png"})"},
             {"note", "Only an imported texture; layers using it keep their image (still_used_by lists them)"}

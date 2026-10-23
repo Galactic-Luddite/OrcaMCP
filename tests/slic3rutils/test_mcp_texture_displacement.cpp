@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPServer.hpp"
 #include "slic3r/GUI/OrcaMCP/OrcaMCPTextureDisplacement.hpp"
+#include "slic3r/GUI/TextureDisplacementObject.hpp"
 #include "slic3r/GUI/TextureLibrary.hpp"
 
 // The texture displacement tools' decisions apart from the app: names, the library by id, one call's layer
@@ -800,7 +802,7 @@ TEST_CASE("an unwrap request is read for its shapes and bounds", "[McpTexture][o
         return error;
     };
 
-    const auto req = read_unwrap({{"seam_angle_deg", 45}, {"island_padding_mm", -1}, {"auto_connect_islands", false},
+    const auto req = read_unwrap({{"seam_angle_deg", 45}, {"auto_connect_islands", false},
                                   {"add_seams", {{7, 3}}}, {"remove_seams", {{1, 2}}},
                                   {"seam_paths", {{{"from", {0, 0, 0}}, {"to", {1, 2, 3}}}}}, {"cut_islands", {0, 2}}, {"unjoin", {1}},
                                   {"join", {{{"chart", 1}, {"to", 0}}, {{"chart", 2}}}},
@@ -808,7 +810,6 @@ TEST_CASE("an unwrap request is read for its shapes and bounds", "[McpTexture][o
                                   {"uv_edits", {{{"vertex", 4}, {"uv", {0.5, 1.5}}}}}, {"clear_seams", true}, {"relayout", true}});
     REQUIRE(req.has_value());
     CHECK(*req->seam_angle_deg == 45.f);
-    CHECK(*req->island_padding_mm == -1.f);
     CHECK_FALSE(*req->auto_connect_islands);
     CHECK(req->add_seams == std::vector<std::pair<int, int>>{{3, 7}});
     CHECK(req->seam_paths[0].second == Vec3d(1, 2, 3));
@@ -824,8 +825,6 @@ TEST_CASE("an unwrap request is read for its shapes and bounds", "[McpTexture][o
     CHECK(read_unwrap(json::object()).has_value());
     CHECK(refused({{"seam_angle_deg", 4}}).find("5 to 90") != std::string::npos);
     CHECK(refused({{"seam_angle_deg", 91}}).find("5 to 90") != std::string::npos);
-    CHECK(refused({{"island_padding_mm", -0.5}}).find("-1") != std::string::npos);
-    CHECK(read_unwrap({{"island_padding_mm", 0}}).has_value());
     CHECK(refused({{"auto_connect_islands", 1}}).find("true or false") != std::string::npos);
     CHECK(refused({{"add_seams", {{1, 1}}}}).find("one vertex twice") != std::string::npos);
     CHECK(refused({{"add_seams", {{-1, 2}}}}).find("whole number") != std::string::npos);
@@ -904,7 +903,7 @@ TEST_CASE("a layer and the stack's options are told", "[McpTexture][orcamcp]")
         CHECK(u["chart_count"] == 2);
         CHECK(u["seams"] == json::array({json::array({1, 2})}));
         CHECK(u["islands"][0]["group"] == 7);
-        CHECK(u["islands"][1]["group"] == -1);
+        CHECK(u["islands"][1]["group"] == 1); // its own group: its number
         CHECK(u["vertices"][1]["source_vertex"] == 6);
         CHECK_FALSE(unwrap_json(unwrap, layer, false).contains("vertices"));
     }
@@ -1007,6 +1006,299 @@ TEST_CASE("a stack is told in slot order with each part's paint", "[McpTexture][
         CHECK(answer.json["free_layers"] == int(TEXTURE_DISPLACEMENT_MAX_LAYERS));
         CHECK_FALSE(answer.first_unpainted_layer.has_value());
     }
+}
+
+namespace {
+
+// A cube whose six faces are charts of their own at the default seam angle, with the layer an unwrap edit starts from.
+struct CubeUnwrap
+{
+    Model                    model;
+    ModelObject*             object = nullptr;
+    TextureDisplacementLayer layer;
+    indexed_triangle_set     mesh;
+    indexed_triangle_set     patch;
+    PatchUnwrap              unwrap;
+
+    CubeUnwrap()
+    {
+        object = cube_object(model);
+        ModelVolume* part = object->volumes.front();
+        paint_facets(*part, 0, 12);
+        layer                   = layer_in(0);
+        layer.projection_method = TextureProjectionMethod::LSCM;
+        layer.auto_connect_islands = false;
+        mesh   = part->mesh().its;
+        patch  = unwrap_patch(part->mesh(), part->texture_displacement_facet(0).get_data(), Transform3d::Identity());
+        unwrap = layer_unwrap(patch, layer);
+    }
+
+    std::optional<UnwrapEdit> edit(const TextureDisplacementLayer& from, const json& params, std::string& error) const
+    {
+        std::string read_error;
+        const auto  request = read_unwrap_request(params, read_error);
+        REQUIRE(request.has_value());
+        return edit_unwrap(from, *request, mesh, patch, Transform3d::Identity(), [] { return false; }, error);
+    }
+    std::optional<UnwrapEdit> edit(const json& params, std::string& error) const { return edit(layer, params, error); }
+    UnwrapEdit                ok(const TextureDisplacementLayer& from, const json& params) const
+    {
+        std::string error;
+        auto        result = edit(from, params, error);
+        INFO(error);
+        REQUIRE(result.has_value());
+        return *result;
+    }
+    UnwrapEdit ok(const json& params) const { return ok(layer, params); }
+    std::string refused(const json& params) const
+    {
+        std::string error;
+        REQUIRE_FALSE(edit(params, error).has_value());
+        return error;
+    }
+};
+
+} // namespace
+
+TEST_CASE("an unwrap edit changes what it was asked to and names its undo step as the pane does", "[McpTexture][orcamcp]")
+{
+    CubeUnwrap cube;
+    REQUIRE(cube.unwrap.chart_count == 6);
+
+    SECTION("a call that asks for nothing changes nothing")
+    {
+        const UnwrapEdit none = cube.ok(json::object());
+        CHECK_FALSE(none.changed);
+        CHECK(none.snapshot.empty());
+        CHECK(same_unwrap_state(none.layer, cube.layer));
+    }
+    SECTION("an island is placed by the fields given")
+    {
+        const UnwrapEdit moved = cube.ok({{"islands", {{{"chart", 1}, {"offset", {3, 4}}, {"scale", 2}}}}});
+        CHECK(moved.changed);
+        CHECK(moved.snapshot == "Move texture island");
+        REQUIRE(moved.layer.islands.size() >= 2);
+        CHECK(moved.layer.islands[1].offset == Vec2f(3, 4));
+        CHECK(moved.layer.islands[1].scale == 2.f);
+        CHECK(moved.layer.islands[1].rotation_deg == 0.f);
+        CHECK_FALSE(moved.resolved);
+        // The same placement again is no change.
+        CHECK_FALSE(cube.ok(moved.layer, {{"islands", {{{"chart", 1}, {"offset", {3, 4}}}}}}).changed);
+    }
+    SECTION("a join places the chart edge to edge against its neighbour, as the pane's Join does")
+    {
+        const json u = unwrap_json(cube.unwrap, cube.layer, false);
+        const int  neighbour = u["islands"][0]["neighbours"][0].get<int>();
+        TextureIsland expected;
+        REQUIRE(join_chart_placement(cube.unwrap, cube.layer.islands, 0, neighbour, expected));
+        const UnwrapEdit joined = cube.ok({{"join", {{{"chart", 0}, {"to", neighbour}}}}});
+        CHECK(joined.snapshot == "Join texture island");
+        REQUIRE_FALSE(joined.layer.islands.empty());
+        CHECK(joined.layer.islands[0].offset == expected.offset);
+        CHECK(joined.layer.islands[0].rotation_deg == expected.rotation_deg);
+        CHECK(island_group_of(joined.layer.island_groups, 0) == island_group_of(joined.layer.island_groups, neighbour));
+        // Without `to`, the nearest neighbour the pane would pick.
+        const auto target = join_target(cube.unwrap, cube.layer.islands, 0);
+        REQUIRE(target.has_value());
+        const UnwrapEdit nearest = cube.ok({{"join", {{{"chart", 0}}}}});
+        CHECK(nearest.layer.islands[0].offset == target->second.offset);
+
+        const UnwrapEdit apart = cube.ok(joined.layer, {{"unjoin", {0}}});
+        CHECK(apart.snapshot == "Unjoin texture island");
+        CHECK(apart.layer.islands[0].offset == Vec2f::Zero());
+        CHECK(island_group_of(apart.layer.island_groups, 0) == 0);
+    }
+    SECTION("the scales are averaged")
+    {
+        TextureDisplacementLayer scaled = cube.layer;
+        scaled.islands.resize(6);
+        for (size_t i = 0; i < 6; ++i)
+            scaled.islands[i].scale = float(1 + i % 3);
+        const UnwrapEdit averaged = cube.ok(scaled, {{"average_scale", true}});
+        CHECK(averaged.snapshot == "Average island scale");
+        for (const TextureIsland& island : averaged.layer.islands)
+            CHECK_THAT(island.scale, WithinAbs(2., 1e-5));
+    }
+    SECTION("a relayout lays the islands out as a net, and turning auto connect on does it at once")
+    {
+        const UnwrapEdit net = cube.ok({{"relayout", true}});
+        CHECK(net.changed);
+        CHECK(net.snapshot == "Texture displacement editing");
+        CHECK(net.layer.islands.size() == 6);
+        CHECK_FALSE(net.layer.auto_connect_islands);
+        const UnwrapEdit connected = cube.ok({{"auto_connect_islands", true}});
+        CHECK(connected.layer.auto_connect_islands);
+        REQUIRE(connected.layer.islands.size() == net.layer.islands.size());
+        for (size_t i = 0; i < net.layer.islands.size(); ++i) {
+            CHECK(connected.layer.islands[i].offset == net.layer.islands[i].offset);
+            CHECK(connected.layer.islands[i].rotation_deg == net.layer.islands[i].rotation_deg);
+        }
+    }
+    SECTION("a seam path runs over mesh edges between the vertices nearest its ends")
+    {
+        const UnwrapEdit path = cube.ok({{"seam_paths", {{{"from", {0.1, 0.1, 0.1}}, {"to", {9.9, 9.9, 9.9}}}}}});
+        CHECK(path.snapshot == "Mark texture seam path");
+        CHECK(path.resolved);
+        REQUIRE(path.snapped_paths.size() == 1);
+        CHECK(cube.mesh.vertices[size_t(path.snapped_paths[0].first)].isApprox(Vec3f(0, 0, 0)));
+        CHECK(cube.mesh.vertices[size_t(path.snapped_paths[0].second)].isApprox(Vec3f(10, 10, 10)));
+        REQUIRE_FALSE(path.layer.lscm_seam_edges.empty());
+        std::set<std::pair<int, int>> edges;
+        for (const auto& tri : cube.mesh.indices)
+            for (int k = 0; k < 3; ++k)
+                edges.insert({std::min(tri[k], tri[(k + 1) % 3]), std::max(tri[k], tri[(k + 1) % 3])});
+        for (const auto& seam : path.layer.lscm_seam_edges)
+            CHECK(edges.count(seam) == 1);
+    }
+    SECTION("seams are added, removed and cleared; the unwrap is made anew")
+    {
+        const auto&               tri  = cube.mesh.indices[0];
+        const std::pair<int, int> edge = {std::min(tri[0], tri[1]), std::max(tri[0], tri[1])};
+        const UnwrapEdit marked = cube.ok({{"add_seams", {{edge.first, edge.second}}}});
+        CHECK(marked.snapshot == "Mark texture seam");
+        CHECK(marked.layer.lscm_seam_edges == std::vector<std::pair<int, int>>{edge});
+        CHECK(marked.resolved);
+        CHECK_FALSE(cube.ok(marked.layer, {{"add_seams", {{edge.first, edge.second}}}}).changed);
+        CHECK(cube.ok(marked.layer, {{"remove_seams", {{edge.second, edge.first}}}}).layer.lscm_seam_edges.empty());
+        const UnwrapEdit cleared = cube.ok(marked.layer, {{"clear_seams", true}});
+        CHECK(cleared.snapshot == "Clear texture seams");
+        CHECK(cleared.layer.lscm_seam_edges.empty());
+    }
+    SECTION("a chart is cut across")
+    {
+        const UnwrapEdit cut = cube.ok({{"cut_islands", {0}}});
+        CHECK(cut.snapshot == "Cut texture island");
+        CHECK_FALSE(cut.layer.lscm_seam_edges.empty());
+        CHECK(cut.resolved);
+        CHECK(cut.unwrap.chart_count != cube.unwrap.chart_count); // with a seam only seams cut: the seam angle no longer does
+    }
+    SECTION("a seam angle is a setting with no undo name, and makes the unwrap anew")
+    {
+        const UnwrapEdit angle = cube.ok({{"seam_angle_deg", 95 - 10}});
+        CHECK(angle.layer.lscm_seam_angle_deg == 85.f);
+        CHECK(angle.resolved);
+        CHECK(angle.snapshot == "Texture displacement editing");
+    }
+    SECTION("vertex edits move an unwrapped vertex and are cleared")
+    {
+        const UnwrapEdit edited = cube.ok({{"uv_edits", {{{"vertex", 3}, {"uv", {5, 6}}}}}});
+        CHECK(edited.snapshot == "Edit texture UV");
+        REQUIRE(edited.layer.lscm_uv_overrides.size() == 1);
+        CHECK(edited.layer.lscm_uv_overrides[0].first == lscm_uv_override_key(3));
+        CHECK(edited.unwrap.uvs[3] == Vec2f(5, 6));
+        CHECK_FALSE(cube.ok(edited.layer, {{"uv_edits", {{{"vertex", 3}, {"uv", {5, 6}}}}}}).changed);
+        const UnwrapEdit cleared = cube.ok(edited.layer, {{"clear_uv_edits", true}});
+        CHECK(cleared.snapshot == "Clear texture UV edits");
+        CHECK(cleared.layer.lscm_uv_overrides.empty());
+        CHECK(cleared.unwrap.uvs[3] != Vec2f(5, 6));
+        // Clearing runs first, so a call that clears and edits ends with the new edit.
+        const UnwrapEdit both = cube.ok(edited.layer, {{"clear_uv_edits", true}, {"uv_edits", {{{"vertex", 4}, {"uv", {1, 1}}}}}});
+        REQUIRE(both.layer.lscm_uv_overrides.size() == 1);
+        CHECK(both.layer.lscm_uv_overrides[0].first == lscm_uv_override_key(4));
+    }
+    SECTION("several kinds of edit share the generic undo name")
+    {
+        const UnwrapEdit both = cube.ok({{"islands", {{{"chart", 0}, {"offset", {1, 1}}}}}, {"uv_edits", {{{"vertex", 0}, {"uv", {1, 1}}}}}});
+        CHECK(both.snapshot == "Texture displacement editing");
+    }
+}
+
+TEST_CASE("an unwrap edit that cannot be done is refused before it changes anything", "[McpTexture][orcamcp]")
+{
+    CubeUnwrap cube;
+    REQUIRE(cube.unwrap.chart_count == 6);
+    const json u = unwrap_json(cube.unwrap, cube.layer, false);
+
+    CHECK(cube.refused({{"islands", {{{"chart", 99}, {"scale", 2}}}}}).find("chart 99") != std::string::npos);
+    CHECK(cube.refused({{"cut_islands", {6}}}).find("chart 6") != std::string::npos);
+    CHECK(cube.refused({{"uv_edits", {{{"vertex", 100000}, {"uv", {0, 0}}}}}}).find("vertex 100000") != std::string::npos);
+    CHECK(cube.refused({{"add_seams", {{0, 100}}}}).find("not a vertex") != std::string::npos);
+    CHECK(cube.refused({{"seam_paths", {{{"from", {0, 0, 0}}, {"to", {0.1, 0, 0}}}}}}).find("apart") != std::string::npos);
+
+    // Two charts that share no edge: the opposite faces of the cube.
+    int apart = -1;
+    for (int c = 1; c < 6; ++c) {
+        bool neighbour = false;
+        for (const json& n : u["islands"][0]["neighbours"])
+            neighbour |= n.get<int>() == c;
+        if (!neighbour)
+            apart = c;
+    }
+    REQUIRE(apart > 0);
+    CHECK(cube.refused({{"join", {{{"chart", 0}, {"to", apart}}}}}).find("share no mesh edge") != std::string::npos);
+    CHECK(cube.refused({{"join", {{{"chart", 0}, {"to", 0}}}}}).find("share no mesh edge") != std::string::npos);
+
+    // Two vertices of the mesh that no edge joins.
+    std::set<std::pair<int, int>> edges;
+    for (const auto& tri : cube.mesh.indices)
+        for (int k = 0; k < 3; ++k)
+            edges.insert({std::min(tri[k], tri[(k + 1) % 3]), std::max(tri[k], tri[(k + 1) % 3])});
+    std::pair<int, int> not_edge{-1, -1};
+    for (int a = 0; a < int(cube.mesh.vertices.size()) && not_edge.first < 0; ++a)
+        for (int b = a + 1; b < int(cube.mesh.vertices.size()); ++b)
+            if (!edges.count({a, b})) {
+                not_edge = {a, b};
+                break;
+            }
+    REQUIRE(not_edge.first >= 0);
+    CHECK(cube.refused({{"add_seams", {{not_edge.first, not_edge.second}}}}).find("not joined by an edge") != std::string::npos);
+
+    // Numbers name the unwrap before the call: a seam change in the same call renumbers it.
+    CHECK(cube.refused({{"cut_islands", {0}}, {"islands", {{{"chart", 1}, {"scale", 2}}}}}).find("seam change first") != std::string::npos);
+    CHECK(cube.refused({{"seam_angle_deg", 60}, {"uv_edits", {{{"vertex", 1}, {"uv", {0, 0}}}}}}).find("seam change first") != std::string::npos);
+
+    // Nothing painted leaves nothing to unwrap.
+    std::string error;
+    std::string read_error;
+    const auto  request = read_unwrap_request(json::object(), read_error);
+    CHECK_FALSE(edit_unwrap(cube.layer, *request, cube.mesh, indexed_triangle_set{}, Transform3d::Identity(), [] { return false; }, error).has_value());
+    CHECK(error.find("nothing to unwrap") != std::string::npos);
+    // A stopped call changes nothing.
+    CHECK_FALSE(edit_unwrap(cube.layer, *request, cube.mesh, cube.patch, Transform3d::Identity(), [] { return true; }, error).has_value());
+    CHECK(error.find("stopped") != std::string::npos);
+}
+
+TEST_CASE("an unwrap read back is accepted and changes nothing", "[McpTexture][orcamcp]")
+{
+    CubeUnwrap cube;
+    // A layer with a placement, a join, a seam and a vertex edit, as get_texture_unwrap would report it.
+    TextureDisplacementLayer layer = cube.ok({{"relayout", true}}).layer;
+    layer = cube.ok(layer, {{"islands", {{{"chart", 2}, {"offset", {1.5, 2.5}}, {"rotation_deg", 30}, {"scale", 1.5}}}}}).layer;
+    layer = cube.ok(layer, {{"join", {{{"chart", 0}}}}}).layer;
+    layer = cube.ok(layer, {{"uv_edits", {{{"vertex", 5}, {"uv", {2, 3}}}}}}).layer;
+    const auto& tri       = cube.mesh.indices[0];
+    layer.lscm_seam_edges = {{std::min(tri[0], tri[1]), std::max(tri[0], tri[1])}};
+
+    const PatchUnwrap unwrap = layer_unwrap(cube.patch, layer);
+    // The seam above is no seam of this unwrap's making; read the unwrap the layer's own seams give.
+    const json reported = unwrap_json(unwrap, layer, true);
+    REQUIRE(reported["islands"].size() == size_t(unwrap.chart_count));
+    CHECK(reported["islands"][0].contains("area_mm2"));
+    CHECK(reported["islands"][0].contains("bounding_box"));
+    CHECK(reported["islands"][0].contains("neighbours"));
+    CHECK(reported["uv_edits"].size() == 1);
+    CHECK(reported["uv_edits"][0]["vertex"] == 5);
+
+    json again = {{"islands", reported["islands"]}, {"uv_edits", reported["uv_edits"]}, {"add_seams", reported["seams"]},
+                  {"seam_angle_deg", reported["seam_angle_deg"]}, {"auto_connect_islands", reported["auto_connect_islands"]}};
+    const UnwrapEdit same = cube.ok(layer, again);
+    CHECK_FALSE(same.changed);
+    CHECK(same.snapshot.empty());
+}
+
+TEST_CASE("an unwrap lists at most max_unwrap_vertices vertices", "[McpTexture][orcamcp]")
+{
+    PatchUnwrap unwrap;
+    unwrap.chart_count   = 1;
+    const size_t count   = max_unwrap_vertices + 5;
+    unwrap.uvs.assign(count, Vec2f::Zero());
+    unwrap.source_vertex.assign(count, 0);
+    unwrap.vertex_chart.assign(count, 0);
+    unwrap.chart_centroid = {Vec2f::Zero()};
+    const json capped = unwrap_json(unwrap, TextureDisplacementLayer{}, true);
+    CHECK(capped["vertices"].size() == max_unwrap_vertices);
+    CHECK(capped["truncated"] == true);
+    CHECK(unwrap_json(unwrap, TextureDisplacementLayer{}, false)["islands"].size() == 1);
 }
 
 TEST_CASE("only an imported texture can be deleted", "[McpTexture][orcamcp]")

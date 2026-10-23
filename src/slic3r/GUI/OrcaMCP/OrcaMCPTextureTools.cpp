@@ -12,9 +12,11 @@
 #include "OrcaMCPPartEdits.hpp"
 #include "OrcaMCPPartTools.hpp"
 #include "OrcaMCPTextureDisplacement.hpp"
+#include "OrcaMCPUiJob.hpp"
 #include "OrcaMCPUserView.hpp"
 
 #include "slic3r/Utils/FixModelByCgal.hpp"
+#include "slic3r/Utils/ThreadCancel.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -29,6 +31,7 @@
 #include <wx/log.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <map>
@@ -818,6 +821,238 @@ nlohmann::json get_texture_displacement(const nlohmann::json& params)
 }
 
 
+// ---- The unwrap of a layer ----
+
+// Everything the unwrap work reads, copied on the main thread: the unwrap is worked out from these on the HTTP thread.
+struct UnwrapInput
+{
+    int                                         object_id = -1;
+    int                                         slot      = -1;
+    Slic3r::ObjectID                            object_oid, owner_oid;
+    Slic3r::TextureDisplacementLayer            layer;
+    std::shared_ptr<const Slic3r::TriangleMesh> mesh;
+    PaintData                                   mask;
+    Slic3r::Transform3d                         to_world = Slic3r::Transform3d::Identity();
+    Slic3r::Transform3d                         to_plate = Slic3r::Transform3d::Identity();
+
+    // The same object, mesh, paint and unwrap state: what a plan made from `other` still holds for.
+    bool same_inputs(const UnwrapInput& other) const
+    {
+        return object_oid == other.object_oid && owner_oid == other.owner_oid && mesh == other.mesh && mask == other.mask &&
+               to_world.matrix() == other.to_world.matrix() && to_plate.matrix() == other.to_plate.matrix() &&
+               same_unwrap_state(layer, other.layer) && layer.projection_method == other.layer.projection_method;
+    }
+};
+
+// The slot a call names, 0..7.
+std::optional<int> read_slot(const nlohmann::json& params, std::string& error)
+{
+    int slot = -1;
+    if (!params.contains("layer") || !parse_integer_param(params.at("layer"), slot) || slot < 0 || slot >= int(Slic3r::TEXTURE_DISPLACEMENT_MAX_LAYERS)) {
+        error = "layer must be the slot of a texture layer, a whole number from 0 to " + std::to_string(int(Slic3r::TEXTURE_DISPLACEMENT_MAX_LAYERS) - 1) +
+                " (get_texture_displacement lists them)";
+        return std::nullopt;
+    }
+    return slot;
+}
+
+// The refusals both unwrap tools share, and the copies. A null json when all is well, else the error answer. Main thread.
+nlohmann::json capture_unwrap_input(const nlohmann::json& params, int slot, bool for_edit, UnwrapInput& in)
+{
+    std::string          error;
+    Slic3r::GUI::Plater* plater = wxGetApp().plater();
+    if (for_edit) {
+        if (Slic3r::cgal_repair_dialog_running())
+            return error_response("The app is running its own mesh repair, so no unwrap was changed: call again once it has finished");
+    }
+    Slic3r::ModelObject* object = resolve_object_id(params, plater->model(), in.object_id, error);
+    if (object == nullptr)
+        return error_response(error);
+    if (for_edit)
+        if (const auto refusal = edit_job_refusal(!plater->get_ui_job_worker().is_idle(), "set_texture_unwrap"))
+            return error_response(*refusal);
+    const Slic3r::ModelVolume* owner = texture_stack_owner(*object);
+    if (owner == nullptr)
+        return error_response("Object " + std::to_string(in.object_id) + " has no model part, so it holds no texture layers");
+    const Slic3r::TextureDisplacementLayer* layer = layer_in_slot(owner->texture_displacement_layers, slot);
+    if (layer == nullptr)
+        return error_response("Object " + std::to_string(in.object_id) + " has no texture displacement layer in slot " + std::to_string(slot) +
+                              " (get_texture_displacement lists its layers)");
+    if (layer->projection_method != Slic3r::TextureProjectionMethod::LSCM)
+        return error_response("Layer " + std::to_string(slot) + " of object " + std::to_string(in.object_id) + " maps its texture by " +
+                              projection_name(layer->projection_method) + ", and only an unwrap layer has an unwrap: set_texture_displacement with projection unwrap makes it one");
+    if (object->instances.empty())
+        return error_response("Object " + std::to_string(in.object_id) + " has no instance, so it has no place to unwrap in");
+    int owner_index = 0;
+    for (size_t i = 0; i < object->volumes.size(); ++i)
+        if (object->volumes[i] == owner)
+            owner_index = int(i);
+    in.slot      = slot;
+    in.object_oid = object->id();
+    in.owner_oid  = owner->id();
+    in.layer      = *layer;
+    in.mesh       = owner->mesh_ptr();
+    in.mask       = owner->texture_displacement_facet(slot).get_data();
+    in.to_world   = Slic3r::texture_displacement_volume_to_world(*owner);
+    in.to_plate   = volume_to_plate(*object, *owner, 0);
+    if (mask_is_stale(in.mask, in.mesh->its.indices.size()))
+        return error_response("Layer " + std::to_string(slot) + "'s paint on the owner part (volume " + std::to_string(owner_index) +
+                              ") indexes triangles its mesh no longer has, so there is no patch to unwrap: paint the layer again (paint_object, mode texture)");
+    if (!mask_has_paint(in.mask, in.mesh->its.indices.size()))
+        return error_response("Layer " + std::to_string(slot) + " is painted on no triangle of object " + std::to_string(in.object_id) + "'s first model part, "
+                              "the part that owns the layers and the only one whose unwrap counts: paint it there first (paint_object, mode texture, texture_layer " +
+                              std::to_string(slot) + ")");
+    return nlohmann::json();
+}
+
+nlohmann::json unwrap_answer(const UnwrapInput& in, const Slic3r::TextureDisplacementLayer& layer, const Slic3r::PatchUnwrap& unwrap, bool include_vertices)
+{
+    nlohmann::json answer = unwrap_json(unwrap, layer, include_vertices);
+    answer["status"]    = "success";
+    answer["object_id"] = in.object_id;
+    answer["layer"]     = in.slot;
+    return answer;
+}
+
+nlohmann::json get_texture_unwrap(const nlohmann::json& params)
+{
+    std::string error;
+    const auto  slot = read_slot(params, error);
+    if (!slot)
+        return error_response(error);
+    bool include_vertices = false;
+    if (params.contains("include_vertices") && !parse_boolean_param(params.at("include_vertices"), include_vertices))
+        return error_response("include_vertices must be true or false; got " + params.at("include_vertices").dump() + ": omit it for no vertex list");
+
+    UnwrapInput          in;
+    const nlohmann::json refusal = run_on_main_thread([&]() { return capture_unwrap_input(params, *slot, /*for_edit=*/false, in); });
+    if (!refusal.is_null())
+        return refusal;
+
+    // Pure mesh work on the copies, off the main thread.
+    const indexed_triangle_set patch = unwrap_patch(*in.mesh, in.mask, in.to_world);
+    if (patch.indices.empty())
+        return error_response("Layer " + std::to_string(*slot) + " has no painted triangle to unwrap");
+    const Slic3r::PatchUnwrap unwrap = layer_unwrap(patch, in.layer);
+    if (Slic3r::this_thread_cancelled())
+        return error_response("The unwrap was stopped (the app is quitting)");
+    if (unwrap.empty())
+        return error_response("The layer's paint leaves nothing to unwrap");
+    return unwrap_answer(in, in.layer, unwrap, include_vertices);
+}
+
+// The unwrap tool's change on the main thread. `expected` is what the plan was made from. With `may_close`, an open
+// toolbar tool is closed first, only now that the call changes something; closing flushes the tool's paint into the model,
+// so the model is read again, and when it is no longer what was planned `replan` gets the new input (nothing is applied).
+nlohmann::json apply_unwrap_edit(const nlohmann::json& params, const UnwrapInput& expected, const UnwrapEdit& edit, bool may_close,
+                                 std::string& closed_tool, std::optional<UnwrapInput>& replan)
+{
+    wxLogNull                 no_log;
+    McpDialogSuppressionGuard guard;
+    Slic3r::GUI::Plater*      plater = wxGetApp().plater();
+    const auto                finish = [&](nlohmann::json result) { return guard.report(with_closed_tool(std::move(result), closed_tool)); };
+
+    UnwrapInput now;
+    if (const nlohmann::json refusal = capture_unwrap_input(params, expected.slot, /*for_edit=*/true, now); !refusal.is_null())
+        return finish(refusal);
+    const auto changed_meanwhile = []() {
+        return error_response("The layer, its paint or the mesh changed while the unwrap was worked out, so nothing was changed: call again");
+    };
+    if (!now.same_inputs(expected))
+        return finish(changed_meanwhile());
+
+    std::string          unused;
+    Slic3r::ModelObject* object = resolve_object_id(params, plater->model(), now.object_id, unused);
+    if (may_close) {
+        if (const auto failed = close_toolbar_tool_for_change(*plater, now.object_id, object->volumes.size(), closed_tool))
+            return guard.report(with_closed_tool(*failed, closed_tool));
+        if (!closed_tool.empty()) {
+            UnwrapInput after;
+            if (const nlohmann::json refusal = capture_unwrap_input(params, expected.slot, /*for_edit=*/true, after); !refusal.is_null())
+                return finish(refusal);
+            if (!after.same_inputs(expected)) {
+                replan = std::move(after);
+                return nlohmann::json();
+            }
+            object = resolve_object_id(params, plater->model(), now.object_id, unused); // the same object, found again
+        }
+    }
+    Slic3r::ModelVolume* owner = texture_stack_owner(*object);
+    for (Slic3r::TextureDisplacementLayer& layer : owner->texture_displacement_layers)
+        if (layer.slot == expected.slot) {
+            plater->take_snapshot(edit.snapshot);
+            copy_unwrap_state(edit.layer, layer);
+        }
+    if (Slic3r::GUI::GLCanvas3D* canvas = plater->get_view3D_canvas3D())
+        canvas->set_as_dirty();
+    return finish({{"status", "success"}});
+}
+
+nlohmann::json set_texture_unwrap(const nlohmann::json& params)
+{
+    std::string error;
+    const auto  request = read_unwrap_request(params, error);
+    if (!request)
+        return error_response(error);
+    const auto slot = read_slot(params, error);
+    if (!slot)
+        return error_response(error);
+
+    using Clock               = std::chrono::steady_clock;
+    const auto deadline       = Clock::now() + tool_wait_cap();
+    const auto cancelled      = [deadline] { return Slic3r::this_thread_cancelled() || Clock::now() > deadline; };
+    std::string closed_tool;
+
+    UnwrapInput          in;
+    const nlohmann::json refusal = run_on_main_thread([&]() { return capture_unwrap_input(params, *slot, /*for_edit=*/true, in); });
+    if (!refusal.is_null())
+        return refusal;
+
+    // The plan: pure mesh work on the copies, off the main thread.
+    const auto plan = [&](const UnwrapInput& input, std::string& why) -> std::optional<UnwrapEdit> {
+        const indexed_triangle_set patch = unwrap_patch(*input.mesh, input.mask, input.to_world);
+        if (patch.indices.empty()) {
+            why = "Layer " + std::to_string(input.slot) + " has no painted triangle to unwrap";
+            return std::nullopt;
+        }
+        return edit_unwrap(input.layer, *request, input.mesh->its, patch, input.to_plate, cancelled, why);
+    };
+    const auto answer_of = [&](const UnwrapInput& input, const UnwrapEdit& edit) {
+        nlohmann::json answer = unwrap_answer(input, edit.layer, edit.unwrap, /*include_vertices=*/false);
+        answer["changed"]           = edit.changed;
+        answer["charts_renumbered"] = edit.resolved;
+        if (!edit.snapped_paths.empty()) {
+            nlohmann::json snapped = nlohmann::json::array();
+            for (const auto& [from, to] : edit.snapped_paths)
+                snapped.push_back({{"from_vertex", from}, {"to_vertex", to}});
+            answer["seam_paths_snapped"] = snapped;
+        }
+        if (!edit.notes.empty())
+            answer["notes"] = edit.notes;
+        return with_closed_tool(std::move(answer), closed_tool);
+    };
+
+    std::optional<UnwrapEdit> edit = plan(in, error);
+    if (!edit)
+        return error_response(error);
+    for (int round = 0; round < 2 && edit->changed; ++round) {
+        std::optional<UnwrapInput> replan;
+        const nlohmann::json       applied = run_on_main_thread([&]() { return apply_unwrap_edit(params, in, *edit, /*may_close=*/round == 0, closed_tool, replan); });
+        if (!replan) {
+            if (applied.value("status", "") != "success")
+                return applied;
+            return answer_of(in, *edit);
+        }
+        // The panel was open and closing it changed the paint the plan read: plan again on the model as it is now.
+        in   = std::move(*replan);
+        edit = plan(in, error);
+        if (!edit)
+            return with_closed_tool(error_response(error), closed_tool);
+    }
+    return answer_of(in, *edit);
+}
+
+
 // A number property held to the panel's range for `key` (layer_setting_bounds), so the schema and the reader cannot drift.
 nlohmann::json bounded_property(const char* key, const char* type, const std::string& description)
 {
@@ -830,6 +1065,11 @@ nlohmann::json bounded_property(const char* key, const char* type, const std::st
     return out;
 }
 
+nlohmann::json bounded_range(double min, double max, const std::string& description)
+{
+    return {{"type", "number"}, {"minimum", min}, {"maximum", max}, {"description", description}};
+}
+
 nlohmann::json vector3_property(const std::string& description)
 {
     return {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 3}, {"maxItems", 3}, {"description", description}};
@@ -838,6 +1078,73 @@ nlohmann::json vector3_property(const std::string& description)
 nlohmann::json axes_properties()
 {
     return {{"right", vector3_property("The projector's right axis in plate axes")}, {"up", vector3_property("The projector's up axis in plate axes")}};
+}
+
+nlohmann::json int_pair_list(const std::string& description)
+{
+    return {{"type", "array"},
+            {"items", {{"type", "array"}, {"items", {{"type", "integer"}, {"minimum", 0}}}, {"minItems", 2}, {"maxItems", 2}}},
+            {"description", description}};
+}
+
+nlohmann::json int_list(const std::string& description)
+{
+    return {{"type", "array"}, {"items", {{"type", "integer"}, {"minimum", 0}}}, {"description", description}};
+}
+
+nlohmann::json set_texture_unwrap_schema()
+{
+    const nlohmann::json point2 = {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 2}, {"maxItems", 2}};
+    nlohmann::json       island = {
+        {"type", "object"},
+        {"properties", {{"chart", {{"type", "integer"}, {"minimum", 0}, {"description", "The chart (island) to place"}}},
+                        {"offset", {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 2}, {"maxItems", 2}, {"description", "Where the island sits, in the unwrap's mm"}}},
+                        {"rotation_deg", {{"type", "number"}, {"description", "Rotation about the island's own centre, in degrees"}}},
+                        {"scale", {{"type", "number"}, {"minimum", 0.001}, {"maximum", 1000}, {"description", "Size factor about the island's own centre (1: the size the unwrap gave it)"}}},
+                        // What get_texture_unwrap reports beside the placement, accepted and ignored.
+                        {"centroid", point2},
+                        {"group", {{"type", "integer"}}},
+                        {"area_mm2", {{"type", "number"}}},
+                        {"bounding_box", {{"type", {"object", "null"}}}},
+                        {"neighbours", {{"type", "array"}, {"items", {{"type", "integer"}}}}}}},
+        {"required", {"chart"}},
+        {"additionalProperties", false}};
+    nlohmann::json properties = {
+        {"object_id", {{"type", "integer"}, {"minimum", 0}, {"description", "Object index (0-based)"}}},
+        {"layer", {{"type", "integer"}, {"minimum", 0}, {"maximum", int(Slic3r::TEXTURE_DISPLACEMENT_MAX_LAYERS) - 1}, {"description", "The slot of an unwrap layer that is painted on the object's first model part"}}},
+        {"seam_angle_deg", bounded_range(5., 90., "Edges sharper than this cut the unwrap into islands (the panel's Seam angle); once the layer has any seam, only seams cut")},
+        {"auto_connect_islands", {{"type", "boolean"}, {"description", "Lay islands out as a connected net; turning it on lays them out now"}}},
+        {"add_seams", int_pair_list("Mesh edges to cut along, as [vertex, vertex] pairs of the owner part's mesh")},
+        {"remove_seams", int_pair_list("Seams to take away, as [vertex, vertex] pairs")},
+        {"seam_paths", {{"type", "array"},
+                        {"items", {{"type", "object"},
+                                   {"properties", {{"from", vector3_property("Plate mm; snapped to the nearest vertex of the owner part")},
+                                                   {"to", vector3_property("Plate mm; snapped to the nearest vertex of the owner part")}}},
+                                   {"required", {"from", "to"}},
+                                   {"additionalProperties", false}}},
+                        {"description", "Seams along the shortest path over mesh edges between two points"}}},
+        {"clear_seams", {{"type", "boolean"}, {"description", "Remove every seam first"}}},
+        {"cut_islands", int_list("Charts to cut in two across their longest axis (a seam is added)")},
+        {"relayout", {{"type", "boolean"}, {"description", "Lay the islands out as a connected net again"}}},
+        {"islands", {{"type", "array"}, {"items", island}, {"description", "Place islands by chart; only the fields given change. An entry of get_texture_unwrap's islands is accepted as it is"}}},
+        {"join", {{"type", "array"},
+                  {"items", {{"type", "object"},
+                             {"properties", {{"chart", {{"type", "integer"}, {"minimum", 0}}},
+                                             {"to", {{"type", "integer"}, {"minimum", 0}, {"description", "The neighbour to join to (default: the nearest one)"}}}}},
+                             {"required", {"chart"}},
+                             {"additionalProperties", false}}},
+                  {"description", "Unfold a chart against a neighbour it shares an edge with and group the two, so they are one island"}}},
+        {"unjoin", int_list("Charts to put back at their own packed place and out of their group")},
+        {"average_scale", {{"type", "boolean"}, {"description", "Give every island the mean of the islands' scales"}}},
+        {"clear_uv_edits", {{"type", "boolean"}, {"description", "Drop every vertex edit first"}}},
+        {"uv_edits", {{"type", "array"},
+                      {"items", {{"type", "object"},
+                                 {"properties", {{"vertex", {{"type", "integer"}, {"minimum", 0}, {"description", "An unwrapped vertex, as get_texture_unwrap lists with include_vertices"}}},
+                                                 {"uv", {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 2}, {"maxItems", 2}, {"description", "Its place in the unwrap's mm, before the island's placement"}}}}},
+                                 {"required", {"vertex", "uv"}},
+                                 {"additionalProperties", false}}},
+                      {"description", "Move unwrapped vertices; the edit rides with its island"}}}};
+    return {{"type", "object"}, {"properties", properties}, {"required", {"object_id", "layer"}}};
 }
 
 nlohmann::json set_texture_displacement_schema()
@@ -981,6 +1288,52 @@ void OrcaMCPServer::register_texture_tools()
         },
         [](const nlohmann::json& params) -> nlohmann::json {
             return get_texture_displacement(params);
+        }
+    });
+
+    register_tool({
+        "get_texture_unwrap",
+        ToolCategory::TextureDisplacement,
+        "Read a layer's unwrap: islands, seams",
+        "Read the unwrap of a texture displacement layer whose projection is unwrap, as the texture panel's UV pane shows it: "
+        "the painted patch of the object's first model part (the part that owns the layers) cut into charts (islands) along "
+        "the seams and the seam angle (once the layer has any seam, only the seams cut). Each island has its area_mm2, centroid and bounding_box (the unwrap's mm), its "
+        "placement (offset, rotation_deg, scale), its join group and the neighbours it shares an edge with; also the seams "
+        "(pairs of mesh vertices), the seam angle, auto_connect_islands and the vertex edits. include_vertices lists every "
+        "unwrapped vertex (vertex, source_vertex, chart, uv), up to 20000. Chart and vertex numbers hold for this unwrap "
+        "only: set_texture_unwrap's entries are accepted back as they are. Refused for a layer that is not an unwrap or is "
+        "painted nowhere on that part. Reading it changes nothing.",
+        {
+            {"type", "object"},
+            {"properties", {
+                {"object_id", {{"type", "integer"}, {"minimum", 0}, {"description", "Object index (0-based)"}}},
+                {"layer", {{"type", "integer"}, {"minimum", 0}, {"maximum", int(Slic3r::TEXTURE_DISPLACEMENT_MAX_LAYERS) - 1}, {"description", "The layer's slot"}}},
+                {"include_vertices", {{"type", "boolean"}, {"description", "Also list every unwrapped vertex (capped at 20000, truncated says so)"}}}
+            }},
+            {"required", {"object_id", "layer"}}
+        },
+        [](const nlohmann::json& params) -> nlohmann::json {
+            return get_texture_unwrap(params);
+        }
+    });
+
+    register_tool({
+        "set_texture_unwrap",
+        ToolCategory::TextureDisplacement,
+        "Edit a layer's unwrap: seams, islands",
+        "Edit the unwrap of a texture displacement layer whose projection is unwrap, as the texture panel's UV pane does, in its "
+        "order: seam_angle_deg and auto_connect_islands, seams (add_seams, remove_seams, clear_seams, seam_paths snapped to "
+        "the nearest vertices, cut_islands), then the unwrap is made anew when seams or the angle changed (its charts are "
+        "numbered anew, and the islands are laid out as a net when the layer asks for it), relayout, islands (placement by "
+        "chart), join, unjoin, average_scale, clear_uv_edits, uv_edits. Chart and vertex numbers name the unwrap as get_texture_unwrap "
+        "reports it before this call, so a call that changes seams or the angle takes no island or vertex edit: send those "
+        "in a second call. Refused: an unknown chart or vertex, a join of charts that share no edge, a seam that is no mesh "
+        "edge, a layer that is not an unwrap or is painted nowhere on the owner part. One undo step named as the panel names "
+        "the edit, none for no change (changed false); an open toolbar tool is closed first when the call changes something. "
+        "Answers the unwrap as get_texture_unwrap does.",
+        set_texture_unwrap_schema(),
+        [](const nlohmann::json& params) -> nlohmann::json {
+            return set_texture_unwrap(params);
         }
     });
 }

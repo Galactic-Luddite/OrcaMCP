@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -1000,6 +1002,11 @@ bool needs_bake(const std::vector<TextureDisplacementLayer>& stack, const std::v
     return false;
 }
 
+bool mask_has_paint(const PaintData& data, std::size_t facet_count)
+{
+    return !data.triangles_to_split.empty() && !mask_is_stale(data, facet_count) && data.used_states.size() > 1 && data.used_states[1];
+}
+
 bool slot_painted_fast(const ModelObject& object, int slot)
 {
     if (slot < 0 || size_t(slot) >= TEXTURE_DISPLACEMENT_MAX_LAYERS)
@@ -1007,9 +1014,7 @@ bool slot_painted_fast(const ModelObject& object, int slot)
     for (const ModelVolume* v : object.volumes)
         if (v->is_model_part()) {
             const PaintData& data = v->texture_displacement_facet(slot).get_data();
-            // Painted, as needs_bake counts it: a readable mask with state 1 in it.
-            if (!data.triangles_to_split.empty() && !mask_is_stale(data, v->mesh().its.indices.size()) &&
-                data.used_states.size() > 1 && data.used_states[1])
+            if (mask_has_paint(data, v->mesh().its.indices.size()))
                 return true;
         }
     return false;
@@ -1195,16 +1200,6 @@ std::optional<UnwrapRequest> read_unwrap_request(const json& params, std::string
         }
         req.seam_angle_deg = float(v);
     }
-    if (params.contains("island_padding_mm")) {
-        double v = 0;
-        if (!r.number("island_padding_mm", v))
-            return std::nullopt;
-        if (v != -1. && v < 0.) {
-            error = "island_padding_mm must be -1 (automatic) or 0 and more mm, not " + number_text(v);
-            return std::nullopt;
-        }
-        req.island_padding_mm = float(v);
-    }
     if (!r.boolean("auto_connect_islands", req.auto_connect_islands))
         return std::nullopt;
     for (const char* key : {"clear_seams", "clear_uv_edits", "average_scale", "relayout"}) {
@@ -1272,7 +1267,7 @@ std::optional<UnwrapRequest> read_unwrap_request(const json& params, std::string
         for (size_t i = 0; i < v.size(); ++i) {
             const std::string what = "islands[" + std::to_string(i) + "]";
             IslandEdit edit;
-            if (!known_keys(v[i], what, {"chart", "offset", "rotation_deg", "scale"}, error) || !v[i].contains("chart") ||
+            if (!known_keys(v[i], what, {"chart", "offset", "rotation_deg", "scale", "centroid", "group", "area_mm2", "bounding_box", "neighbours"}, error) || !v[i].contains("chart") ||
                 !read_index(v[i].at("chart"), what + " chart", edit.chart, error)) {
                 if (error.empty())
                     error = what + " needs chart";
@@ -1327,40 +1322,471 @@ std::optional<UnwrapRequest> read_unwrap_request(const json& params, std::string
     return req;
 }
 
+namespace {
+
+struct ChartFacts
+{
+    std::vector<double> area;
+    std::vector<Vec2f>  low, high;
+    std::vector<std::set<int>> neighbours;
+};
+
+// Per chart: the area of its triangles in the unwrap's mm, the box of its vertices, and the charts sharing a mesh edge with it.
+ChartFacts chart_facts(const PatchUnwrap& unwrap)
+{
+    const size_t count = size_t(std::max(unwrap.chart_count, 0));
+    ChartFacts   out;
+    out.area.assign(count, 0.);
+    out.low.assign(count, Vec2f::Constant(std::numeric_limits<float>::max()));
+    out.high.assign(count, Vec2f::Constant(std::numeric_limits<float>::lowest()));
+    out.neighbours.resize(count);
+    const auto chart_of = [&](int vertex) { return vertex >= 0 && size_t(vertex) < unwrap.vertex_chart.size() ? unwrap.vertex_chart[size_t(vertex)] : -1; };
+    std::map<std::pair<int, int>, std::set<int>> edge_charts;
+    for (const stl_triangle_vertex_indices& tri : unwrap.indices) {
+        const int chart = chart_of(tri[0]);
+        if (chart < 0 || size_t(chart) >= count || tri[1] < 0 || tri[2] < 0 || size_t(tri[0]) >= unwrap.uvs.size() ||
+            size_t(tri[1]) >= unwrap.uvs.size() || size_t(tri[2]) >= unwrap.uvs.size())
+            continue;
+        const Vec2f e1 = unwrap.uvs[size_t(tri[1])] - unwrap.uvs[size_t(tri[0])];
+        const Vec2f e2 = unwrap.uvs[size_t(tri[2])] - unwrap.uvs[size_t(tri[0])];
+        out.area[size_t(chart)] += 0.5 * std::abs(double(e1.x()) * double(e2.y()) - double(e1.y()) * double(e2.x()));
+        for (int k = 0; k < 3; ++k) {
+            const int a = tri[k] < int(unwrap.source_vertex.size()) ? unwrap.source_vertex[size_t(tri[k])] : -1;
+            const int b = tri[(k + 1) % 3] < int(unwrap.source_vertex.size()) ? unwrap.source_vertex[size_t(tri[(k + 1) % 3])] : -1;
+            if (a >= 0 && b >= 0)
+                edge_charts[{std::min(a, b), std::max(a, b)}].insert(chart);
+        }
+    }
+    for (size_t i = 0; i < unwrap.uvs.size() && i < unwrap.vertex_chart.size(); ++i) {
+        const int chart = unwrap.vertex_chart[i];
+        if (chart < 0 || size_t(chart) >= count)
+            continue;
+        out.low[size_t(chart)]  = out.low[size_t(chart)].cwiseMin(unwrap.uvs[i]);
+        out.high[size_t(chart)] = out.high[size_t(chart)].cwiseMax(unwrap.uvs[i]);
+    }
+    for (const auto& [edge, charts] : edge_charts)
+        for (const int a : charts)
+            for (const int b : charts)
+                if (a != b)
+                    out.neighbours[size_t(a)].insert(b);
+    return out;
+}
+
+double rounded(double v) { return std::round(v * 1e4) / 1e4; }
+json   point2(const Vec2f& v) { return {rounded(v.x()), rounded(v.y())}; }
+
+} // namespace
+
 json unwrap_json(const PatchUnwrap& unwrap, const TextureDisplacementLayer& layer, bool include_vertices)
 {
     json seams = json::array();
     for (const auto& s : layer.lscm_seam_edges)
         seams.push_back({s.first, s.second});
-    json islands = json::array();
+    const ChartFacts facts = chart_facts(unwrap);
+    json             islands = json::array();
     for (int c = 0; c < unwrap.chart_count; ++c) {
         const TextureIsland isl = size_t(c) < layer.islands.size() ? layer.islands[size_t(c)] : TextureIsland{};
         const Vec2f centroid = size_t(c) < unwrap.chart_centroid.size() ? unwrap.chart_centroid[size_t(c)] : Vec2f::Zero();
+        json        neighbours = json::array();
+        for (const int n : facts.neighbours[size_t(c)])
+            neighbours.push_back(n);
+        const bool seen = facts.low[size_t(c)].x() <= facts.high[size_t(c)].x();
         islands.push_back({{"chart", c},
-                           {"centroid", {centroid.x(), centroid.y()}},
+                           {"area_mm2", rounded(facts.area[size_t(c)])},
+                           {"centroid", point2(centroid)},
+                           {"bounding_box", seen ? json({{"min", point2(facts.low[size_t(c)])}, {"max", point2(facts.high[size_t(c)])}}) : json(nullptr)},
                            {"offset", {isl.offset.x(), isl.offset.y()}},
                            {"rotation_deg", isl.rotation_deg},
                            {"scale", isl.scale},
-                           {"group", size_t(c) < layer.island_groups.size() ? layer.island_groups[size_t(c)] : -1}});
+                           {"group", island_group_of(layer.island_groups, c)},
+                           {"neighbours", neighbours}});
+    }
+    json uv_edits = json::array(), mesh_vertex_edits = json::array();
+    for (const auto& [key, uv] : layer.lscm_uv_overrides) {
+        if (key < 0)
+            uv_edits.push_back({{"vertex", -(key + 1)}, {"uv", {uv.x(), uv.y()}}});
+        else
+            mesh_vertex_edits.push_back({{"mesh_vertex", key}, {"uv", {uv.x(), uv.y()}}});
     }
     json out = {{"chart_count", unwrap.chart_count},
                 {"vertex_count", unwrap.uvs.size()},
                 {"triangle_count", unwrap.indices.size()},
                 {"seam_angle_deg", layer.lscm_seam_angle_deg},
-                {"island_padding_mm", layer.island_padding_mm},
                 {"auto_connect_islands", layer.auto_connect_islands},
                 {"seams", seams},
                 {"islands", islands},
-                {"uv_edits", layer.lscm_uv_overrides.size()}};
+                {"uv_edits", uv_edits},
+                {"note", "Chart and vertex numbers hold for this unwrap only: changing the seams or the seam angle numbers them anew."}};
+    if (!mesh_vertex_edits.empty())
+        out["mesh_vertex_uv_edits"] = mesh_vertex_edits;
     if (include_vertices) {
         json vertices = json::array();
-        for (size_t i = 0; i < unwrap.uvs.size(); ++i)
+        const size_t shown = std::min(unwrap.uvs.size(), max_unwrap_vertices);
+        for (size_t i = 0; i < shown; ++i)
             vertices.push_back({{"vertex", i},
                                 {"source_vertex", i < unwrap.source_vertex.size() ? unwrap.source_vertex[i] : -1},
                                 {"chart", i < unwrap.vertex_chart.size() ? unwrap.vertex_chart[i] : -1},
                                 {"uv", {unwrap.uvs[i].x(), unwrap.uvs[i].y()}}});
-        out["vertices"] = vertices;
+        out["vertices"]  = vertices;
+        out["truncated"] = shown < unwrap.uvs.size();
     }
+    return out;
+}
+
+// ---- Editing the unwrap ----
+
+indexed_triangle_set unwrap_patch(const TriangleMesh& owner_mesh, const PaintData& mask, const Transform3d& volume_to_world)
+{
+    indexed_triangle_set patch = extract_painted_patch(owner_mesh.its, mask);
+    if (patch.indices.empty())
+        return patch;
+    const Transform3d to_world = texture_displacement_bake_frame(volume_to_world);
+    if (!to_world.matrix().isApprox(Transform3d::Identity().matrix()))
+        for (Vec3f& v : patch.vertices)
+            v = (to_world * v.cast<double>()).cast<float>();
+    return patch;
+}
+
+PatchUnwrap layer_unwrap(const indexed_triangle_set& patch, const TextureDisplacementLayer& layer)
+{
+    PatchUnwrap unwrap = compute_patch_unwrap(patch, layer.lscm_seam_angle_deg, 0.f, layer.lscm_seam_edges);
+    apply_lscm_uv_overrides(unwrap, layer.lscm_uv_overrides);
+    return unwrap;
+}
+
+namespace {
+
+bool islands_equal(const std::vector<TextureIsland>& a, const std::vector<TextureIsland>& b)
+{
+    const TextureIsland fresh;
+    for (size_t i = 0; i < std::max(a.size(), b.size()); ++i) {
+        const TextureIsland& x = i < a.size() ? a[i] : fresh;
+        const TextureIsland& y = i < b.size() ? b[i] : fresh;
+        if (x.offset != y.offset || x.rotation_deg != y.rotation_deg || x.scale != y.scale)
+            return false;
+    }
+    return true;
+}
+
+bool groups_equal(const std::vector<int>& a, const std::vector<int>& b)
+{
+    for (size_t i = 0; i < std::max(a.size(), b.size()); ++i)
+        if (island_group_of(a, int(i)) != island_group_of(b, int(i)))
+            return false;
+    return true;
+}
+
+std::vector<std::pair<int, int>> sorted_seams(std::vector<std::pair<int, int>> seams)
+{
+    std::sort(seams.begin(), seams.end());
+    seams.erase(std::unique(seams.begin(), seams.end()), seams.end());
+    return seams;
+}
+
+void add_seam(std::vector<std::pair<int, int>>& seams, const std::pair<int, int>& edge)
+{
+    if (std::find(seams.begin(), seams.end(), edge) == seams.end())
+        seams.push_back(edge);
+}
+
+// The undo step the pane names for a call that makes one kind of edit; none for a setting, which the pane takes no step for.
+std::string snapshot_of(const std::set<std::string>& kinds)
+{
+    static const std::map<std::string, std::string> names = {
+        {"seam", "Mark texture seam"},         {"seam_path", "Mark texture seam path"}, {"clear_seams", "Clear texture seams"},
+        {"cut", "Cut texture island"},         {"join", "Join texture island"},         {"unjoin", "Unjoin texture island"},
+        {"average_scale", "Average island scale"}, {"clear_uv_edits", "Clear texture UV edits"}, {"islands", "Move texture island"},
+        {"uv_edits", "Edit texture UV"}};
+    if (kinds.size() == 1)
+        if (const auto it = names.find(*kinds.begin()); it != names.end())
+            return it->second;
+    return "Texture displacement editing";
+}
+
+std::string chart_error(const std::string& what, int chart, int count)
+{
+    return what + ": chart " + std::to_string(chart) + " is not in this unwrap, which has " + std::to_string(count) +
+           " (0 to " + std::to_string(std::max(count - 1, 0)) + "); get_texture_unwrap lists them";
+}
+
+} // namespace
+
+bool same_unwrap_state(const TextureDisplacementLayer& a, const TextureDisplacementLayer& b)
+{
+    return sorted_seams(a.lscm_seam_edges) == sorted_seams(b.lscm_seam_edges) && a.lscm_seam_angle_deg == b.lscm_seam_angle_deg &&
+           a.auto_connect_islands == b.auto_connect_islands && islands_equal(a.islands, b.islands) && groups_equal(a.island_groups, b.island_groups) &&
+           a.lscm_uv_overrides == b.lscm_uv_overrides;
+}
+
+void copy_unwrap_state(const TextureDisplacementLayer& from, TextureDisplacementLayer& to)
+{
+    to.lscm_seam_edges     = from.lscm_seam_edges;
+    to.lscm_seam_angle_deg = from.lscm_seam_angle_deg;
+    to.auto_connect_islands = from.auto_connect_islands;
+    to.islands             = from.islands;
+    to.island_groups       = from.island_groups;
+    to.lscm_uv_overrides   = from.lscm_uv_overrides;
+}
+
+std::optional<UnwrapEdit> edit_unwrap(const TextureDisplacementLayer& before, const UnwrapRequest& req, const indexed_triangle_set& mesh,
+                                      const indexed_triangle_set& patch, const Transform3d& volume_to_plate,
+                                      const std::function<bool()>& cancelled, std::string& error)
+{
+    error.clear();
+    const auto stop = [&]() {
+        if (!cancelled())
+            return false;
+        error = "The unwrap was stopped (the app is quitting or the call ran out of time); nothing was changed";
+        return true;
+    };
+
+    const bool numbered = !req.join.empty() || !req.unjoin.empty() || !req.islands.empty() || !req.uv_edits.empty();
+
+    UnwrapEdit                out;
+    out.layer = before;
+    TextureDisplacementLayer& layer = out.layer;
+    PatchUnwrap               unwrap = layer_unwrap(patch, layer);
+    if (unwrap.empty()) {
+        error = "The layer's paint on the owner part leaves nothing to unwrap";
+        return std::nullopt;
+    }
+    if (stop())
+        return std::nullopt;
+    const int         charts = unwrap.chart_count;
+    std::set<std::string> kinds;
+
+    // Settings.
+    bool resolve = false, relayout = req.relayout;
+    if (req.seam_angle_deg && *req.seam_angle_deg != layer.lscm_seam_angle_deg) {
+        layer.lscm_seam_angle_deg = *req.seam_angle_deg;
+        resolve                   = true;
+        kinds.insert("settings");
+    }
+    if (req.auto_connect_islands && *req.auto_connect_islands != layer.auto_connect_islands) {
+        layer.auto_connect_islands = *req.auto_connect_islands;
+        relayout |= layer.auto_connect_islands; // turning it on lays the islands out at once, as the pane does
+        kinds.insert("settings");
+    }
+
+    // Seams.
+    std::vector<std::pair<int, int>>& seams = layer.lscm_seam_edges;
+    const auto                        seams_before = sorted_seams(seams);
+    const auto                        seam_step = [&](const char* kind, const std::vector<std::pair<int, int>>& was) {
+        if (sorted_seams(seams) != was)
+            kinds.insert(kind);
+    };
+    if (req.clear_seams) {
+        const auto was = sorted_seams(seams);
+        seams.clear();
+        seam_step("clear_seams", was);
+    }
+    if (!req.add_seams.empty() || !req.remove_seams.empty()) {
+        const auto was = sorted_seams(seams);
+        std::set<std::pair<int, int>> mesh_edges;
+        for (const stl_triangle_vertex_indices& tri : mesh.indices)
+            for (int k = 0; k < 3; ++k)
+                mesh_edges.insert({std::min(tri[k], tri[(k + 1) % 3]), std::max(tri[k], tri[(k + 1) % 3])});
+        for (size_t i = 0; i < req.add_seams.size(); ++i) {
+            const auto& edge = req.add_seams[i];
+            if (size_t(edge.second) >= mesh.vertices.size()) {
+                error = "add_seams[" + std::to_string(i) + "]: vertex " + std::to_string(edge.second) + " is not a vertex of the owner's mesh, which has " +
+                        std::to_string(mesh.vertices.size());
+                return std::nullopt;
+            }
+            if (!mesh_edges.count(edge)) {
+                error = "add_seams[" + std::to_string(i) + "]: vertices " + std::to_string(edge.first) + " and " + std::to_string(edge.second) +
+                        " are not joined by an edge of the owner's mesh; seam_paths marks a path between any two points";
+                return std::nullopt;
+            }
+            add_seam(seams, edge);
+        }
+        for (const auto& edge : req.remove_seams)
+            seams.erase(std::remove(seams.begin(), seams.end(), edge), seams.end());
+        seam_step("seam", was);
+    }
+    if (!req.seam_paths.empty()) {
+        const auto was = sorted_seams(seams);
+        const auto nearest = [&](const Vec3d& point) {
+            int    best  = -1;
+            double best_d = std::numeric_limits<double>::max();
+            for (size_t v = 0; v < mesh.vertices.size(); ++v) {
+                const double d = (volume_to_plate * mesh.vertices[v].cast<double>() - point).squaredNorm();
+                if (d < best_d) {
+                    best_d = d;
+                    best   = int(v);
+                }
+            }
+            return best;
+        };
+        for (size_t i = 0; i < req.seam_paths.size(); ++i) {
+            const int from = nearest(req.seam_paths[i].first), to = nearest(req.seam_paths[i].second);
+            out.snapped_paths.emplace_back(from, to);
+            if (from < 0 || from == to) {
+                error = "seam_paths[" + std::to_string(i) + "]: both ends are nearest to vertex " + std::to_string(from) + "; give two points apart";
+                return std::nullopt;
+            }
+            const std::vector<std::pair<int, int>> path = seam_path_edges(mesh, from, to);
+            if (path.empty()) {
+                error = "seam_paths[" + std::to_string(i) + "]: no path along the owner's mesh edges joins vertices " + std::to_string(from) + " and " +
+                        std::to_string(to);
+                return std::nullopt;
+            }
+            for (const auto& edge : path)
+                add_seam(seams, edge);
+        }
+        seam_step("seam_path", was);
+    }
+    if (!req.cut_islands.empty()) {
+        const auto was = sorted_seams(seams);
+        for (const int chart : req.cut_islands) {
+            if (chart >= charts) {
+                error = chart_error("cut_islands", chart, charts);
+                return std::nullopt;
+            }
+            seams = cut_island_seams(mesh, unwrap, chart, seams);
+        }
+        seam_step("cut", was);
+    }
+    out.resolved = resolve || sorted_seams(seams) != seams_before;
+    if (out.resolved && numbered) {
+        error = "Chart and vertex numbers (join, unjoin, islands, uv_edits) name the unwrap as it is before the call, and this call changes the seams or "
+                "the seam angle, which numbers it anew: send the seam change first, read get_texture_unwrap, then the island edits";
+        return std::nullopt;
+    }
+    if (out.resolved) {
+        unwrap = layer_unwrap(patch, layer);
+        if (unwrap.empty()) {
+            error = "With those seams the layer's paint leaves nothing to unwrap";
+            return std::nullopt;
+        }
+        if (stop())
+            return std::nullopt;
+        relayout |= layer.auto_connect_islands; // the pane's Unwrap lays a new unwrap out when the layer asks for it
+    }
+    const int new_charts = unwrap.chart_count; // equal to `charts` unless resolved
+    const auto fits = [&](int chart) { return chart >= 0 && chart < new_charts; };
+    if (layer.islands.size() < size_t(new_charts)) // grown, never shrunk, as the pane does
+        layer.islands.resize(size_t(new_charts));
+
+    // Layout.
+    if (relayout) {
+        const std::vector<TextureIsland> net = compute_connected_net(unwrap);
+        if (net.size() == size_t(new_charts)) {
+            if (layer.islands.size() < net.size())
+                layer.islands.resize(net.size());
+            for (size_t i = 0; i < net.size(); ++i)
+                layer.islands[i] = net[i];
+        }
+        if (req.relayout && !islands_equal(layer.islands, before.islands))
+            kinds.insert("relayout");
+        else if (req.auto_connect_islands && !out.resolved && !islands_equal(layer.islands, before.islands))
+            kinds.insert("settings");
+    }
+    if (!req.islands.empty()) {
+        const auto was = layer.islands;
+        for (const IslandEdit& edit : req.islands) {
+            if (!fits(edit.chart)) {
+                error = chart_error("islands", edit.chart, new_charts);
+                return std::nullopt;
+            }
+            TextureIsland& island = layer.islands[size_t(edit.chart)];
+            if (edit.offset)
+                island.offset = *edit.offset;
+            if (edit.rotation_deg)
+                island.rotation_deg = *edit.rotation_deg;
+            if (edit.scale)
+                island.scale = *edit.scale;
+        }
+        if (!islands_equal(was, layer.islands))
+            kinds.insert("islands");
+    }
+    for (const auto& [chart, to] : req.join) {
+        if (!fits(chart) || (to && !fits(*to))) {
+            error = chart_error("join", !fits(chart) ? chart : *to, new_charts);
+            return std::nullopt;
+        }
+        std::optional<std::pair<int, TextureIsland>> target;
+        if (to) {
+            TextureIsland placed;
+            if (*to == chart || !join_chart_placement(unwrap, layer.islands, chart, *to, placed)) {
+                error = "join: charts " + std::to_string(chart) + " and " + std::to_string(*to) +
+                        " share no mesh edge, so one cannot be placed against the other (get_texture_unwrap lists each chart's neighbours)";
+                return std::nullopt;
+            }
+            target = std::make_pair(*to, placed);
+        } else {
+            target = join_target(unwrap, layer.islands, chart);
+            if (!target) {
+                error = "join: chart " + std::to_string(chart) + " has no neighbour it shares an edge with";
+                return std::nullopt;
+            }
+        }
+        const auto islands_was = layer.islands;
+        const auto groups_was  = layer.island_groups;
+        layer.islands[size_t(chart)] = target->second;
+        join_island_groups(layer.island_groups, chart, target->first, new_charts);
+        if (!islands_equal(islands_was, layer.islands) || !groups_equal(groups_was, layer.island_groups))
+            kinds.insert("join");
+    }
+    for (const int chart : req.unjoin) {
+        if (!fits(chart)) {
+            error = chart_error("unjoin", chart, new_charts);
+            return std::nullopt;
+        }
+        const auto islands_was = layer.islands;
+        const auto groups_was  = layer.island_groups;
+        layer.islands[size_t(chart)] = TextureIsland{};
+        if (size_t(chart) < layer.island_groups.size())
+            layer.island_groups[size_t(chart)] = chart;
+        if (!islands_equal(islands_was, layer.islands) || !groups_equal(groups_was, layer.island_groups))
+            kinds.insert("unjoin");
+    }
+    if (req.average_scale) {
+        const auto was = layer.islands;
+        average_island_scales(layer.islands);
+        if (!islands_equal(was, layer.islands))
+            kinds.insert("average_scale");
+    }
+
+    // Vertex edits.
+    if (req.clear_uv_edits && !layer.lscm_uv_overrides.empty()) {
+        layer.lscm_uv_overrides.clear();
+        unwrap = layer_unwrap(patch, layer);
+        kinds.insert("clear_uv_edits");
+    }
+    if (!req.uv_edits.empty()) {
+        const auto was = layer.lscm_uv_overrides;
+        for (const auto& [vertex, uv] : req.uv_edits) {
+            if (size_t(vertex) >= unwrap.uvs.size()) {
+                error = "uv_edits: vertex " + std::to_string(vertex) + " is not in this unwrap, which has " + std::to_string(unwrap.uvs.size()) +
+                        " (get_texture_unwrap with include_vertices lists them)";
+                return std::nullopt;
+            }
+            unwrap.uvs[size_t(vertex)] = uv;
+            const int key = lscm_uv_override_key(vertex);
+            auto      it  = std::find_if(layer.lscm_uv_overrides.begin(), layer.lscm_uv_overrides.end(),
+                                         [key](const std::pair<int, Vec2f>& p) { return p.first == key; });
+            if (it != layer.lscm_uv_overrides.end())
+                it->second = uv;
+            else
+                layer.lscm_uv_overrides.emplace_back(key, uv);
+        }
+        if (layer.lscm_uv_overrides != was)
+            kinds.insert("uv_edits");
+    }
+
+    out.changed = !same_unwrap_state(before, layer);
+    if (!out.changed) {
+        out.layer = before;
+        out.resolved = false;
+    } else {
+        out.snapshot = snapshot_of(kinds);
+        const bool joined = std::any_of(before.island_groups.begin(), before.island_groups.end(), [](int g) { return g >= 0; });
+        if (out.resolved && (joined || !before.lscm_uv_overrides.empty()))
+            out.notes.push_back("The seams or the seam angle changed, so the charts are numbered anew: island joins and vertex edits made before still "
+                                "name the old numbers (unjoin and clear_uv_edits drop them)");
+    }
+    out.unwrap = std::move(unwrap);
     return out;
 }
 
@@ -1404,7 +1830,6 @@ json layer_json(const TextureDisplacementLayer& layer, int position, bool base, 
     }
     if (layer.projection_method == TextureProjectionMethod::LSCM)
         out["unwrap"] = {{"seam_angle_deg", layer.lscm_seam_angle_deg},
-                         {"island_padding_mm", layer.island_padding_mm},
                          {"auto_connect_islands", layer.auto_connect_islands},
                          {"seams", layer.lscm_seam_edges.size()},
                          {"placed_islands", layer.islands.size()},
