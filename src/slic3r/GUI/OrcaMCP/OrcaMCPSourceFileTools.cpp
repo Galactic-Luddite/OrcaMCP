@@ -9,6 +9,7 @@
 #include "OrcaMCPMeshHealth.hpp"
 #include "OrcaMCPNextSteps.hpp"
 #include "OrcaMCPPartEdits.hpp"
+#include "OrcaMCPTextureDisplacement.hpp"
 #include "OrcaMCPPartTools.hpp"
 #include "OrcaMCPServer.hpp"
 #include "OrcaMCPSourceFiles.hpp"
@@ -97,6 +98,28 @@ nlohmann::json new_volumes_json(const Model& model, const VolumeIds& before, std
     return list;
 }
 
+// What each object's texture layers and paint held, to tell what the new meshes dropped.
+using TextureStates = std::map<int, TextureState>;
+TextureStates texture_states_of(const Model& model, const std::set<int>& objects)
+{
+    TextureStates states;
+    for (int o : objects)
+        states[o] = texture_state_of(*model.objects[size_t(o)]);
+    return states;
+}
+
+const char* const TEXTURE_LOAD_CAUSE = "the part was loaded anew from a file, and texture paint is not carried across";
+
+// The texture paint and layers the changed objects lost. The loaded parts are new volumes in the places of the old
+// ones, so the states are matched by position when the object kept its volume count.
+nlohmann::json texture_changes_of_object(const Model& model, TextureStates& states, int object_id)
+{
+    const ModelObject& object = *model.objects[size_t(object_id)];
+    TextureState&      before = states[object_id];
+    rekey_texture_state(before, object);
+    return texture_changes_json(before, {&object}, nullptr);
+}
+
 std::set<int> objects_of(const std::vector<std::pair<int, int>>& volumes)
 {
     std::set<int> objects;
@@ -164,6 +187,7 @@ nlohmann::json reload_on_main_thread(const ReloadRequest& request)
     if (request.file_path)
         guard.answer_file(*request.file_path);
     const VolumeIds before = volume_ids_of(model, objects_of(decision.volumes));
+    TextureStates   texture_before = texture_states_of(model, objects_of(decision.volumes));
     if (request.object_id) {
         ModelObject* object = model.objects[size_t(*request.object_id)];
         ModelVolume* volume = request.volume_id && object->volumes.size() > 1 ? object->volumes[size_t(*request.volume_id)] : nullptr;
@@ -186,7 +210,10 @@ nlohmann::json reload_on_main_thread(const ReloadRequest& request)
     }
     nlohmann::json answer = {{"status", "success"}, {"reloaded", std::move(reloaded)}};
     report_loaded(*plater, changed_objects, answer);
-    return with_closed_tool(guard.report(answer), closed_tool);
+    answer = guard.report(answer);
+    for (int o : changed_objects)
+        append_object_texture_changes(answer, texture_changes_of_object(model, texture_before, o), o, TEXTURE_LOAD_CAUSE);
+    return with_closed_tool(std::move(answer), closed_tool);
 }
 
 // ---- replace_volume_with_file ----
@@ -230,6 +257,7 @@ nlohmann::json replace_on_main_thread(const ReplaceRequest& request)
         return *failed;
     McpDialogSuppressionGuard guard;
     const VolumeIds           before = volume_ids_of(model, {request.object_id});
+    TextureStates             texture_before = texture_states_of(model, {request.object_id});
     ModelVolume*              volume = request.volume_id && object->volumes.size() > 1 ? object->volumes[size_t(*request.volume_id)] : nullptr;
     if (const auto refusal = select_as_a_click_does(*plater, request.object_id, volume))
         return with_closed_tool(guard.report(error_response(*refusal)), closed_tool);
@@ -252,7 +280,9 @@ nlohmann::json replace_on_main_thread(const ReplaceRequest& request)
                                 closed_tool);
     nlohmann::json answer = {{"status", "success"}, {"replaced", std::move(replaced)}, {"object_name", object->name}};
     report_loaded(*plater, changed_objects, answer);
-    return with_closed_tool(guard.report(answer), closed_tool);
+    answer = guard.report(answer);
+    add_texture_changes(answer, texture_changes_of_object(model, texture_before, request.object_id), request.object_id, TEXTURE_LOAD_CAUSE);
+    return with_closed_tool(std::move(answer), closed_tool);
 }
 
 } // namespace

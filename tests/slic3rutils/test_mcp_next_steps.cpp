@@ -339,6 +339,21 @@ TEST_CASE("A texture layer painted nowhere points at painting it", "[McpNextStep
     CHECK(texture_paint_next_steps(2, 3, true, false).empty());
 }
 
+TEST_CASE("Texture changes of a mesh edit point at what restores them", "[McpNextSteps][orcamcp]")
+{
+    CHECK(texture_changes_next_steps(1, json::object()).empty());
+    const auto layers = texture_changes_next_steps(1, {{"layers_lost", 1}, {"paint_lost", {{{"volume_id", 0}, {"layers", {0}}}}}});
+    REQUIRE(layers.size() == 1);
+    CHECK(layers[0].tool == "set_texture_displacement");
+    const auto paint = texture_changes_next_steps(1, {{"paint_lost", {{{"volume_id", 0}, {"layers", {2, 3}}}}}});
+    REQUIRE(paint.size() == 1);
+    CHECK(paint[0].tool == "paint_object");
+    CHECK(paint[0].arguments["texture_layer"] == 2);
+    const auto unused = texture_changes_next_steps(1, {{"stacks_unused", {{{"volume_id", 1}, {"layers", 2}}}}});
+    REQUIRE(unused.size() == 1);
+    CHECK(unused[0].tool == "get_texture_displacement");
+}
+
 TEST_CASE("Painted texture layers point at baking them, after the layer still to paint", "[McpNextSteps][orcamcp]")
 {
     const std::vector<NextStep> bake = bake_next_steps(2, true);
@@ -572,6 +587,9 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
         steps.push_back(std::move(step));
     for (NextStep& step : baked_texture_next_steps(0, true, 1, std::nullopt))
         steps.push_back(std::move(step));
+    for (const json& changes : {json{{"layers_lost", 2}}, json{{"paint_lost", {{{"volume_id", 0}, {"name", "a"}, {"layers", {1}}}}}}, json{{"stacks_unused", {{{"volume_id", 1}, {"layers", 2}}}}}})
+        for (NextStep& step : texture_changes_next_steps(0, changes))
+            steps.push_back(std::move(step));
     for (NextStep& step : new_volume_next_steps(0, 1, "modifier", true))
         steps.push_back(std::move(step));
     for (NextStep& step : assembled_next_steps(0))
@@ -603,7 +621,7 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
             steps.push_back(std::move(step));
     for (NextStep& step : repair_timed_out_next_steps({4, 7}))
         steps.push_back(std::move(step));
-    REQUIRE(steps.size() == 40);
+    REQUIRE(steps.size() == 43);
 
     const mcp_tool_references::ToolNames names(OrcaMCPServer::registered_tools());
     json                                 response = json::object();

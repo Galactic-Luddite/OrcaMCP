@@ -5,6 +5,7 @@
 #include "OrcaMCPMeshRepair.hpp"
 #include "OrcaMCPNextSteps.hpp"
 #include "OrcaMCPPartEdits.hpp"
+#include "OrcaMCPTextureDisplacement.hpp"
 #include "OrcaMCPPlateSettings.hpp"
 #include "OrcaMCPUiJob.hpp"
 
@@ -42,8 +43,11 @@ struct RepairRequest
     bool            keep_painting       = false;
     bool            keep_painting_given = false;
     nlohmann::json  before;
+    TextureState    texture_before;
     CgalRepairInput input;
 };
+
+const char* const TEXTURE_REPAIR_CAUSE = "the repair rebuilt the mesh, and texture paint is not carried across";
 
 // Why repair_mesh must not go on now (repair_refusal), read from the app.
 std::optional<std::string> app_repair_refusal(Plater& plater)
@@ -79,7 +83,8 @@ nlohmann::json start_repair(const nlohmann::json& params, RepairRequest& request
     if (const auto refusal = app_repair_refusal(*plater))
         return error_response(*refusal);
 
-    request.before = repair_facts_json(*object);
+    request.before         = repair_facts_json(*object);
+    request.texture_before = texture_state_of(*object);
     request.input  = Slic3r::capture_cgal_repair(*object, request.volume_id, request.keep_painting);
     return nullptr;
 }
@@ -170,7 +175,11 @@ nlohmann::json finish_repair(RepairRequest& request, CgalRepairPlan& plan, bool 
     answer.update(placement);
     answer["volumes"]         = mesh_volume_rows_json(*object);
     answer["active_warnings"] = get_active_warnings_json(plater);
-    return guard.report(with_closed_tool(std::move(answer), closed_tool));
+    // The repair gives each repaired volume a new id, in the place it was.
+    rekey_texture_state(request.texture_before, *object);
+    answer = guard.report(with_closed_tool(std::move(answer), closed_tool));
+    add_texture_changes(answer, texture_changes_json(request.texture_before, {object}, nullptr), object_id, TEXTURE_REPAIR_CAUSE);
+    return answer;
 }
 
 // ---- repair_mesh of several objects: a plate's Fix All, or Fix All Plates ----
@@ -185,6 +194,7 @@ struct BatchRepairRequest
     bool                         keep_painting_given = false;
     std::vector<BatchRepairItem> items;
     std::vector<CgalRepairInput> inputs;
+    std::vector<TextureState>    texture_before; // parallel to items
 };
 
 // The model's object indices the scope names, ascending: the plate's objects (ObjectList::fix_all_through_cgal
@@ -233,6 +243,7 @@ nlohmann::json start_batch(const nlohmann::json& params, BatchRepairRequest& req
         item.object_name = object.name;
         item.before      = repair_facts_json(object);
         request.items.push_back(std::move(item));
+        request.texture_before.push_back(texture_state_of(object));
         request.inputs.push_back(Slic3r::capture_cgal_repair(object, -1, request.keep_painting));
     }
     return nullptr;
@@ -298,6 +309,25 @@ void apply_batch_item(Plater& plater, BatchRepairItem& item, CgalRepairPlan& pla
     painting_removed = painting_removed || (item.before.value("painted", false) && !item.after.value("painted", false));
 }
 
+// The texture paint the repaired objects lost: texture_changes is a list of {object_id, ...}, one per object that
+// lost some, with the info_messages lines and the next steps of each.
+void add_batch_texture_changes(nlohmann::json& answer, const BatchRepairRequest& request)
+{
+    Model&         model = wxGetApp().plater()->model();
+    for (std::size_t i = 0; i < request.items.size(); ++i) {
+        const BatchRepairItem& item = request.items[i];
+        if (!item.changed || item.object_id < 0 || std::size_t(item.object_id) >= model.objects.size())
+            continue;
+        const ModelObject* object = model.objects[std::size_t(item.object_id)];
+        TextureState       before = request.texture_before[i];
+        rekey_texture_state(before, *object);
+        nlohmann::json changes = texture_changes_json(before, {object}, nullptr);
+        if (changes.empty())
+            continue;
+        append_object_texture_changes(answer, changes, item.object_id, TEXTURE_REPAIR_CAUSE);
+    }
+}
+
 // Main thread, the last step: every plan made in time applied under one undo snapshot, if its object is still
 // as captured; the rest left as they are, each with its result.
 nlohmann::json finish_batch(BatchRepairRequest& request, std::vector<std::optional<CgalRepairPlan>>& plans,
@@ -356,7 +386,9 @@ nlohmann::json finish_batch(BatchRepairRequest& request, std::vector<std::option
             timed_out.push_back(item.object_id);
     add_next_steps(answer, repair_timed_out_next_steps(timed_out));
     answer["active_warnings"] = get_active_warnings_json(plater);
-    return guard.report(with_closed_tool(std::move(answer), closed_tool));
+    answer                    = guard.report(with_closed_tool(std::move(answer), closed_tool));
+    add_batch_texture_changes(answer, request);
+    return answer;
 }
 
 // repair_mesh for a plate or the project: the same three steps as one object's, over every captured object, the

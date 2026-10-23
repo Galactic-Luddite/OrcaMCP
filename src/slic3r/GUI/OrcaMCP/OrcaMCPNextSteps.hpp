@@ -36,6 +36,8 @@ nlohmann::json next_step_json(const NextStep& step);
 
 // Sets response["next_steps"] to `steps`; a response with none gets no field.
 void add_next_steps(nlohmann::json& response, const std::vector<NextStep>& steps);
+// Adds `steps` to the response's next_steps, keeping those it has, one step per tool (add_next_steps replaces them).
+void append_next_steps(nlohmann::json& response, const std::vector<NextStep>& steps);
 
 // "0", "0 and 3", "0, 3 and 7"; past `max_listed` ids, "... and N more".
 std::string listed_ids(const std::vector<int>& ids, size_t max_listed = 10);
@@ -147,6 +149,9 @@ std::vector<NextStep> bake_next_steps(int object_id, bool needs_bake);
 // when the bake added mixed filament slots (`slots_added`), to see them; bake_texture_displacement again when paint
 // is left (`needs_bake`: a part the bake did not move keeps its paint). The bake changed the object's mesh, so its plate
 // (`plate_index`, when known) lost its slice; mixed filament slots added change every plate's filaments.
+// What a mesh edit's texture_changes lead to: set_texture_displacement add when texture layers were lost with a part,
+// else paint_object for the first layer whose paint was lost; get_texture_displacement for a stack the object no longer reads.
+std::vector<NextStep> texture_changes_next_steps(int object_id, const nlohmann::json& changes);
 std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added, std::optional<int> plate_index);
 
 // What printer_control's answer to a set_* action (filtration, fans, print speed, Z offset) leads to:

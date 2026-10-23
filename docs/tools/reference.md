@@ -859,6 +859,9 @@ there only when it is `true`, the same shape `get_scene_info` and `load_model` u
 ---
 
 ### repair_mesh
+
+Texture displacement: a repair gives each repaired volume a new mesh and drops its texture paint; the answer's `texture_changes` says which (`paint_lost`: `{volume_id, name, layers}` per part; `layers_lost`; `stacks_unused`), with an `info_messages` line and a `next_steps` entry (`paint_object` mode `texture`, or `set_texture_displacement` add). With `plate_index` / `all_plates`, `texture_changes` is a list with an `object_id` in each entry. Absent when nothing was lost.
+
 Repair an object's mesh with the app's own repair -- the object list's Repair (Fix Model,
 `ObjectList::fix_through_cgal`), on every platform, and the same code: upstream's `repair_mesh`
 (`MeshRepair.hpp`, CGAL 6.2).
@@ -990,6 +993,9 @@ be repaired: ... Those volumes were left as they were; the others were repaired.
 ---
 
 ### split_object
+
+Texture displacement: the pieces carry none of the object's texture paint or layers; `texture_changes` says what was lost (`paint_lost`, `layers_lost`, `stacks_unused`), with an `info_messages` line and a `next_steps` entry. Absent when nothing was lost.
+
 Split an object as the object list's Split does: into objects, or one volume into parts.
 
 **Parameters:**
@@ -1069,6 +1075,9 @@ the file).
 ---
 
 ### set_volume_type
+
+Texture displacement: a first part turned into a modifier keeps its layers, which the object no longer reads; `texture_changes.stacks_unused` says so (`get_texture_displacement` lists them as `ignored_stacks`). Absent when nothing changed.
+
 Change a volume's type, as the object list's Change Type does.
 
 **Parameters:**
@@ -1090,6 +1099,9 @@ an open toolbar tool is closed first; refused while an arrange or orient runs.
 ---
 
 ### assemble_objects
+
+Texture displacement: only the first object's layers count in the assembly; another object's stack is reported in `texture_changes.stacks_unused`. Absent when nothing changed.
+
 Assemble two or more objects into one object with their volumes as its parts, as the object list's
 Assemble does.
 
@@ -1108,6 +1120,9 @@ does not assemble it; `invalidate_cut_info` first). One undo step ("Assemble"). 
 ---
 
 ### merge_parts
+
+Texture displacement: the merged mesh is new and has none of the texture paint or layers; `texture_changes` says what was lost (`paint_lost`, `layers_lost`), with an `info_messages` line and a `next_steps` entry. Absent when nothing was lost.
+
 Merge an object's parts into one part, as the object list's Mesh boolean does
 (`ObjectList::boolean`).
 
@@ -1144,6 +1159,9 @@ tools refuse them, naming this call. An object that is not part of a cut changes
 ---
 
 ### reload_from_disk
+
+Texture displacement: a reloaded part is a new mesh without its texture paint (or layers); `texture_changes` is a list of `{object_id, paint_lost, layers_lost, stacks_unused}` for the objects that lost some, with `info_messages` lines and a `next_steps` entry. Absent when nothing was lost.
+
 Reload parts from the files they were loaded from, as the object list's Reload from disk does -- or,
 without `object_id`, every object, as the plate menu's Reload All does. Each part takes its file's mesh
 as it is now and keeps its place, settings, filament and type (painting as the app's "Keep painted
@@ -1187,6 +1205,9 @@ already reloaded: probe BC).
 ---
 
 ### replace_volume_with_file
+
+Texture displacement: the replacing mesh has none of the part's texture paint (or layers); `texture_changes` says what was lost (`paint_lost`, `layers_lost`, `stacks_unused`), with an `info_messages` line and a `next_steps` entry. Absent when nothing was lost.
+
 Replace a part's mesh with another 3D file, as the object list's Replace 3D file does; with `folder`,
 every part whose source file's name the folder holds, as Replace all with 3D files does.
 
@@ -1642,6 +1663,9 @@ instance on no plate, and while another job runs; see [Waiting for the job](#wai
 ---
 
 ### cut_object
+
+Texture displacement: the pieces are new meshes without the original's texture paint or layers; `texture_changes` says what was lost, with an `info_messages` line and a `next_steps` entry. Absent when nothing was lost.
+
 Cut an object at a specified Z height.
 
 **Parameters:**
@@ -1673,6 +1697,9 @@ deletes); an open toolbar tool is closed first (`closed_toolbar_tool`).
 ---
 
 ### delete_object
+
+Texture displacement: deleting a volume drops its texture paint, and the layers with it when it was the first model part; `texture_changes` says so (also `stacks_unused` when a stack is left on a part the object does not read). Absent when nothing was lost.
+
 Remove an object from the project, or with `volume_id` one of its volumes, or with `instance_id` one of
 its instances, as the object list's Delete does, in one undo step ("Delete Selected Objects"). Before v2.5.0.6 deleting an object took no
 undo step, so an undo after it also undid the call before it.

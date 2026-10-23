@@ -963,6 +963,54 @@ TEST_CASE("a first part turned into a modifier leaves its stack unused, not lost
     CHECK(j["stacks_unused"][0]["volume_id"] == 0);
 }
 
+TEST_CASE("a mesh edit's texture changes are told in words and tied to new ids by position", "[McpTexture][orcamcp]")
+{
+    Model        model;
+    ModelObject* object = cube_object(model);
+    ModelVolume* part   = object->volumes.front();
+    part->texture_displacement_layers = {layer_in(0), layer_in(2)};
+    paint_facets(*part, 0, 2);
+    paint_facets(*part, 2, 4);
+    TextureState before = texture_state_of(*object);
+    CHECK(before.parts[0].stack_owner);
+    CHECK(before.volume_count == 1);
+
+    SECTION("a repaired volume has a new id and kept nothing")
+    {
+        part->texture_displacement_facet(0).reset();
+        part->texture_displacement_facet(2).reset();
+        part->set_new_unique_id();
+        // by id the part is gone, and its stack with it; by position only its paint is
+        CHECK(texture_changes_json(before, {object}, nullptr).value("layers_lost", 0) == 2);
+        rekey_texture_state(before, *object);
+        const json changes = texture_changes_json(before, {object}, nullptr);
+        CHECK_FALSE(changes.contains("layers_lost"));
+        REQUIRE(changes.contains("paint_lost"));
+        const auto said = texture_changes_messages(changes, 3, "the mesh changed");
+        REQUIRE(said.size() == 1);
+        CHECK(said[0] == "object 3 lost the paint of texture layers 0 and 2 on part 0: the mesh changed; paint it again with paint_object mode texture");
+        json answer = {{"next_steps", json::array({{{"tool", "slice_all"}, {"why", "x"}}})}};
+        add_texture_changes(answer, changes, 3, "the mesh changed");
+        CHECK(answer["texture_changes"] == changes);
+        CHECK(answer["info_messages"].size() == 1);
+        REQUIRE(answer["next_steps"].size() == 2);
+        CHECK(answer["next_steps"][1]["tool"] == "paint_object");
+    }
+    SECTION("a rekey is skipped when the volume count changed")
+    {
+        object->add_volume(TriangleMesh(its_make_cube(5., 5., 5.)), ModelVolumeType::MODEL_PART, false);
+        part->set_new_unique_id();
+        rekey_texture_state(before, *object);
+        CHECK(before.parts[0].id != part->id());
+    }
+    SECTION("nothing lost adds nothing")
+    {
+        json answer = json::object();
+        add_texture_changes(answer, texture_changes_json(before, {object}, nullptr), 0, "x");
+        CHECK(answer.empty());
+    }
+}
+
 TEST_CASE("a layer read back is accepted and changes nothing", "[McpTexture][orcamcp]")
 {
     TextureDisplacementOptions options;

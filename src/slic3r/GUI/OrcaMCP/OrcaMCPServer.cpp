@@ -6003,8 +6003,9 @@ void OrcaMCPServer::register_builtin_tools()
                 // (Plater::apply_cut_object_to_model): the object list lists the pieces and the plates hold them. The
                 // pieces used to be added to the model alone -- on no plate, missing from the object list -- and with
                 // no undo step, so undo after a cut undid the call before it too. The gizmo's undo step.
-                const std::string original_name = obj->name;
-                const size_t      objects_before = model.objects.size();
+                const std::string  original_name  = obj->name;
+                const size_t       objects_before = model.objects.size();
+                const TextureState texture_before = texture_state_of(*obj);
                 {
                     Plater::TakeSnapshot snapshot(plater, _u8L("Cut by Plane"));
                     const Vec3d            instance_offset = obj->instances[0]->get_offset();
@@ -6027,6 +6028,14 @@ void OrcaMCPServer::register_builtin_tools()
                     {"new_object_ids", new_object_ids},
                     {"active_warnings", get_active_warnings_json(plater)}
                 };
+
+                // The pieces are new meshes: the texture paint and layers of the original that they lack.
+                std::vector<const ModelObject*> pieces;
+                for (int id : new_object_ids)
+                    pieces.push_back(model.objects[size_t(id)]);
+                if (!pieces.empty())
+                    add_texture_changes(result, texture_changes_json(texture_before, pieces, nullptr), new_object_ids.front(),
+                                        "the object was cut into new meshes, and texture paint is not carried across");
 
                 // Add turntable preview if requested
                 add_turntable_preview_if_requested(result, include_preview);

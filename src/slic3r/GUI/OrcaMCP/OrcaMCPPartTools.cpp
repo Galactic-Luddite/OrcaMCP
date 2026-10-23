@@ -8,6 +8,7 @@
 #include "OrcaMCPMeshHealth.hpp"
 #include "OrcaMCPNextSteps.hpp"
 #include "OrcaMCPPartEdits.hpp"
+#include "OrcaMCPTextureDisplacement.hpp"
 #include "OrcaMCPPlateUtils.hpp"
 #include "OrcaMCPUiJob.hpp"
 
@@ -470,6 +471,22 @@ nlohmann::json drop_to_bed_on_main_thread(const nlohmann::json& params)
     return answer;
 }
 
+// ---- texture paint and layers the edit dropped ----
+
+// Adds the answer's texture_changes, comparing `before` with the objects `after_ids` name now. Call it after
+// guard.report, which replaces info_messages. `cause` says why.
+void report_texture_changes(nlohmann::json& answer, const Model& model, const TextureState& before, const std::vector<int>& after_ids,
+                            const std::string& cause)
+{
+    std::vector<const ModelObject*> after;
+    for (int id : after_ids)
+        if (id >= 0 && std::size_t(id) < model.objects.size())
+            after.push_back(model.objects[std::size_t(id)]);
+    if (after.empty())
+        return;
+    add_texture_changes(answer, texture_changes_json(before, after, nullptr), after_ids.front(), cause);
+}
+
 // ---- delete ----
 
 nlohmann::json delete_volume_on_main_thread(Plater& plater, int object_id, ModelObject& object, int volume_id)
@@ -480,6 +497,7 @@ nlohmann::json delete_volume_on_main_thread(Plater& plater, int object_id, Model
         return error_response(*refusal);
     if (const auto refusal = ui_job_refusal(plater, "delete_object"))
         return error_response(*refusal);
+    const TextureState             texture_before = texture_state_of(object);
     const nlohmann::json           deleted = volume_row_json(object, std::size_t(volume_id));
     const std::vector<std::string> moving  = settings_moving_to_object(object, volume_id);
     const std::size_t              before  = object.volumes.size();
@@ -509,7 +527,9 @@ nlohmann::json delete_volume_on_main_thread(Plater& plater, int object_id, Model
         answer["settings_moved_to_object"] = moving;
     rehome_and_report_placement(answer, object_id, /*moved=*/true);
     answer["active_warnings"] = get_active_warnings_json(&plater);
-    return with_closed_tool(guard.report(std::move(answer)), closed_tool);
+    answer = guard.report(std::move(answer));
+    report_texture_changes(answer, plater.model(), texture_before, {object_id}, "the part was deleted");
+    return with_closed_tool(std::move(answer), closed_tool);
 }
 
 nlohmann::json delete_instance_on_main_thread(Plater& plater, int object_id, ModelObject& object, int instance_id)
@@ -816,6 +836,7 @@ nlohmann::json split_object_on_main_thread(const nlohmann::json& params)
     if (to != "objects" && to != "parts")
         return error_response("to must be \"objects\" (one object per solid part, or per shell of a one-part object) or \"parts\" (one "
                               "part per shell of a volume)");
+    const TextureState         texture_before = texture_state_of(*object);
     const SplitTarget          target      = to == "objects" ? SplitTarget::objects : SplitTarget::parts;
     const std::optional<int>   volume_id   = read_volume_id(params, error);
     const std::optional<bool>  keep_height = error.empty() ? read_flag(params, "keep_height", error) : std::nullopt;
@@ -841,11 +862,17 @@ nlohmann::json split_object_on_main_thread(const nlohmann::json& params)
     } else {
         answer = split_to_parts(*plater, object_id, *object, *split_volume_of(*object, volume_id), guard);
     }
-    if (answer.value("status", "") == "success") {
+    const bool succeeded = answer.value("status", "") == "success";
+    if (succeeded) {
         add_keep_painting(answer, keep);
         answer["active_warnings"] = get_active_warnings_json(plater);
     }
-    return with_closed_tool(guard.report(std::move(answer)), closed_tool);
+    answer = guard.report(std::move(answer));
+    if (succeeded)
+        report_texture_changes(answer, plater->model(), texture_before,
+                               target == SplitTarget::objects ? answer.at("new_object_ids").get<std::vector<int>>() : std::vector<int>{object_id},
+                               "the object was split into new meshes, and texture paint is not carried across");
+    return with_closed_tool(std::move(answer), closed_tool);
 }
 
 // ---- add_volume ----
@@ -995,6 +1022,7 @@ nlohmann::json set_volume_type_on_main_thread(const nlohmann::json& params)
     const std::optional<ModelVolumeType> to        = volume_type_from_name(type_name);
     if (!to)
         return error_response("type must be one of: part, negative_volume, modifier, support_blocker, support_enforcer");
+    const TextureState texture_before = texture_state_of(*object);
     ModelVolume*      target        = object->volumes[std::size_t(*volume_id)];
     const std::string previous_type = volume_type_name(target->type());
     nlohmann::json    answer        = {{"status", "success"}, {"object_id", object_id}, {"previous_volume_id", *volume_id},
@@ -1027,7 +1055,9 @@ nlohmann::json set_volume_type_on_main_thread(const nlohmann::json& params)
     report_placement(answer, object_id);
     answer["active_warnings"] = get_active_warnings_json(plater);
     add_next_steps(answer, new_volume_next_steps(object_id, now, type_name, false));
-    return with_closed_tool(guard.report(std::move(answer)), closed_tool);
+    answer = guard.report(std::move(answer));
+    report_texture_changes(answer, plater->model(), texture_before, {object_id}, "the part's type changed");
+    return with_closed_tool(std::move(answer), closed_tool);
 }
 
 // ---- assemble_objects ----
@@ -1050,6 +1080,14 @@ nlohmann::json assemble_objects_on_main_thread(const nlohmann::json& params)
     if (const auto refusal = ui_job_refusal(*plater, "assemble_objects"))
         return error_response(*refusal);
 
+    // The assembly keeps every volume's id (copies), so the first object's stack is read and the others' are not.
+    TextureState texture_before;
+    for (int id : object_ids) {
+        TextureState one = texture_state_of(*model.objects[std::size_t(id)]);
+        texture_before.volume_count += one.volume_count;
+        for (TextureState::Part& part : one.parts)
+            texture_before.parts.push_back(std::move(part));
+    }
     nlohmann::json from = nlohmann::json::array();
     for (int id : object_ids) {
         const ModelObject& object = *model.objects[std::size_t(id)];
@@ -1085,7 +1123,9 @@ nlohmann::json assemble_objects_on_main_thread(const nlohmann::json& params)
     report_placement(answer, assembled);
     answer["active_warnings"] = get_active_warnings_json(plater);
     add_next_steps(answer, assembled_next_steps(assembled));
-    return with_closed_tool(guard.report(std::move(answer)), closed_tool);
+    answer = guard.report(std::move(answer));
+    report_texture_changes(answer, model, texture_before, {assembled}, "the objects were joined into one");
+    return with_closed_tool(std::move(answer), closed_tool);
 }
 
 // ---- merge_parts ----
@@ -1120,6 +1160,7 @@ nlohmann::json merge_parts_on_main_thread(const nlohmann::json& params)
                                   {"part_settings", std::vector<std::string>(part_settings.begin(), part_settings.end())},
                                   {"layer_ranges", int(object->layer_config_ranges.size())},
                                   {"brim_ears", int(object->brim_points.size())}};
+    const TextureState     texture_before = texture_state_of(*object);
     const int              instances = int(object->instances.size());
     const std::string      name      = object->name;
     const std::vector<int> siblings  = cut_siblings(model, object_id);
@@ -1173,7 +1214,9 @@ nlohmann::json merge_parts_on_main_thread(const nlohmann::json& params)
     report_placement(answer, merged_id);
     answer["active_warnings"] = warnings;
     add_next_steps(answer, mesh_next_steps(model, {merged_id}, model_mesh_health(model)));
-    return with_closed_tool(guard.report(std::move(answer)), closed_tool);
+    answer = guard.report(std::move(answer));
+    report_texture_changes(answer, model, texture_before, {merged_id}, "the parts were merged into one new mesh, and texture paint is not carried across");
+    return with_closed_tool(std::move(answer), closed_tool);
 }
 
 // ---- invalidate_cut_info ----

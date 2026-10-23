@@ -287,8 +287,10 @@ struct TextureState
         std::string      name;
         std::vector<int> painted_slots;
         int              layers = 0;     // the part's own stack
+        bool             stack_owner = false; // the object reads its layers from this part
     };
     std::vector<Part> parts;
+    std::size_t       volume_count = 0; // all the object's volumes, the parts above or not
 };
 TextureState texture_state_of(const ModelObject&);
 // {paint_lost: [{volume_id, name, layers: [slots]}], layers_lost: n, stacks_unused: [{volume_id, layers}]}
@@ -296,6 +298,20 @@ TextureState texture_state_of(const ModelObject&);
 // lost all its paint and layers. stacks_unused: a stack on a part that is not its object's owner (`owner_after`
 // for the first object). An empty object when nothing was lost.
 nlohmann::json texture_changes_json(const TextureState& before, const std::vector<const ModelObject*>& after, const ModelVolume* owner_after);
+
+// The same for an edit of several objects: appends {object_id, ...changes} to the answer's texture_changes list.
+void append_object_texture_changes(nlohmann::json& answer, const nlohmann::json& changes, int object_id, const std::string& cause);
+// For an edit that keeps every volume where it is but gives it a new id (repair, reload, replace): `state`'s parts
+// take the id of the volume now at their position, so texture_changes_json compares what each part holds, not ids.
+// Does nothing when the object's volume count changed.
+void rekey_texture_state(TextureState& state, const ModelObject& after);
+// The info_messages lines for a texture_changes answer, one per part that lost paint, one for lost layers, one per
+// unused stack. `cause` says why ("the mesh changed, and texture paint is not carried across").
+std::vector<std::string> texture_changes_messages(const nlohmann::json& changes, int object_id, const std::string& cause);
+// Does nothing for an empty `changes`; else adds texture_changes, appends the lines to info_messages (after the
+// guard's report, which would replace them) and the next steps of texture_changes_next_steps.
+void add_texture_changes(nlohmann::json& answer, const nlohmann::json& changes, int object_id, const std::string& cause);
+
 
 // ---- The unwrap request ----
 

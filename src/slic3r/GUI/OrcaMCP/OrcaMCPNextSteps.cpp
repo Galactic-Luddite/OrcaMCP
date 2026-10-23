@@ -27,6 +27,22 @@ void add_next_steps(nlohmann::json& response, const std::vector<NextStep>& steps
     response["next_steps"] = std::move(listed);
 }
 
+void append_next_steps(nlohmann::json& answer, const std::vector<NextStep>& steps)
+{
+    nlohmann::json fresh = nlohmann::json::object();
+    add_next_steps(fresh, steps);
+    if (!fresh.contains("next_steps"))
+        return;
+    nlohmann::json& listed = answer["next_steps"];
+    if (!listed.is_array())
+        listed = nlohmann::json::array();
+    for (const nlohmann::json& step : fresh.at("next_steps")) {
+        const bool have = std::any_of(listed.begin(), listed.end(), [&](const nlohmann::json& l) { return l.value("tool", "") == step.value("tool", ""); });
+        if (!have)
+            listed.push_back(step);
+    }
+}
+
 std::string listed_ids(const std::vector<int>& ids, size_t max_listed)
 {
     const size_t shown = std::min(ids.size(), max_listed);
@@ -299,6 +315,26 @@ std::vector<NextStep> bake_next_steps(int object_id, bool needs_bake)
     return {{"bake_texture_displacement",
              "object " + std::to_string(object_id) + "'s texture layers are painted but not baked, so the print does not show them yet",
              {{"object_id", object_id}}}};
+}
+
+std::vector<NextStep> texture_changes_next_steps(int object_id, const nlohmann::json& changes)
+{
+    const std::string     object = "object " + std::to_string(object_id);
+    std::vector<NextStep> steps;
+    if (changes.value("layers_lost", 0) > 0)
+        steps.push_back({"set_texture_displacement", object + " lost texture layers with the edit: add them again",
+                         {{"object_id", object_id}, {"action", "add"}}});
+    else if (changes.contains("paint_lost") && !changes.at("paint_lost").empty())
+        steps.push_back({"paint_object", object + " lost the paint of a texture layer: paint it again",
+                         {{"object_id", object_id},
+                          {"mode", "texture"},
+                          {"texture_layer", changes.at("paint_lost").front().at("layers").front()},
+                          {"selection", "all"},
+                          {"state", "painted"}}});
+    if (changes.contains("stacks_unused") && !changes.at("stacks_unused").empty())
+        steps.push_back({"get_texture_displacement", object + " holds texture layers on a part it does not read them from: get_texture_displacement lists them as ignored_stacks",
+                         {{"object_id", object_id}}});
+    return steps;
 }
 
 std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added, std::optional<int> plate_index)
