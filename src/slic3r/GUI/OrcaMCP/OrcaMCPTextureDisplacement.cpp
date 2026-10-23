@@ -214,6 +214,33 @@ json library_entry_json(const TextureLibraryEntry& entry, const std::string& id,
     return out;
 }
 
+json library_list_json(const std::vector<TextureLibraryEntry>& entries, const std::vector<std::string>& ids,
+                       const std::vector<std::optional<bool>>& colors, const std::optional<std::string>& source, std::string& error)
+{
+    error.clear();
+    if (source && *source != "builtin" && *source != "user" && *source != "pack") {
+        error = "source must be builtin, user or pack, not \"" + *source + "\"";
+        return json();
+    }
+    json counts   = {{"builtin", 0}, {"user", 0}, {"pack", 0}};
+    json textures = json::array();
+    for (size_t i = 0; i < entries.size() && i < ids.size(); ++i) {
+        const std::string name = texture_source_name(entries[i].source);
+        counts[name]           = counts[name].get<int>() + 1;
+        if (!source || *source == name)
+            textures.push_back(library_entry_json(entries[i], ids[i], i < colors.size() ? colors[i] : std::nullopt));
+    }
+    return {{"textures", textures}, {"counts", counts}, {"shown", textures.size()}};
+}
+
+std::optional<std::string> user_texture_delete_refusal(const TextureLibraryEntry& entry, const std::string& id)
+{
+    if (entry.source == TextureSource::User)
+        return std::nullopt;
+    return "Only imported textures can be deleted; built-in and pack textures are read-only (" + id + " is " +
+           (entry.source == TextureSource::Plugin ? "a pack texture" : "a built-in texture") + ")";
+}
+
 namespace {
 
 void fnv(std::uint64_t& h, const std::uint8_t* data, size_t n)
@@ -651,6 +678,14 @@ std::optional<LayerRequest> read_layer_request(const json& params, std::string& 
             }
             s.clear_projection_frame = true;
         } else {
+            if (s.view_direction || s.view_axes) {
+                error = "projection_frame carries its own view: leave view_direction and view_axes out";
+                return std::nullopt;
+            }
+            if (s.projection && *s.projection != TextureProjectionMethod::ViewProjected) {
+                error = "projection_frame projects from a view: projection must be view, or left out";
+                return std::nullopt;
+            }
             ProjectionFrameRequest frame;
             if (!read_frame(v, frame, error))
                 return std::nullopt;
@@ -667,6 +702,20 @@ std::optional<LayerRequest> read_layer_request(const json& params, std::string& 
         return std::nullopt;
     return req;
 }
+
+std::optional<int> layer_position(const std::vector<TextureDisplacementLayer>& stack, int slot)
+{
+    std::vector<int> slots;
+    for (const TextureDisplacementLayer& l : stack)
+        slots.push_back(l.slot);
+    std::sort(slots.begin(), slots.end());
+    const auto it = std::find(slots.begin(), slots.end(), slot);
+    if (it == slots.end())
+        return std::nullopt;
+    return int(it - slots.begin());
+}
+
+int move_insertion_index(int from, int to) { return to > from ? to + 1 : to; }
 
 std::optional<int> first_free_slot(const std::vector<TextureDisplacementLayer>& stack)
 {

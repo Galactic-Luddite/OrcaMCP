@@ -55,6 +55,7 @@ public:
         LayerRanges,
         FilamentsColour,
         Painting,
+        TextureDisplacement,
         Slicing,
         Visualization,
         Printers,
@@ -159,6 +160,7 @@ private:
     static void register_printer_tools();
     // Facet painting and brim ears (OrcaMCPPaintTools.cpp)
     static void register_paint_tools();
+    static void register_texture_tools();
     // Mesh errors and the object list's warning icon (OrcaMCPMeshTools.cpp)
     static void register_mesh_tools();
     // Parts and mesh edits: split, add volumes, change their type, assemble, merge (OrcaMCPPartTools.cpp)

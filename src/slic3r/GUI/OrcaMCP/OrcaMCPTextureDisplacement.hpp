@@ -67,6 +67,14 @@ std::optional<bool> png_has_color(const unsigned char* bytes, std::size_t size);
 std::optional<bool> png_color_from_file(const std::string& path);
 // {id, name, source, pack?, file, path, color (true / false / null: not read)}
 nlohmann::json library_entry_json(const TextureLibraryEntry&, const std::string& id, std::optional<bool> color);
+// get_texture_library's list: {textures [library_entry_json], counts {builtin, user, pack} (of the whole library,
+// whatever `source` filters), shown}. `colors` runs parallel to `entries`. `source` is builtin, user or pack, or
+// nullopt for all; anything else is refused through `error`.
+nlohmann::json library_list_json(const std::vector<TextureLibraryEntry>& entries, const std::vector<std::string>& ids,
+                                 const std::vector<std::optional<bool>>& colors, const std::optional<std::string>& source,
+                                 std::string& error);
+// Why delete_user_texture refuses `entry` (id `id`): only an imported texture can go.
+std::optional<std::string> user_texture_delete_refusal(const TextureLibraryEntry& entry, const std::string& id);
 
 // Identity of an image for the import's reuse: width, height, the height pixels, and the colour pixels when
 // some pixel is not grey. Two encodings of one picture (an RGB PNG of grey pixels and its grayscale PNG, a
@@ -159,6 +167,11 @@ std::optional<std::string> layer_edit_refusal(int object_id, const std::vector<T
                                               const TextureDisplacementLayer* before, const TextureDisplacementLayer& after,
                                               const StackFacts&);
 std::optional<int>         first_free_slot(const std::vector<TextureDisplacementLayer>&);
+// The layer in `slot`'s 0-based position in slot order (how the panel lists them), nullopt without one.
+std::optional<int> layer_position(const std::vector<TextureDisplacementLayer>&, int slot);
+// The insertion index move_texture_layer takes (it counts the moved layer's own place) that puts a layer now at
+// position `from` at position `to`.
+int move_insertion_index(int from, int to);
 // add_texture_layer's defaults: the slot, and ModelUV when the owner has a UV channel. No image.
 TextureDisplacementLayer new_layer(int slot, bool owner_has_uv);
 // The field mapping; true when something changed. The settings that need the model or the camera

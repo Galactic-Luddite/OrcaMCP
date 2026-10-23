@@ -819,6 +819,25 @@
       "summary": "Delete a user preset"
     },
     {
+      "category": "Texture displacement",
+      "description": "Delete a texture from this data folder's texture library: only one that was imported (source user), never a built-in or pack texture. Layers using it keep their image, which they hold themselves and a saved project stores; the answer lists them (still_used_by). A file delete: not an undo step.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "texture": {
+            "description": "The texture's id from get_texture_library, e.g. user/My bricks.png",
+            "type": "string"
+          }
+        },
+        "required": [
+          "texture"
+        ],
+        "type": "object"
+      },
+      "name": "delete_user_texture",
+      "summary": "Delete a texture you imported"
+    },
+    {
       "category": "Printers",
       "description": "Discover Flashforge printers on the local network via UDP broadcast.",
       "inputSchema": {
@@ -1446,6 +1465,28 @@
       },
       "name": "get_slicing_status",
       "summary": "Slicing state and progress, per plate"
+    },
+    {
+      "category": "Texture displacement",
+      "description": "The textures a texture displacement layer can use, as its picker lists them: built-in, imported into this data folder's texture library (an image given by file_path to a layer is imported there; an identical image already there is reused), and those of installed texture packs. Each has a texture id a layer takes (a name alone works when only one texture has it), and color: true when it has colours a layer can print with filaments, false for a grayscale height map, null when the file is not a PNG that is read directly. Reading it changes nothing.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "description": "List only the textures of one source (default: all). counts always covers the whole library",
+            "enum": [
+              "builtin",
+              "user",
+              "pack"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "get_texture_library",
+      "summary": "List the textures a layer can use"
     },
     {
       "category": "Filaments & colour",

@@ -86,8 +86,8 @@ const std::vector<OrcaMCPServer::ToolCategory>& OrcaMCPServer::all_tool_categori
     static const std::vector<ToolCategory> categories = {
         ToolCategory::Scene,     ToolCategory::Models,      ToolCategory::Transforms,      ToolCategory::Plates,
         ToolCategory::Config,    ToolCategory::PerObject,   ToolCategory::LayerRanges,     ToolCategory::FilamentsColour,
-        ToolCategory::Painting,  ToolCategory::Slicing,     ToolCategory::Visualization,   ToolCategory::Printers,
-        ToolCategory::Adaptive,  ToolCategory::History,     ToolCategory::Info,
+        ToolCategory::Painting,  ToolCategory::TextureDisplacement, ToolCategory::Slicing, ToolCategory::Visualization,
+        ToolCategory::Printers,  ToolCategory::Adaptive,    ToolCategory::History,         ToolCategory::Info,
     };
     return categories;
 }
@@ -104,6 +104,7 @@ const char* OrcaMCPServer::tool_category_name(ToolCategory category)
     case ToolCategory::LayerRanges:     return "Layer Ranges";
     case ToolCategory::FilamentsColour: return "Filaments & colour";
     case ToolCategory::Painting:        return "Painting";
+    case ToolCategory::TextureDisplacement: return "Texture displacement";
     case ToolCategory::Slicing:         return "Slicing";
     case ToolCategory::Visualization:   return "Visualization";
     case ToolCategory::Printers:        return "Printers";
@@ -6110,6 +6111,7 @@ void OrcaMCPServer::register_builtin_tools()
     register_filament_tools();
     register_printer_tools();
     register_paint_tools();
+    register_texture_tools();
     register_mesh_tools();
     register_part_tools();
     register_arrange_tools();

@@ -480,6 +480,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/OrcaMCP/OrcaMCPPaintSelect.hpp
     GUI/OrcaMCP/OrcaMCPPaintSelect.cpp
     GUI/OrcaMCP/OrcaMCPPaintTools.cpp
+    GUI/OrcaMCP/OrcaMCPTextureTools.cpp
     GUI/OrcaMCP/OrcaMCPMeshHealth.hpp
     GUI/OrcaMCP/OrcaMCPMeshHealth.cpp
     GUI/OrcaMCP/OrcaMCPMeshRepair.hpp

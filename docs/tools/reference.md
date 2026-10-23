@@ -38,6 +38,7 @@ into a call that reports success and changes nothing. See [Error Handling](#erro
 | **Layer Ranges** | `get_object_layer_ranges`, `set_object_layer_range`, `delete_object_layer_range` |
 | **Filaments & colour** | `get_filaments`, `add_filament_slot`, `delete_filament_slot`, `set_object_filament`, `set_mixed_filament`, `delete_mixed_filament`, `set_filament_color`, `get_flush_volumes`, `set_flush_volumes`, `auto_calc_flush_volumes`, `get_toolchanger_config`, `suggest_color_mix`, `get_color_palette` |
 | **Painting** | `paint_object`, `remap_paint`, `get_object_paint`, `clear_object_paint`, `set_brim_ears`, `pick_facet` |
+| **Texture displacement** | `get_texture_library`, `delete_user_texture` |
 | **Slicing** | `slice_all`, `cancel_slice`, `wait_for_slice` (bridge-only), `get_slicing_status`, `export_gcode`, `get_print_estimate`, `add_layer_gcode`, `delete_layer_gcode` |
 | **Visualization** | `render_plate_view`, `get_preview_base64`, `set_gcode_view_type`, `show_view` |
 | **Printers** | `get_printers`, `select_printer`, `add_physical_printer`, `discover_printers`, `send_to_printer`, `get_printer_status`, `printer_control`, `list_printer_files`, `print_printer_file`, `match_project_to_printer` |
@@ -3937,6 +3938,48 @@ origin), `query` (which of `point`/`ray`/`pixel` was used), `coordinate_frame` (
 
 The loop this closes: `render_plate_view` → read the image → `pick_facet {pixel, camera}` →
 `paint_object {selection: "connected", seed: {point}}`.
+
+---
+
+## Texture Displacement Tools
+
+A texture displacement **layer** is one image (a height map, or a colour image whose luminance is the height) with
+the settings that place it on a surface: depth, tile size, rotation, projection, blend. An object holds up to eight,
+combined in **slot** order (slot 0..7, assigned once; the lowest is the base layer, always Add). The stack belongs
+to the object: it is kept on its first model part. Where a layer applies is its **mask**: paint, one mask per layer
+per model part (`paint_object` with `mode: texture`). **Nothing reaches the print until the layers are baked into
+the mesh**, so a layer and its paint are a plan until then. A texture is chosen by its **id** from
+`get_texture_library`.
+
+### get_texture_library
+The textures a layer can use, as the panel's picker lists them: built-in, imported into this data folder's
+`textures/displacement` folder, and those of installed texture packs. Changes nothing.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `source` | string | No | `builtin`, `user` or `pack`: list only that source (`counts` always covers the whole library) |
+
+**Response:** `textures` (each `id`, `name`, `source`, `pack` for a pack texture, `file`, `path`, `color`), `counts`
+(`builtin`, `user`, `pack`), `shown`, `user_folder`.
+
+An id is `builtin/Bark.png`, `user/My bricks.png`, `pack/<pack name>/<file name>`; two textures with one id are told
+apart with ` #2`. A name alone works where only one texture has it. `color` is `true` for a texture with colours a
+layer can print with filaments (6 of the 44 built-in textures), `false` for grayscale, `null` when the file is not a
+PNG that is read directly (a jpg in the user folder).
+
+### delete_user_texture
+Delete a texture from the user's library. Only a texture that was imported (`source: user`) can go; a built-in or
+pack texture is refused. Layers using it keep their image (they hold it themselves and a saved project stores it);
+the answer lists them in `still_used_by`. A file delete, not an undo step.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `texture` | string | Yes | The texture's id from `get_texture_library` |
+
+**Response:** `deleted` (`texture`, `name`, `path`), `still_used_by` (`[{object_id, layer}]`), `note` when it is
+not empty.
 
 ---
 

@@ -908,3 +908,63 @@ TEST_CASE("a layer and the stack's options are told", "[McpTexture][orcamcp]")
         CHECK_FALSE(unwrap_json(unwrap, layer, false).contains("vertices"));
     }
 }
+
+TEST_CASE("the library list names each texture by id and counts every source", "[McpTexture][orcamcp]")
+{
+    const std::vector<TextureLibraryEntry> lib = {entry("Bark", "/r/Bark.png", TextureSource::Shipped), entry("Mine", "/u/Mine.png", TextureSource::User),
+                                                  entry("Mine 2", "/u/Mine 2.png", TextureSource::User),
+                                                  entry("Grid", "/p/Grid.png", TextureSource::Plugin, "Pack A")};
+    const std::vector<std::string>      ids    = texture_ids(lib);
+    const std::vector<std::optional<bool>> colors = {false, true, std::nullopt, false};
+    std::string                         error;
+
+    const json all = library_list_json(lib, ids, colors, std::nullopt, error);
+    CHECK(error.empty());
+    CHECK(all["textures"].size() == 4);
+    CHECK(all["textures"][0]["id"] == "builtin/Bark.png");
+    CHECK(all["textures"][1]["color"] == true);
+    CHECK(all["textures"][2]["color"].is_null());
+    CHECK(all["textures"][3]["pack"] == "Pack A");
+    CHECK(all["counts"] == json{{"builtin", 1}, {"user", 2}, {"pack", 1}});
+
+    const json users = library_list_json(lib, ids, colors, std::string("user"), error);
+    CHECK(users["textures"].size() == 2);
+    CHECK(users["shown"] == 2);
+    CHECK(users["counts"] == all["counts"]);
+
+    library_list_json(lib, ids, colors, std::string("shipped"), error);
+    CHECK(error.find("builtin, user or pack") != std::string::npos);
+}
+
+TEST_CASE("only an imported texture can be deleted", "[McpTexture][orcamcp]")
+{
+    CHECK_FALSE(user_texture_delete_refusal(entry("Mine", "/u/Mine.png", TextureSource::User), "user/Mine.png").has_value());
+    const auto builtin = user_texture_delete_refusal(entry("Bark", "/r/Bark.png", TextureSource::Shipped), "builtin/Bark.png");
+    REQUIRE(builtin.has_value());
+    CHECK(builtin->find("read-only") != std::string::npos);
+    CHECK(builtin->find("builtin/Bark.png") != std::string::npos);
+    CHECK(user_texture_delete_refusal(entry("Grid", "/p/Grid.png", TextureSource::Plugin, "A"), "pack/A/Grid.png").has_value());
+}
+
+TEST_CASE("a layer's position in slot order and the insertion index that moves it there", "[McpTexture][orcamcp]")
+{
+    const std::vector<TextureDisplacementLayer> stack = {layer_in(5), layer_in(1), layer_in(3)};
+    CHECK(layer_position(stack, 1) == 0);
+    CHECK(layer_position(stack, 3) == 1);
+    CHECK(layer_position(stack, 5) == 2);
+    CHECK_FALSE(layer_position(stack, 0).has_value());
+    // Down the list the insertion index counts the layer's own place; up it does not.
+    CHECK(move_insertion_index(0, 2) == 3);
+    CHECK(move_insertion_index(2, 0) == 0);
+    CHECK(move_insertion_index(1, 1) == 1);
+}
+
+TEST_CASE("a projection frame carries its own view", "[McpTexture][orcamcp]")
+{
+    const json frame = {{"view", "top"}, {"width_mm", 20}, {"height_mm", 20}};
+    CHECK(refusal_of({{"action", "edit"}, {"layer", 0}, {"projection_frame", frame}, {"view_direction", "front"}}).find("own view") != std::string::npos);
+    CHECK(refusal_of({{"action", "edit"}, {"layer", 0}, {"projection_frame", frame}, {"projection", "triplanar"}}).find("projection must be view") !=
+          std::string::npos);
+    std::string error;
+    CHECK(read({{"action", "edit"}, {"layer", 0}, {"projection_frame", frame}, {"projection", "view"}}, error).has_value());
+}

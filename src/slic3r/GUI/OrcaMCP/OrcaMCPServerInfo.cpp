@@ -203,6 +203,15 @@ json tool_examples()
             {"tip", "ALWAYS use save_to_file=true (PNG paths). Prefer fit: {object_index} over a higher resolution."},
             {"when_to_use", "Before/after transforms, to verify object state, to analyze geometry; layer_view first_layer for brim, support feet and adhesion questions; layer_view {layer} or {z} to see any sliced layer's supports, interfaces and which filament prints what, with the areas (objects_at_height overhang) that say whether support covers an overhang"}
         }},
+        {"get_texture_library", {
+            {"all", R"({})"},
+            {"imported_only", R"({"source": "user"})"},
+            {"when_to_use", "Before adding a texture displacement layer: its texture ids, and which textures carry colours"}
+        }},
+        {"delete_user_texture", {
+            {"by_id", R"({"texture": "user/My bricks.png"})"},
+            {"note", "Only an imported texture; layers using it keep their image (still_used_by lists them)"}
+        }},
         {"apply_config", {
             {"single_setting", R"({"settings": [{"type": "print", "key": "layer_height", "value": "0.2"}]})"},
             {"multiple_settings", R"({"settings": [{"type": "print", "key": "layer_height", "value": "0.15"}, {"type": "print", "key": "wall_loops", "value": "3"}, {"type": "print", "key": "sparse_infill_density", "value": "20%"}]})"},
