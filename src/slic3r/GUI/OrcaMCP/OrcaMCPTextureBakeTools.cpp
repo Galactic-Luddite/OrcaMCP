@@ -160,6 +160,18 @@ struct BakeRun
     bool                               classic() const { return !used.pipeline_v2; }
 };
 
+// Whether the resolution this bake used (the stack's, or the automatic one of its coarsest part) carries its texture.
+ResolutionAdvice bake_resolution_advice(const BakeRun& run)
+{
+    std::vector<AdvicePart> parts;
+    for (const TextureDisplacementBakeVolume& volume : run.work.volumes)
+        parts.push_back({&volume.base_mesh, volume.volume_to_world});
+    std::vector<Slic3r::TextureDisplacementLayer> layers;
+    if (!run.work.volumes.empty())
+        layers = run.work.volumes.front().layers;
+    return resolution_advice(layers, parts, run.used.v2_refine_mm);
+}
+
 // What the plan made, for the apply.
 struct BakePlanned
 {
@@ -403,6 +415,16 @@ nlohmann::json finish_bake(BakeRun& run, BakePlanned& planned, double wait_s, bo
                                                              [&](int slot) { return slot >= outcome.filaments_before; }));
     answer["filaments_added"] = outcome.filaments_after - outcome.filaments_before;
     answer["budget_limited"]  = bake_budget_json(outcome.refined, outcome.budget);
+    const ResolutionAdvice advice = bake_resolution_advice(run);
+    nlohmann::json         warnings = nlohmann::json::array();
+    if (const std::string text = bake_budget_warning(outcome.refined, outcome.budget); !text.empty())
+        warnings.push_back(text);
+    if (const std::string text = resolution_alias_warning(advice); !text.empty()) {
+        answer["recommended_resolution_mm"] = recommended_resolution_json(advice);
+        warnings.push_back(text);
+    }
+    if (!warnings.empty())
+        answer["bake_warnings"] = warnings;
     if (slots_added > 0)
         answer["undo_warning"] = bake_undo_warning(slots_added);
     const bool needs_bake = needs_bake_fast(object, Slic3r::GUI::texture_stack_owner(object));
@@ -412,6 +434,7 @@ nlohmann::json finish_bake(BakeRun& run, BakePlanned& planned, double wait_s, bo
     answer["active_warnings"] = get_active_warnings_json(plater);
     add_next_steps(answer, baked_texture_next_steps(run.object_id, needs_bake, slots_added, answer.contains("plate_index") && answer["plate_index"].is_number_integer() ?
                                                                                                 std::optional<int>(answer["plate_index"].get<int>()) : std::nullopt));
+    append_next_steps(answer, budget_limited_next_steps(run.object_id, outcome.refined, outcome.budget, advice.used_mm));
     add_turntable_preview_if_requested(answer, run.request.include_preview);
     return finish(std::move(answer));
 }

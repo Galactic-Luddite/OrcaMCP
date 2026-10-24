@@ -3107,6 +3107,9 @@ the requested plate; an object that plate does not hold is an error naming the p
 Before v2.5.0.6 it framed instance 0 whichever plate that was on. `low` looks at the first layers from
 the front, slightly downward — brims, support feet, bottom edges. `frame: "plate_local"` lets an
 explicit camera be given relative to the plate's front-left corner.
+An explicit camera's `camera_position` and `target` set the viewing direction only: the image is fitted to the plate's
+drawn objects (`frame_camera` / `fit_zoom_to_box`, 20% margin), so a close-up of part of an object is not possible today;
+`fit: {object_index}` frames one whole object.
 
 **Examples:**
 ```json
@@ -4046,7 +4049,7 @@ nothing.
 `{texture (the id, null for an image only the project holds), name, source, path}`, `color_capable`, every setting
 `set_texture_displacement` takes, `view_axes` for a view projection, `unwrap` for an unwrap projection, `paint` per model
 part `{volume_id, name, painted, stale, painted_facets, coverage_percent}`, `painted`, `inactive_settings`, `warnings`),
-`free_layers` (an object holds 8), `stack_options` (the bake's settings, as `bake_texture_displacement` takes them),
+`free_layers` (an object holds 8), `stack_options` (the bake's settings, as `bake_texture_displacement` takes them), `recommended_resolution_mm` (the resolution the texture's detail needs, null with no texture; outside `stack_options`, which is accepted back as arguments) and `resolution_warning` when the resolution in force (the stack's, or the automatic one) would alias it,
 `needs_bake` (some layer is painted on some part, so a bake would change the mesh), `stack_volume_id` (the model
 part that owns the layers), `ignored_stacks` (layers kept on other parts, which nothing applies), `parts` (the model
 parts whose paint `paint_object` addresses), and `next_steps` (paint the first layer that is painted nowhere).
@@ -4220,7 +4223,11 @@ The options the bake used are stored into the stack, as the panel's controls sto
 kept), `mixed_filaments` (`slot` 1-based, `created`), `filaments_added`, `budget_limited` (`needed`, `kept` triangles
 when the budget cut detail, else null), `needs_bake` (paint is left), `undo_warning`, the object's placement,
 `closed_toolbar_tool`, `active_warnings`, the preview, and `next_steps` (`slice_all`; `get_filaments` after new
-mixed slots), `inactive_settings`.
+mixed slots; when `budget_limited`, `prepare_texture_mesh` (adaptive subdivide to the resolution used) and
+`bake_texture_displacement` again with a larger `budget_k`), `inactive_settings`, `bake_warnings` (when
+`budget_limited`: kept/needed triangles, thinned detail and bands where long input triangles were split; and, when the
+resolution used is more than twice what the texture's detail needs (finest texel size times the texels one edge may span,
+at least 0.05 mm), that the texture will alias, with `recommended_resolution_mm`).
 
 ```json
 {"object_id": 0}

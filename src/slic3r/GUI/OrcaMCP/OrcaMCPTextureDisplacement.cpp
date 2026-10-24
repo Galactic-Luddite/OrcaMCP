@@ -2716,6 +2716,58 @@ json bake_budget_json(std::size_t needed, std::size_t kept)
     return {{"needed", needed}, {"kept", kept}};
 }
 
+std::string bake_budget_warning(std::size_t needed, std::size_t kept)
+{
+    if (needed == 0)
+        return {};
+    return "The triangle budget cut the detail: " + std::to_string(kept) + " triangles kept of " + std::to_string(needed) +
+           " needed. Detail is thinned, and the relief can come out noisy or moire, with a band of lower vertex density where a long thin "
+           "input triangle was split (the library undersamples and decimates long triangles). Refine the long triangles first "
+           "(prepare_texture_mesh) or bake again with a larger budget_k.";
+}
+
+ResolutionAdvice resolution_advice_from(float texel_mm, float pixels_per_edge, float used_mm)
+{
+    ResolutionAdvice out;
+    out.used_mm = used_mm;
+    if (texel_mm <= 0.f)
+        return out;
+    out.recommended_mm = std::max(0.05f, texel_mm * std::max(1.f, pixels_per_edge));
+    out.recommended_mm = std::ceil(out.recommended_mm * 100.f) / 100.f;
+    out.aliasing       = used_mm > out.recommended_mm * resolution_alias_factor;
+    return out;
+}
+
+ResolutionAdvice resolution_advice(const std::vector<TextureDisplacementLayer>& layers, const std::vector<AdvicePart>& parts, float chosen_mm)
+{
+    float texel = 0.f, per_edge = 0.f, automatic = 0.f;
+    for (const AdvicePart& part : parts) {
+        if (part.mesh == nullptr)
+            continue;
+        const Slic3r::V2Resolution rec = Slic3r::recommend_v2_resolution(*part.mesh, layers, part.to_world);
+        automatic = std::max(automatic, rec.edge_mm);
+        if (rec.texel_mm > 0.f && (texel <= 0.f || rec.texel_mm < texel)) {
+            texel    = rec.texel_mm;
+            per_edge = rec.pixels_per_edge;
+        }
+    }
+    return resolution_advice_from(texel, per_edge, chosen_mm > 0.f ? chosen_mm : automatic);
+}
+
+json recommended_resolution_json(const ResolutionAdvice& a)
+{
+    return a.recommended_mm > 0.f ? json(a.recommended_mm) : json(nullptr);
+}
+
+std::string resolution_alias_warning(const ResolutionAdvice& a)
+{
+    if (!a.aliasing)
+        return {};
+    auto text = [](float v) { std::string t = std::to_string(v); t.erase(t.find_last_not_of('0') + 1); if (!t.empty() && t.back() == '.') t.pop_back(); return t; };
+    return "The texture will alias at the resolution used (" + text(a.used_mm) + " mm): its detail needs about " + text(a.recommended_mm) +
+           " mm. Set resolution_mm to " + text(a.recommended_mm) + " (more triangles: raise budget_k with it) or accept a coarser relief.";
+}
+
 json bake_mixed_filaments_json(const std::vector<int>& slots, int filaments_before)
 {
     json out = json::array();

@@ -4,6 +4,7 @@
 #include "libslic3r/Model.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <optional>
 
 namespace Slic3r { namespace GUI { namespace OrcaMCP {
@@ -359,6 +360,24 @@ std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, i
     for (NextStep& step : bake_next_steps(object_id, needs_bake))
         steps.push_back(std::move(step));
     return steps;
+}
+
+std::vector<NextStep> budget_limited_next_steps(int object_id, std::size_t needed, std::size_t kept, double resolution_mm)
+{
+    if (needed == 0 || needed <= kept)
+        return {};
+    const std::string object = "object " + std::to_string(object_id);
+    const int         budget = int(std::min<std::size_t>(4000, std::max<std::size_t>(10, (2 * kept + 999) / 1000)));
+    nlohmann::json    prepare = {{"object_id", object_id}, {"operation", "subdivide"}};
+    if (resolution_mm >= 0.02)
+        prepare["max_edge_mm"] = std::round(resolution_mm * 100.) / 100.;
+    return {{"prepare_texture_mesh",
+             object + "'s bake kept " + std::to_string(kept) + " of " + std::to_string(needed) +
+                 " triangles: an adaptive subdivide first splits the long input triangles the budget would decimate, then bake again",
+             prepare},
+            {"bake_texture_displacement",
+             "or bake " + object + " again with a larger budget_k, to keep more of the " + std::to_string(needed) + " triangles the detail needs",
+             {{"object_id", object_id}, {"budget_k", budget}}}};
 }
 
 namespace {

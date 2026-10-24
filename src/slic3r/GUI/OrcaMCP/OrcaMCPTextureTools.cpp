@@ -732,6 +732,7 @@ struct PendingStack
     std::vector<MaskInput>                                     inputs;
     nlohmann::json                                             ignored = nlohmann::json::array();
     nlohmann::json                                             parts   = nlohmann::json::array();
+    indexed_triangle_set                             mesh;        // the stack owner's, for the recommended resolution
 };
 
 // Every model part with its eight masks, and the stacks on parts that do not own it.
@@ -777,6 +778,7 @@ nlohmann::json capture_stack(const nlohmann::json& params, std::optional<int> on
     out.options      = owner->texture_displacement_options;
     out.to_world     = Slic3r::texture_displacement_volume_to_world(*owner);
     out.owner_has_uv = owner->has_texture_uv();
+    out.mesh         = owner->mesh().its;
     const LibraryCopy library = library_copy();
     for (const Slic3r::TextureDisplacementLayer& layer : owner->texture_displacement_layers) {
         StackLayerFacts facts;
@@ -812,6 +814,14 @@ nlohmann::json get_texture_displacement(const nlohmann::json& params)
     StackAnswer stack  = texture_stack_json(pending.layers, reports, only_volume, pending.owner_has_uv, pending.options, pending.to_world);
 
     nlohmann::json answer = std::move(stack.json);
+    std::vector<Slic3r::TextureDisplacementLayer> stack_layers;
+    for (const StackLayerFacts& facts : pending.layers)
+        stack_layers.push_back(facts.layer);
+    const ResolutionAdvice advice = resolution_advice(stack_layers, {{&pending.mesh, pending.to_world}},
+                                                      pending.options.v2_refine_mm);
+    answer["recommended_resolution_mm"] = recommended_resolution_json(advice);
+    if (const std::string text = resolution_alias_warning(advice); !text.empty())
+        answer["resolution_warning"] = text;
     answer["status"]          = "success";
     answer["object_id"]       = object_id;
     answer["stack_volume_id"] = pending.owner_volume_id;

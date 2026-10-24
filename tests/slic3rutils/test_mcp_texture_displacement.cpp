@@ -2064,6 +2064,11 @@ TEST_CASE("the bake's answers: parts, budget and mixed slots", "[McpTexture][orc
 
     CHECK(bake_budget_json(0, 0).is_null());
     CHECK(bake_budget_json(900000, 750000)["kept"] == 750000);
+    CHECK(bake_budget_warning(0, 0).empty());
+    const std::string budget_text = bake_budget_warning(560640, 200768);
+    CHECK(budget_text.find("200768") != std::string::npos);
+    CHECK(budget_text.find("560640") != std::string::npos);
+    CHECK(budget_text.find("prepare_texture_mesh") != std::string::npos);
 
     const json mixed = bake_mixed_filaments_json({1, 4}, 4);
     REQUIRE(mixed.size() == 2);
@@ -2097,4 +2102,27 @@ TEST_CASE("a smooth is refused above the facet cap, and unused bake settings are
     REQUIRE(budget.has_value());
     CHECK(bake_inactive_settings(*budget, false).contains("classic_budget_k"));
     CHECK(bake_inactive_settings(*budget, true).empty());
+}
+
+TEST_CASE("a bake's resolution is judged against the texture's detail", "[McpTexture][orcamcp]")
+{
+    // 6 mm tile of 512 px, a hard-edged image (1 texel per edge): the texture needs 0.05 mm (the floor).
+    const ResolutionAdvice fine = resolution_advice_from(6.f / 512.f, 1.f, 0.7f);
+    CHECK(fine.recommended_mm == Catch::Approx(0.05f));
+    CHECK(fine.aliasing);
+    CHECK(resolution_alias_warning(fine).find("0.7") != std::string::npos);
+    CHECK(resolution_alias_warning(fine).find("0.05") != std::string::npos);
+    CHECK(recommended_resolution_json(fine) == json(fine.recommended_mm));
+
+    // A smooth image (4 texels per edge) of 12.5 mm over 256 px: 0.2 mm; 0.3 mm is within the factor of two.
+    const ResolutionAdvice smooth = resolution_advice_from(12.5f / 256.f, 4.f, 0.3f);
+    CHECK(smooth.recommended_mm == Catch::Approx(0.2f));
+    CHECK_FALSE(smooth.aliasing);
+    CHECK(resolution_alias_warning(smooth).empty());
+
+    // No texture: nothing to size by, nothing to warn about.
+    const ResolutionAdvice none = resolution_advice_from(0.f, 0.f, 5.f);
+    CHECK(none.recommended_mm == 0.f);
+    CHECK_FALSE(none.aliasing);
+    CHECK(recommended_resolution_json(none).is_null());
 }

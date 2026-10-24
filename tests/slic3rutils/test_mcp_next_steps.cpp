@@ -403,6 +403,22 @@ TEST_CASE("A bake points at slicing, at the mixed slots it added and at paint it
         CHECK(unusable(step) == std::nullopt);
 }
 
+TEST_CASE("A budget-limited bake points at refining the long triangles, or a larger budget", "[McpNextSteps][orcamcp]")
+{
+    CHECK(budget_limited_next_steps(1, 0, 0, 0.7).empty());
+    CHECK(budget_limited_next_steps(1, 100, 100, 0.7).empty());
+    const std::vector<NextStep> steps = budget_limited_next_steps(1, 560640, 200768, 0.7);
+    REQUIRE(steps.size() == 2);
+    CHECK(steps[0].tool == "prepare_texture_mesh");
+    CHECK(steps[0].arguments["operation"] == "subdivide");
+    CHECK(steps[0].arguments["max_edge_mm"] == 0.7);
+    CHECK(steps[1].tool == "bake_texture_displacement");
+    CHECK(steps[1].arguments["budget_k"] == 402);
+    CHECK(budget_limited_next_steps(1, 9000000, 3900000, 0.7)[1].arguments["budget_k"] == 4000);
+    for (const NextStep& step : steps)
+        CHECK(unusable(step) == std::nullopt);
+}
+
 TEST_CASE("A split to parts points at get_object_components, to find a fragment among the pieces", "[McpNextSteps][orcamcp]")
 {
     const std::vector<NextStep> steps = split_parts_next_steps(4, 1, {1, 2, 3});
@@ -598,6 +614,8 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
         steps.push_back(std::move(step));
     for (NextStep& step : baked_texture_next_steps(0, true, 1, std::nullopt))
         steps.push_back(std::move(step));
+    for (NextStep& step : budget_limited_next_steps(0, 2000, 1000, 0.5))
+        steps.push_back(std::move(step));
     for (const json& changes : {json{{"layers_lost", 2}}, json{{"paint_lost", {{{"volume_id", 0}, {"name", "a"}, {"layers", {1}}}}}}, json{{"stacks_unused", {{{"volume_id", 1}, {"layers", 2}}}}}})
         for (NextStep& step : texture_changes_next_steps(0, changes))
             steps.push_back(std::move(step));
@@ -632,7 +650,7 @@ TEST_CASE("Every next step names a real tool, with arguments its schema accepts"
             steps.push_back(std::move(step));
     for (NextStep& step : repair_timed_out_next_steps({4, 7}))
         steps.push_back(std::move(step));
-    REQUIRE(steps.size() == 43);
+    REQUIRE(steps.size() == 45);
 
     const mcp_tool_references::ToolNames names(OrcaMCPServer::registered_tools());
     json                                 response = json::object();

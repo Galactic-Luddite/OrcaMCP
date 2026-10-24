@@ -157,6 +157,12 @@ std::vector<NextStep> texture_changes_next_steps(const std::vector<int>& objects
 std::vector<NextStep> texture_changes_next_steps(int object_id, const nlohmann::json& changes);
 std::vector<NextStep> baked_texture_next_steps(int object_id, bool needs_bake, int slots_added, std::optional<int> plate_index);
 
+// What a budget-limited bake leads to (`needed` / `kept` triangles, `resolution_mm` the bake used): prepare_texture_mesh, an
+// adaptive subdivide to that edge, which splits the long input triangles the budget would otherwise decimate; and
+// bake_texture_displacement again with a larger budget_k (twice the budget kept, in thousands, at most 4000). None when
+// the budget did not cap the detail (`needed` <= `kept`).
+std::vector<NextStep> budget_limited_next_steps(int object_id, std::size_t needed, std::size_t kept, double resolution_mm);
+
 // What printer_control's answer to a set_* action (filtration, fans, print speed, Z offset) leads to:
 // get_printer_status, whose printer.controls reads back what the printer now reports -- it takes a moment
 // to apply a command, as the Device page shows by waiting for the next status.

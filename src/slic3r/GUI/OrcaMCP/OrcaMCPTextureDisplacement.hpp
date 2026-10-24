@@ -549,6 +549,33 @@ struct BakePartReport
 nlohmann::json bake_part_json(const BakePartReport&);
 // {needed, kept} of the panel's budget notification (triangles), null when the budget did not cap the detail.
 nlohmann::json bake_budget_json(std::size_t needed, std::size_t kept);
+// The warning a budget-limited bake carries: kept / needed triangles, what that costs (detail thinned, bands where long input
+// triangles were split) and what to do. Empty when the budget did not cap the detail (needed 0).
+std::string bake_budget_warning(std::size_t needed, std::size_t kept);
+
+// Whether a bake's resolution can carry the texture's detail. The texture-driven resolution is the finest layer's texel size times
+// the texels one edge may span for its sharpness (`recommend_v2_resolution`'s texel_mm and pixels_per_edge, floored at the
+// library's 0.05 mm); the resolution used is coarser than that by more than `resolution_alias_factor` when the texture aliases.
+struct ResolutionAdvice
+{
+    float recommended_mm = 0.f; // 0: no texture to size by
+    float used_mm        = 0.f;
+    bool  aliasing       = false;
+};
+constexpr float resolution_alias_factor = 2.f;
+ResolutionAdvice resolution_advice_from(float texel_mm, float pixels_per_edge, float used_mm);
+// One part as the advice reads it: its mesh and where it stands in world mm.
+struct AdvicePart
+{
+    const indexed_triangle_set* mesh = nullptr;
+    Transform3d                 to_world = Transform3d::Identity();
+};
+// The advice for a stack on `parts`; `chosen_mm` is the stack's resolution_mm (0 or less: automatic, the coarsest part's).
+ResolutionAdvice resolution_advice(const std::vector<TextureDisplacementLayer>& layers, const std::vector<AdvicePart>& parts, float chosen_mm);
+// {recommended_resolution_mm}, null when there is no texture to size by.
+nlohmann::json recommended_resolution_json(const ResolutionAdvice&);
+// The warning that the texture will alias at the resolution used; empty when it does not.
+std::string resolution_alias_warning(const ResolutionAdvice&);
 // [{slot (1-based), created}] for the 0-based `slots` the bake named; created when the slot did not exist before
 // (`filaments_before` slots then).
 nlohmann::json bake_mixed_filaments_json(const std::vector<int>& slots, int filaments_before);
