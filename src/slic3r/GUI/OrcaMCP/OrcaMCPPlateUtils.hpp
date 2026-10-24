@@ -122,6 +122,8 @@ std::vector<ExclusionRegion> plate_exclusion_regions(PartPlate& plate);
 
 class OrcaMCPPlateUtils {
 public:
+    static nlohmann::json GetPlateAnalysis(const nlohmann::json& params);
+    static nlohmann::json GetLayerGeometry(const nlohmann::json& params);
     static nlohmann::json RenderPlateView(const nlohmann::json& params);
     // `mesh_health` is model_mesh_health(model), read once for the call: every object entry's
     // mesh_warning, and its features when asked for, come from it.

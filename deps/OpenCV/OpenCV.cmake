@@ -28,6 +28,7 @@ orcaslicer_add_cmake_project(OpenCV
     PATCH_COMMAND git apply ${OpenCV_DIRECTORY_FLAG} --verbose --ignore-space-change --whitespace=fix ${CMAKE_CURRENT_LIST_DIR}/0001-vs.patch  ${CMAKE_CURRENT_LIST_DIR}/0002-clang19-macos.patch
     DEPENDS ${JPEG_PKG}
     CMAKE_ARGS
+       ${DEP_TARGET_HEADER_SDK}
     -DBUILD_SHARED_LIBS=0
        -DBUILD_PERE_TESTS=OFF
        -DBUILD_TESTS=OFF
